@@ -22,7 +22,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import pairwise_distances
 from xgboost import XGBClassifier
-from utils import DenseRagged, PermopRagged
+from expes.utils import DenseRagged, PermopRagged
 
 model_name = sys.argv[1]
 dataset_PV_params = sys.argv[2]

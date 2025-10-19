@@ -11,7 +11,7 @@ from tqdm import tqdm
 import os
 import sys
 from sklearn.model_selection import KFold
-from utils import DenseRagged, PermopRagged
+from expes.utils import DenseRagged, PermopRagged
 
 dataset_name = sys.argv[1]
 model_name   = sys.argv[2]
