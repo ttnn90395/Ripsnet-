@@ -1,47 +1,33 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import tensorflow as tf
 
-class DenseRagged(nn.Module):
-    def __init__(self, units, use_bias=True, activation='linear'):
-        super(DenseRagged, self).__init__()
+class DenseRagged(tf.keras.layers.Layer):
+    def __init__(self, units, use_bias=True, activation='linear', **kwargs):
+        super(DenseRagged, self).__init__(**kwargs)
+        self._supports_ragged_inputs = True 
         self.units = units
         self.use_bias = use_bias
-        self.activation = activation
-        self.kernel = None
-        self.bias = None
-
-    def build(self, input_dim):
-        self.kernel = nn.Parameter(torch.randn(input_dim, self.units) * 0.01)
+        self.activation = tf.keras.activations.get(activation)
+    def build(self, input_shape):
+        last_dim = input_shape[-1]
+        self.kernel = self.add_weight('kernel', shape=[last_dim, self.units], trainable=True)
         if self.use_bias:
-            self.bias = nn.Parameter(torch.zeros(self.units))
+            self.bias = self.add_weight('bias', shape=[self.units,], trainable=True)
         else:
             self.bias = None
-
-    def forward(self, inputs):
-        if self.kernel is None:
-            self.build(inputs.shape[-1])
-
-        outputs = torch.matmul(inputs, self.kernel)
+        super(DenseRagged, self).build(input_shape)
+    def call(self, inputs):
+        outputs = tf.ragged.map_flat_values(tf.matmul, inputs, self.kernel)
         if self.use_bias:
-            outputs = outputs + self.bias
-
-        if self.activation == 'relu':
-            outputs = F.relu(outputs)
-        elif self.activation == 'sigmoid':
-            outputs = torch.sigmoid(outputs)
-        elif self.activation == 'tanh':
-            outputs = torch.tanh(outputs)
-        elif self.activation == 'linear' or self.activation is None:
-            pass
-        else:
-            raise ValueError(f"Unsupported activation: {self.activation}")
+            outputs = tf.ragged.map_flat_values(tf.nn.bias_add, outputs, self.bias)
+        outputs = tf.ragged.map_flat_values(self.activation, outputs)
         return outputs
 
-
-class PermopRagged(nn.Module):
-    def __init__(self):
-        super(PermopRagged, self).__init__()
-
-    def forward(self, inputs):
-        return torch.sum(inputs, dim=1)
+class PermopRagged(tf.keras.layers.Layer):
+    def __init__(self, **kwargs):
+        super(PermopRagged, self).__init__(**kwargs)
+        self._supports_ragged_inputs = True 
+    def build(self, input_shape):
+        super(PermopRagged, self).build(input_shape)
+    def call(self, inputs):
+        out = tf.math.reduce_sum(inputs, axis=1)
+        return out
