@@ -1,15 +1,7 @@
-import os
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers
-from matplotlib import pyplot as plt
-import dill as pck
-from sklearn.preprocessing import LabelEncoder
-
-from helper_fctns.get_names import get_dir_data, get_suffix_dataset
-
-tf.random.set_seed(1234)
 
 """
 ### Build the pointnet model
@@ -18,17 +10,20 @@ Convolution / Dense -> Batch Normalization -> ReLU Activation.
 """
 
 
-def conv_bn(x, filters):
-    x = layers.Conv1D(filters, kernel_size=1, padding="valid")(x)
-    x = layers.BatchNormalization(momentum=0.0)(x)
-    return layers.Activation("relu")(x)
+def conv_bn(in_channels, filters):
+    return nn.Sequential(
+        nn.Conv1d(in_channels, filters, 1),
+        nn.BatchNorm1d(filters, momentum=0.0),
+        nn.ReLU()
+    )
 
 
-def dense_bn(x, filters):
-    x = layers.Dense(filters)(x)
-    x = layers.BatchNormalization(momentum=0.0)(x)
-    return layers.Activation("relu")(x)
-
+def dense_bn(in_features, filters):
+    return nn.Sequential(
+        nn.Linear(in_features, filters),
+        nn.BatchNorm1d(filters, momentum=0.0),
+        nn.ReLU()
+    )
 
 """
 PointNet consists of two core components. The primary MLP network, and the transformer
@@ -40,45 +35,54 @@ close to an orthogonal matrix (i.e. ||X*X^T - I|| = 0).
 """
 
 
-class OrthogonalRegularizer(keras.regularizers.Regularizer):
+class OrthogonalRegularizer(nn.Module):
     def __init__(self, num_features, l2reg=0.001):
+        super().__init__()
         self.num_features = num_features
         self.l2reg = l2reg
-        self.eye = tf.eye(num_features)
+        self.eye = torch.eye(num_features)
 
-    def __call__(self, x):
-        x = tf.reshape(x, (-1, self.num_features, self.num_features))
-        xxt = tf.tensordot(x, x, axes=(2, 2))
-        xxt = tf.reshape(xxt, (-1, self.num_features, self.num_features))
-        return tf.reduce_sum(self.l2reg * tf.square(xxt - self.eye))
-
+    def forward(self, x):
+        x = x.view(-1, self.num_features, self.num_features)
+        xxt = torch.bmm(x, x.transpose(2, 1))
+        diff = xxt - self.eye.to(x.device)
+        return self.l2reg * torch.sum(diff ** 2)
 
 """
  We can then define a general function to build T-net layers.
 """
 
-
 def tnet(inputs, num_features):
-    # Initalise bias as the indentity matrix
-    bias = keras.initializers.Constant(np.eye(num_features).flatten())
+    batch_size = inputs.size(0)
+    bias = torch.from_numpy(np.eye(num_features).flatten()).float().to(inputs.device)
     reg = OrthogonalRegularizer(num_features)
 
-    x = conv_bn(inputs, 32)
-    x = conv_bn(x, 64)
-    x = conv_bn(x, 512)
-    x = layers.GlobalMaxPooling1D()(x)
-    x = dense_bn(x, 256)
-    x = dense_bn(x, 128)
-    x = layers.Dense(
-        num_features * num_features,
-        kernel_initializer="zeros",
-        bias_initializer=bias,
-        activity_regularizer=reg,
-    )(x)
-    feat_T = layers.Reshape((num_features, num_features))(x)
-    # Apply affine transformation to input features
-    return layers.Dot(axes=(2, 1))([inputs, feat_T])
+    conv1 = conv_bn(inputs.shape[1], 32)
+    conv2 = conv_bn(32, 64)
+    conv3 = conv_bn(64, 512)
 
+    x = conv1(inputs)
+    x = conv2(x)
+    x = conv3(x)
+    x = F.adaptive_max_pool1d(x, 1).view(batch_size, -1)
+
+    fc1 = dense_bn(512, 256)
+    fc2 = dense_bn(256, 128)
+    fc3 = nn.Linear(128, num_features * num_features)
+
+    # initialize bias as identity
+    nn.init.zeros_(fc3.weight)
+    with torch.no_grad():
+        fc3.bias.copy_(bias)
+
+    x = fc1(x)
+    x = fc2(x)
+    x = fc3(x)
+    feat_T = x.view(batch_size, num_features, num_features)
+
+    # apply affine transformation
+    transformed = torch.bmm(inputs.transpose(1, 2), feat_T).transpose(1, 2)
+    return transformed, feat_T
 
 """
 The main network can be then implemented in the same manner where the t-net mini models
@@ -87,23 +91,43 @@ published in the original paper but with half the number of weights at each laye
 are using the smaller 10 class ModelNet dataset.
 """
 
+
 def create_pointnet(NUM_CLASSES=10, NUM_POINTS=1024, BATCH_SIZE=32):
-    inputs = keras.Input(shape=(NUM_POINTS, 3))
+    class PointNet(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.NUM_CLASSES = NUM_CLASSES
+            self.NUM_POINTS = NUM_POINTS
+            self.BATCH_SIZE = BATCH_SIZE
 
-    x = tnet(inputs, 3)
-    x = conv_bn(x, 32)
-    x = conv_bn(x, 32)
-    x = tnet(x, 32)
-    x = conv_bn(x, 32)
-    x = conv_bn(x, 64)
-    x = conv_bn(x, 512)
-    x = layers.GlobalMaxPooling1D()(x)
-    x = dense_bn(x, 256)
-    x = layers.Dropout(0.3)(x)
-    x = dense_bn(x, 128)
-    x = layers.Dropout(0.3)(x)
+            self.conv1 = conv_bn(3, 32)
+            self.conv2 = conv_bn(32, 32)
+            self.conv3 = conv_bn(32, 32)
+            self.conv4 = conv_bn(32, 64)
+            self.conv5 = conv_bn(64, 512)
 
-    outputs = layers.Dense(NUM_CLASSES, activation="softmax")(x)
+            self.fc1 = dense_bn(512, 256)
+            self.fc2 = dense_bn(256, 128)
+            self.dropout = nn.Dropout(0.3)
+            self.fc3 = nn.Linear(128, NUM_CLASSES)
 
-    model = keras.Model(inputs=inputs, outputs=outputs, name="pointnet")
-    return model
+        def forward(self, inputs):
+            # inputs: (batch, num_points, 3)
+            x = inputs.transpose(2, 1)
+
+            x, trans_input = tnet(x, 3)
+            x = self.conv1(x)
+            x = self.conv2(x)
+            x, trans_feat = tnet(x, 32)
+            x = self.conv3(x)
+            x = self.conv4(x)
+            x = self.conv5(x)
+            x = F.adaptive_max_pool1d(x, 1).squeeze(-1)
+            x = self.fc1(x)
+            x = self.dropout(x)
+            x = self.fc2(x)
+            x = self.dropout(x)
+            outputs = F.softmax(self.fc3(x), dim=1)
+            return outputs, trans_input, trans_feat
+
+    return PointNet()
