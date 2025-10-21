@@ -173,16 +173,6 @@ parser.add_argument(
 )
 
 def create_model(num_classes=3, shape=2500, regularization=0, dropout=0):
-    inputs = tf.keras.Input(shape=shape)
-    x = tf.keras.layers.Dense(100, activation='relu', kernel_regularizer=regularizers.l2(regularization))(inputs)
-    x = tf.keras.layers.Dense(50, activation='relu', kernel_regularizer=regularizers.l2(regularization))(x)
-    outputs = tf.keras.layers.Dense(num_classes, kernel_regularizer=regularizers.l2(regularization))(x)
-    model_classif = tf.keras.Model(inputs=inputs, outputs=outputs)
-    model_classif.compile(optimizer='adam', loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True), metrics=['accuracy'])
-    return model_classif
-
-
-def create_model(num_classes=3, shape=2500, regularization=0, dropout=0):
     class ModelClassif(nn.Module):
         def __init__(self):
             super(ModelClassif, self).__init__()
