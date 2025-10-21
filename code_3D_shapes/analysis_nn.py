@@ -6,6 +6,9 @@
 import matplotlib.pyplot as plt
 import dill as pck
 import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import tensorflow as tf
 from tensorflow.keras import regularizers, layers
 import pandas as pd
@@ -179,6 +182,34 @@ def create_model(num_classes=3, shape=2500, regularization=0, dropout=0):
     return model_classif
 
 
+def create_model(num_classes=3, shape=2500, regularization=0, dropout=0):
+    class ModelClassif(nn.Module):
+        def __init__(self):
+            super(ModelClassif, self).__init__()
+            self.regularization = regularization
+            self.dropout = dropout
+
+            self.fc1 = nn.Linear(shape, 100)
+            self.fc2 = nn.Linear(100, 50)
+            self.fc3 = nn.Linear(50, num_classes)
+
+            self.relu = nn.ReLU()
+            self.dropout_layer = nn.Dropout(p=dropout)
+
+        def forward(self, x):
+            x = self.relu(self.fc1(x))
+            if self.dropout > 0:
+                x = self.dropout_layer(x)
+
+            x = self.relu(self.fc2(x))
+            if self.dropout > 0:
+                x = self.dropout_layer(x)
+
+            x = self.fc3(x)  # no activation → logits (from_logits=True)
+            return x
+
+    model_classif = ModelClassif()
+    return model_classif
 
 def DTW(a, b):
     an = a.size
