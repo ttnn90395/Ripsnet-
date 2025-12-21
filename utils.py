@@ -68,3 +68,4 @@ class RaggedPersistenceModel(nn.Module):
         x = self.perm(x)
         x = self.fc(x)
         return x
+    
