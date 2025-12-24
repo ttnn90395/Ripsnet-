@@ -131,8 +131,29 @@ def create_3_circle_noisy(N_points, N_noise):
     X[np.random.choice(np.arange(len(X)), size=N_noise, replace=False, p=None)] = np.array(noise)
     return X
 
+def augment_isometries(pc, n, rng, trans_frac=0.08):
+    bbox = pc.max(axis=0) - pc.min(axis=0)
+    t_max = trans_frac * np.linalg.norm(bbox)  # translation scale relative to cloud size
+    augmented = []
+    for _ in range(n):
+        theta = rng.uniform(0, 2 * np.pi)
+        R = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+        t = rng.uniform(-t_max, t_max, size=2)
+        augmented.append((pc @ R.T) + t)
+    return augmented
 
-def create_multiple_circles(N_sets_train, N_points, noisy=False, N_noise=0):
+def data_augmentation_by_isometries(data_train, label_train, n_augment_per_sample, seed=42):
+    rng = np.random.default_rng(seed)
+    aug_data, aug_labels = [], []
+    for pc, lbl in zip(data_train, label_train):
+        aug_data.append(pc)
+        aug_labels.append(lbl)
+        for pc_aug in augment_isometries(pc, n_augment_per_sample, rng):
+            aug_data.append(pc_aug)
+            aug_labels.append(lbl)
+    return aug_data, aug_labels
+
+def create_multiple_circles(N_sets_train, N_points, noisy=False, N_noise=0, n_augment_per_sample = 0):
 
     data_train, PD_train = [[] for _ in range(N_sets_train)], []
     label_train = np.zeros((N_sets_train,))
@@ -161,7 +182,8 @@ def create_multiple_circles(N_sets_train, N_points, noisy=False, N_noise=0):
     shuffler = np.random.permutation(len(data_train))
     label_train = label_train[shuffler]
     data_train = [data_train[p] for p in shuffler]
-
+    if (n_augment_per_sample > 0):
+        data_train,label_train = data_augmentation_by_isometries(data_train, label_train, n_augment_per_sample, seed=42)
     return data_train, label_train
 
 
