@@ -1,5 +1,3 @@
-## Utility functions.
-
 import os
 
 def get_suffix_dataset(representation='PI',
