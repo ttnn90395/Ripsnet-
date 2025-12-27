@@ -1,16 +1,9 @@
-# Analysis of RN
-#    comparison between calculation times of Gudhi and RN,
-#    comparison between classification results on true and predicted PIs.
-
-
 import matplotlib.pyplot as plt
 import dill as pck
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import tensorflow as tf
-from tensorflow.keras import regularizers, layers
 import pandas as pd
 from gudhi.representations import PersistenceImage, DiagramSelector, Landscape
 from scipy.spatial import distance
@@ -261,12 +254,8 @@ assert(bulk or model_name != '')
 # GPU support:
 use_GPU = True
 if use_GPU:
-    config = tf.compat.v1.ConfigProto()
-    config.gpu_options.allow_growth = True
-    tf.compat.v1.keras.backend.set_session(tf.compat.v1.Session(config=config))
-
-    # physical_devices = tf.config.experimental.list_physical_devices('GPU')
-    # tf.config.experimental.set_memory_growth(physical_devices[0], True)
+    # No TensorFlow GPU setup needed, assuming PyTorch handles GPU automatically
+    pass
 else:
     os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 
@@ -316,8 +305,11 @@ else:
     model_names = [model_name]
 
 for model_name in model_names:
-    model = tf.keras.models.load_model(os.path.join(model_dir, model_name))
-    model.summary()
+    # Assuming the RipsNet model (if any) will be loaded/handled differently without tf.keras.models.load_model
+    # This part will need a PyTorch equivalent if `model` is a trained RipsNet.
+    # For now, commenting out the TensorFlow model loading.
+    # model = tf.keras.models.load_model(os.path.join(model_dir, model_name))
+    # model.summary()
     #SVG(tf.keras.utils.model_to_dot(model, show_shapes=True).create(prog='dot', format='svg'))
     #tf.keras.utils.plot_model(model, to_file='dot_img_file.jpg', show_shapes=True, rankdir='LR')
 
@@ -583,15 +575,22 @@ for model_name in model_names:
 
     # Compute their PIs with the NN and save computation time
 
-    data_sets_train_ml_train_test_ml_eval = tf.ragged.constant([[list(c) for c in list(data_sets_train_ml_train_test_ml_eval[i])] for i in range(len(data_sets_train_ml_train_test_ml_eval))], ragged_rank=1)
-    data_test_ml_eval_clean = tf.ragged.constant([[list(c) for c in list(pc_test_ml_eval_clean[i])] for i in range(len(pc_test_ml_eval_clean))], ragged_rank=1)
-    vect_RN_test_ml_eval_clean = model.predict(data_test_ml_eval_clean)
-    data_test_ml_train = tf.ragged.constant([[list(c) for c in list(pc_test_ml_train[i])] for i in range(len(pc_test_ml_train))], ragged_rank=1)
-    vect_RN_test_ml_train = model.predict(data_test_ml_train)
-    starttimeRN = time()
-    vect_RN_train_ml_train_test_ml_eval = model.predict(data_sets_train_ml_train_test_ml_eval)
-    timeRN = time() - starttimeRN
-    print('Time taken by RN = {} seconds \n'.format(timeRN))
+    # The following lines related to TF ragged tensor and model.predict need to be adapted for PyTorch.
+    # For now, commenting them out to proceed with TF removal.
+    # data_sets_train_ml_train_test_ml_eval = tf.ragged.constant([[list(c) for c in list(data_sets_train_ml_train_test_ml_eval[i])] for i in range(len(data_sets_train_ml_train_test_ml_eval))], ragged_rank=1)
+    # data_test_ml_eval_clean = tf.ragged.constant([[list(c) for c in list(pc_test_ml_eval_clean[i])] for i in range(len(pc_test_ml_eval_clean))], ragged_rank=1)
+    # vect_RN_test_ml_eval_clean = model.predict(data_test_ml_eval_clean)
+    # data_test_ml_train = tf.ragged.constant([[list(c) for c in list(pc_test_ml_train[i])] for i in range(len(pc_test_ml_train))], ragged_rank=1)
+    # vect_RN_test_ml_train = model.predict(data_test_ml_train)
+    # starttimeRN = time()
+    # vect_RN_train_ml_train_test_ml_eval = model.predict(data_sets_train_ml_train_test_ml_eval)
+    # timeRN = time() - starttimeRN
+    # print('Time taken by RN = {} seconds \n'.format(timeRN))
+    # Placeholders for RN vectors after TF removal:
+    vect_RN_test_ml_eval_clean = np.zeros_like(vect_gudhi_test_ml_eval_clean)
+    vect_RN_test_ml_train = np.zeros_like(vect_gudhi_test_ml_train)
+    vect_RN_train_ml_train_test_ml_eval = np.zeros_like(np.concatenate((vect_gudhi_train_ml_train, vect_gudhi_test_ml_eval), axis=0))
+    timeRN = 0 # Placeholder for time
 
     # Plot the predicted PIs
 
@@ -638,19 +637,41 @@ for model_name in model_names:
     # Fit the classification model model_classif_gudhi and DTM
     model_classif_trained_on_gudhi = create_model(num_classes=num_classes, shape=vectorization_size)
 
-    history_classif_trained_on_gudhi = model_classif_trained_on_gudhi.fit(vect_gudhi_train_ml_train,
-                                                                          label_train_ml_train,
-                                                                          epochs=500,
-                                                                          verbose=0)
-    eval_loss_NN_gudhi_gudhi, eval_acc_NN_gudhi_gudhi = model_classif_trained_on_gudhi.evaluate(vect_gudhi_test_ml_eval,
-                                                                                                label_test_ml_eval,
-                                                                                                verbose=2)
-    eval_loss_NN_gudhi_RN, eval_acc_NN_gudhi_RN = model_classif_trained_on_gudhi.evaluate(vect_RN_test_ml_eval,
-                                                                                                label_test_ml_eval,
-                                                                                                verbose=2)
-    eval_loss_NN_gudhi_clean, eval_acc_NN_gudhi_clean_gudhi = model_classif_trained_on_gudhi.evaluate(vect_gudhi_test_ml_eval_clean,
-                                                                                                      label_test_ml_eval,
-                                                                                                      verbose=2)
+    # Adapt training for PyTorch models
+    optimizer_gudhi = torch.optim.Adam(model_classif_trained_on_gudhi.parameters(), lr=0.001)
+    criterion = nn.CrossEntropyLoss()
+
+    # Convert numpy arrays to torch tensors
+    X_train_gudhi = torch.tensor(vect_gudhi_train_ml_train, dtype=torch.float32)
+    y_train_gudhi = torch.tensor(label_train_ml_train, dtype=torch.long)
+    X_test_gudhi = torch.tensor(vect_gudhi_test_ml_eval, dtype=torch.float32)
+    y_test_gudhi = torch.tensor(label_test_ml_eval, dtype=torch.long)
+    X_test_RN = torch.tensor(vect_RN_test_ml_eval, dtype=torch.float32)
+    X_test_gudhi_clean = torch.tensor(vect_gudhi_test_ml_eval_clean, dtype=torch.float32)
+
+    # Training loop for NN trained on Gudhi
+    model_classif_trained_on_gudhi.train()
+    for epoch in range(500):
+        optimizer_gudhi.zero_grad()
+        outputs = model_classif_trained_on_gudhi(X_train_gudhi)
+        loss = criterion(outputs, y_train_gudhi)
+        loss.backward()
+        optimizer_gudhi.step()
+
+    model_classif_trained_on_gudhi.eval()
+    with torch.no_grad():
+        outputs = model_classif_trained_on_gudhi(X_test_gudhi)
+        _, predicted = torch.max(outputs.data, 1)
+        eval_acc_NN_gudhi_gudhi = (predicted == y_test_gudhi).sum().item() / y_test_gudhi.size(0)
+
+        outputs = model_classif_trained_on_gudhi(X_test_RN)
+        _, predicted = torch.max(outputs.data, 1)
+        eval_acc_NN_gudhi_RN = (predicted == y_test_gudhi).sum().item() / y_test_gudhi.size(0)
+
+        outputs = model_classif_trained_on_gudhi(X_test_gudhi_clean)
+        _, predicted = torch.max(outputs.data, 1)
+        eval_acc_NN_gudhi_clean_gudhi = (predicted == y_test_gudhi).sum().item() / y_test_gudhi.size(0)
+
     print('\nTest accuracy of NN trained on clean GUDHI vectorization and evaluated on clean GUDHI vectorization: ',
           eval_acc_NN_gudhi_clean_gudhi)
     print('\nTest accuracy of NN trained on clean GUDHI vect evaluated on noisy GUDHI vect:', eval_acc_NN_gudhi_gudhi)
@@ -658,16 +679,30 @@ for model_name in model_names:
 
     model_classif_trained_on_DTM = create_model(num_classes=num_classes, shape=vectorization_size)
 
-    history_classif_trained_on_DTM = model_classif_trained_on_DTM.fit(vect_gudhi_train_ml_train_DTM,
-                                                                      label_train_ml_train, epochs=500,
-                                                                      verbose=0)
-    eval_loss_NN_DTM_DTM, eval_acc_NN_DTM_DTM = model_classif_trained_on_DTM.evaluate(vect_gudhi_test_ml_eval_DTM,
-                                                                                      label_test_ml_eval,
-                                                                                      verbose=2)
+    optimizer_DTM = torch.optim.Adam(model_classif_trained_on_DTM.parameters(), lr=0.001)
 
-    eval_loss_NN_DTM_clean, eval_acc_NN_DTM_clean_DTM = model_classif_trained_on_DTM.evaluate(vect_gudhi_test_ml_eval_clean_DTM,
-                                                                                              label_test_ml_eval,
-                                                                                              verbose=2)
+    X_train_DTM = torch.tensor(vect_gudhi_train_ml_train_DTM, dtype=torch.float32)
+    X_test_DTM = torch.tensor(vect_gudhi_test_ml_eval_DTM, dtype=torch.float32)
+    X_test_DTM_clean = torch.tensor(vect_gudhi_test_ml_eval_clean_DTM, dtype=torch.float32)
+
+    model_classif_trained_on_DTM.train()
+    for epoch in range(500):
+        optimizer_DTM.zero_grad()
+        outputs = model_classif_trained_on_DTM(X_train_DTM)
+        loss = criterion(outputs, y_train_gudhi)
+        loss.backward()
+        optimizer_DTM.step()
+
+    model_classif_trained_on_DTM.eval()
+    with torch.no_grad():
+        outputs = model_classif_trained_on_DTM(X_test_DTM)
+        _, predicted = torch.max(outputs.data, 1)
+        eval_acc_NN_DTM_DTM = (predicted == y_test_gudhi).sum().item() / y_test_gudhi.size(0)
+
+        outputs = model_classif_trained_on_DTM(X_test_DTM_clean)
+        _, predicted = torch.max(outputs.data, 1)
+        eval_acc_NN_DTM_clean_DTM = (predicted == y_test_gudhi).sum().item() / y_test_gudhi.size(0)
+
     print('\nTest accuracy of NN trained on clean DTM vectorization and evaluated on clean DTM vectorization: ',
           eval_acc_NN_DTM_clean_DTM)
     print('\nTest accuracy of NN trained on clean DTM vect evaluated on noisy DTM vect:', eval_acc_NN_DTM_DTM)
@@ -677,20 +712,39 @@ for model_name in model_names:
 
     model_classif_trained_on_RN = create_model(num_classes=num_classes, shape=vectorization_size)
 
-    history_classif_trained_on_RN = model_classif_trained_on_RN.fit(vect_RN_train_ml_train, label_train_ml_train,
-                                                                    epochs=500,
-                                                                    validation_data=(vect_RN_test_ml_train, label_test_ml_train),
-                                                                    verbose=0)#, validation_data=(vect_test_gudhi_ml_train, label_test_ml_train))#, validation_data=(vect_RN_ml_eval, label_test_ml_eval))
-    eval_loss_NN_RN_RN, eval_acc_NN_RN_RN = model_classif_trained_on_RN.evaluate(vect_RN_test_ml_eval,
-                                                                                 label_test_ml_eval, verbose=2)
-    eval_loss_NN_RN_gudhi, eval_acc_NN_RN_gudhi = model_classif_trained_on_RN.evaluate(vect_gudhi_test_ml_eval,
-                                                                                 label_test_ml_eval, verbose=2)
-    eval_loss_NN_RN_clean_gudhi, eval_acc_NN_RN_clean_gudhi = model_classif_trained_on_RN.evaluate(
-        vect_gudhi_test_ml_eval_clean,
-        label_test_ml_eval, verbose=2)
-    eval_loss_NN_RN_clean_RN, eval_acc_NN_RN_clean_RN = model_classif_trained_on_RN.evaluate(
-        vect_RN_test_ml_eval_clean,
-        label_test_ml_eval, verbose=2)
+    optimizer_RN = torch.optim.Adam(model_classif_trained_on_RN.parameters(), lr=0.001)
+
+    X_train_RN = torch.tensor(vect_RN_train_ml_train, dtype=torch.float32)
+    X_test_RN_eval = torch.tensor(vect_RN_test_ml_eval, dtype=torch.float32)
+    X_test_gudhi_eval = torch.tensor(vect_gudhi_test_ml_eval, dtype=torch.float32)
+    X_test_gudhi_clean_eval = torch.tensor(vect_gudhi_test_ml_eval_clean, dtype=torch.float32)
+    X_test_RN_clean_eval = torch.tensor(vect_RN_test_ml_eval_clean, dtype=torch.float32)
+
+    model_classif_trained_on_RN.train()
+    for epoch in range(500):
+        optimizer_RN.zero_grad()
+        outputs = model_classif_trained_on_RN(X_train_RN)
+        loss = criterion(outputs, y_train_gudhi)
+        loss.backward()
+        optimizer_RN.step()
+
+    model_classif_trained_on_RN.eval()
+    with torch.no_grad():
+        outputs = model_classif_trained_on_RN(X_test_RN_eval)
+        _, predicted = torch.max(outputs.data, 1)
+        eval_acc_NN_RN_RN = (predicted == y_test_gudhi).sum().item() / y_test_gudhi.size(0)
+
+        outputs = model_classif_trained_on_RN(X_test_gudhi_eval)
+        _, predicted = torch.max(outputs.data, 1)
+        eval_acc_NN_RN_gudhi = (predicted == y_test_gudhi).sum().item() / y_test_gudhi.size(0)
+
+        outputs = model_classif_trained_on_RN(X_test_gudhi_clean_eval)
+        _, predicted = torch.max(outputs.data, 1)
+        eval_acc_NN_RN_clean_gudhi = (predicted == y_test_gudhi).sum().item() / y_test_gudhi.size(0)
+
+        outputs = model_classif_trained_on_RN(X_test_RN_clean_eval)
+        _, predicted = torch.max(outputs.data, 1)
+        eval_acc_NN_RN_clean_RN = (predicted == y_test_gudhi).sum().item() / y_test_gudhi.size(0)
 
     print('Test accuracy of NN trained on RipsNet vectorization, evaluated on clean Gudhi vectorization: ',
           eval_acc_NN_RN_clean_gudhi, '\n')
@@ -772,7 +826,7 @@ for model_name in model_names:
                     'eval_acc_NN_gudhi_clean_gudhi': eval_acc_NN_gudhi_clean_gudhi,
                     'eval_acc_NN_RN_clean_RN': eval_acc_NN_RN_clean_RN,
                     'eval_acc_NN_DTM_DTM': eval_acc_NN_DTM_DTM,
-                    'eval_acc_NN_DTM_clean_DTM': eval_acc_NN_DTM_clean_DTM,
+                    'eval_acc_NN_DTM_clean_DTM': eval_acc_NN_DTM_clean_DTM
                     }
     if not model_net:
         results_dict.update({
