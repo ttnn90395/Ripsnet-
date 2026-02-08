@@ -3,11 +3,11 @@
 #    2. p-values of Kolmogorov-Smirnov tests on each PI pixel,
 #    3. comparison between classification results on true and predicted PIs.
 
-
 import matplotlib.pyplot as plt
 import dill as pck
 import numpy as np
-import tensorflow as tf
+import torch
+import torch.nn as nn
 from IPython.display import SVG
 import gudhi as gd
 from gudhi.representations import PersistenceImage, Landscape, DiagramSelector
@@ -32,25 +32,41 @@ normalize = int(sys.argv[5])
 PV_type = sys.argv[6]
 mode = sys.argv[7]
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 def create_model_large():
-    inputs = tf.keras.Input(shape=(None, 2), dtype ="float32", ragged=True)
-    x = DenseRagged(units=50, use_bias=True, activation='relu')(inputs)
-    x = DenseRagged(units=30, use_bias=True, activation='relu')(x)
-    x = DenseRagged(units=10,  use_bias=True, activation='relu')(x)
-    x = PermopRagged()(x)
-    outputs = tf.keras.layers.Dense(3)(x)
-    model_classif = tf.keras.Model(inputs=inputs, outputs=outputs)
-    model_classif.compile(optimizer='adam', loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True), metrics=['accuracy'])
-    return model_classif
+    class LargeModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.dense1 = DenseRagged(units=50, use_bias=True, activation='relu')
+            self.dense2 = DenseRagged(units=30, use_bias=True, activation='relu')
+            self.dense3 = DenseRagged(units=10, use_bias=True, activation='relu')
+            self.permop = PermopRagged()
+            self.fc = nn.Linear(10, 3)
+        
+        def forward(self, x):
+            x = self.dense1(x)
+            x = self.dense2(x)
+            x = self.dense3(x)
+            x = self.permop(x)
+            x = self.fc(x)
+            return x
+    return LargeModel()
 
 def create_model_small():
-    inputs = tf.keras.Input(shape=(None, 2), dtype ="float32", ragged=True)
-    x = DenseRagged(units=50,  use_bias=True, activation='relu')(inputs)
-    x = PermopRagged()(x)
-    outputs = tf.keras.layers.Dense(3)(x)
-    model_classif = tf.keras.Model(inputs=inputs, outputs=outputs)
-    model_classif.compile(optimizer='adam', loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True), metrics=['accuracy'])
-    return model_classif
+    class SmallModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.dense1 = DenseRagged(units=50, use_bias=True, activation='relu')
+            self.permop = PermopRagged()
+            self.fc = nn.Linear(50, 3)
+        
+        def forward(self, x):
+            x = self.dense1(x)
+            x = self.permop(x)
+            x = self.fc(x)
+            return x
+    return SmallModel()
 
 #custom metric
 def DTW(a, b):   
@@ -68,11 +84,9 @@ def DTW(a, b):
 print(sys.argv)
 
 # Load the NN
-
-model_PV = tf.keras.models.load_model('models/' + model_name)
-model_PV.summary()
-#SVG(tf.keras.utils.model_to_dot(model_PI, show_shapes=True).create(prog='dot', format='svg'))
-#tf.keras.utils.plot_model(model_PI, to_file='dot_img_file.pdf', show_shapes=True, rankdir='LR')
+model_PV = torch.load('models/' + model_name + '.pt', map_location=device)
+model_PV.to(device)
+model_PV.eval()
 
 PV_setting = pck.load(open('datasets/' + dataset_PV_params + '.pkl', 'rb'))
 PV_params, homdim = PV_setting['PV_params'], PV_setting['hdims']
@@ -225,9 +239,14 @@ for hidx in range(len(homdim)):
 
 # Compute their PIs with the NN and save computation time
 
-data_sets = tf.ragged.constant([[list(c) for c in list(data_sets[i])] for i in range(len(data_sets))], ragged_rank=1)
+data_sets_torch = [torch.FloatTensor(data_sets[i]).to(device) for i in range(len(data_sets))]
 starttimeNN = time()
-PV_NN = model_PV.predict(data_sets)
+with torch.no_grad():
+    PV_NN = []
+    for data_item in data_sets_torch:
+        output = model_PV(data_item.unsqueeze(0))
+        PV_NN.append(output.cpu().numpy())
+PV_NN = np.vstack(PV_NN)
 timeNN = time() - starttimeNN
 
 print('Time taken by Gudhi = {:.2f} seconds'.format(timeG))
@@ -293,24 +312,118 @@ print('Train--Test accuracy Gudhi-noise (XGB) of data set ' + str(dataset_test_n
 
 if dataset_PV_params[:5] == 'synth':
 
-    callback = tf.keras.callbacks.EarlyStopping(monitor='val_loss', min_delta=1e-4, patience=200, verbose=0, mode='auto', baseline=None, restore_best_weights=False)
+    data_classif_train_torch = [torch.FloatTensor(data_classif_train[i]).to(device) for i in range(len(data_classif_train))]
+    data_classif_test_torch = [torch.FloatTensor(data_classif_test[i]).to(device) for i in range(len(data_classif_test))]
+    label_train_tensor = torch.LongTensor(label_classif_train).to(device)
+    label_test_tensor = torch.LongTensor(label_classif_test).to(device)
 
-    data_classif_train = tf.ragged.constant([[list(c) for c in list(data_classif_train[i])] for i in range(len(data_classif_train))], ragged_rank=1)
-    data_classif_test = tf.ragged.constant([[list(c) for c in list(data_classif_test[i])] for i in range(len(data_classif_test))], ragged_rank=1)
+    criterion = nn.CrossEntropyLoss()
 
     XB11 = time()
-    model_baseline = create_model_large()
-    history = model_baseline.fit(data_classif_train, label_classif_train, validation_data=(data_classif_test, label_classif_test), verbose=0, epochs=10000, callbacks=[callback])
-    train_acc = history.history['accuracy'][-1]
-    test_acc = history.history['val_accuracy'][-1]
+    model_baseline = create_model_large().to(device)
+    optimizer = torch.optim.Adam(model_baseline.parameters())
+    
+    num_epochs = 10000
+    patience = 200
+    best_loss = float('inf')
+    patience_counter = 0
+    
+    for epoch in range(num_epochs):
+        model_baseline.train()
+        total_loss = 0
+        total_acc = 0
+        for i in range(len(data_classif_train_torch)):
+            x = data_classif_train_torch[i].unsqueeze(0)
+            y = label_train_tensor[i:i+1]
+            output = model_baseline(x)
+            loss = criterion(output, y)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+            preds = torch.argmax(output, dim=1)
+            total_acc += (preds == y).float().mean().item()
+        
+        model_baseline.eval()
+        val_loss = 0
+        val_acc = 0
+        with torch.no_grad():
+            for i in range(len(data_classif_test_torch)):
+                x = data_classif_test_torch[i].unsqueeze(0)
+                y = label_test_tensor[i:i+1]
+                output = model_baseline(x)
+                loss = criterion(output, y)
+                val_loss += loss.item()
+                preds = torch.argmax(output, dim=1)
+                val_acc += (preds == y).float().mean().item()
+        
+        val_loss /= len(data_classif_test_torch)
+        val_acc /= len(data_classif_test_torch)
+        
+        if val_loss < best_loss - 1e-4:
+            best_loss = val_loss
+            patience_counter = 0
+        else:
+            patience_counter += 1
+        
+        if patience_counter >= patience:
+            break
+    
+    train_acc = total_acc / len(data_classif_train_torch)
+    test_acc = val_acc
     XB12 = time()
     print('Train--Test accuracy baseline (large NN DeepSet) of data set ' + str(dataset_test_name) + ': ' + str("{:.2f}".format(100*train_acc)) + ' -- ' + str("{:.2f}".format(100*test_acc)))
 
     XB21 = time()
-    model_baseline = create_model_small()
-    history = model_baseline.fit(data_classif_train, label_classif_train, validation_data=(data_classif_test, label_classif_test), verbose=0, epochs=10000, callbacks=[callback])
-    train_acc = history.history['accuracy'][-1]
-    test_acc = history.history['val_accuracy'][-1]
+    model_baseline = create_model_small().to(device)
+    optimizer = torch.optim.Adam(model_baseline.parameters())
+    
+    best_loss = float('inf')
+    patience_counter = 0
+    
+    for epoch in range(num_epochs):
+        model_baseline.train()
+        total_loss = 0
+        total_acc = 0
+        for i in range(len(data_classif_train_torch)):
+            x = data_classif_train_torch[i].unsqueeze(0)
+            y = label_train_tensor[i:i+1]
+            output = model_baseline(x)
+            loss = criterion(output, y)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+            preds = torch.argmax(output, dim=1)
+            total_acc += (preds == y).float().mean().item()
+        
+        model_baseline.eval()
+        val_loss = 0
+        val_acc = 0
+        with torch.no_grad():
+            for i in range(len(data_classif_test_torch)):
+                x = data_classif_test_torch[i].unsqueeze(0)
+                y = label_test_tensor[i:i+1]
+                output = model_baseline(x)
+                loss = criterion(output, y)
+                val_loss += loss.item()
+                preds = torch.argmax(output, dim=1)
+                val_acc += (preds == y).float().mean().item()
+        
+        val_loss /= len(data_classif_test_torch)
+        val_acc /= len(data_classif_test_torch)
+        
+        if val_loss < best_loss - 1e-4:
+            best_loss = val_loss
+            patience_counter = 0
+        else:
+            patience_counter += 1
+        
+        if patience_counter >= patience:
+            break
+    
+    train_acc = total_acc / len(data_classif_train_torch)
+    test_acc = val_acc
     XB22 = time()
     print('Train--Test accuracy baseline (small NN DeepSet) of data set ' + str(dataset_test_name) + ': ' + str("{:.2f}".format(100*train_acc)) + ' -- ' + str("{:.2f}".format(100*test_acc)))
 

@@ -52,7 +52,7 @@ elif PV_type == 'PL':
 
 mode = sys.argv[19]
 
-path = "./" # Input the path to your data folder
+path = "My files/UCRArchive_2018/" # Input the path to your data folder
 
 X1 = np.array(pd.read_csv(path + dataset_name + "/" + dataset_name + "_TRAIN.tsv", sep="\t", header=None))
 X2 = np.array(pd.read_csv(path + dataset_name + "/" + dataset_name + "_TEST.tsv",  sep="\t", header=None))
