@@ -279,8 +279,13 @@ for epoch in range(num_epochs):
     if early_stopping(val_loss):
         break
 
-# Save the model
-torch.save(best_CV_model.state_dict(), 'models/' + model_name + '.pt')
+# Save the model and architecture info
+torch.save({
+    'model_state_dict': best_CV_model.state_dict(),
+    'model_type': 'best_model',
+    'output_dim': output_dim,
+    'homdim': homdim
+}, 'models/' + model_name + '.pt')
 
 # Study the results
 best_CV_model.eval()

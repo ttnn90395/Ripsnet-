@@ -83,9 +83,39 @@ def DTW(a, b):
 
 print(sys.argv)
 
-# Load the NN
-model_PV = torch.load('models/' + model_name + '.pt', map_location=device)
-model_PV.to(device)
+# Load the trained model from train_nn.py
+checkpoint = torch.load('models/' + model_name + '.pt', map_location=device)
+model_state_dict = checkpoint['model_state_dict']
+output_dim = checkpoint.get('output_dim', None)
+
+# Recreate the model architecture used in training
+# (We use a simple default regression model)
+class RegressionModel(nn.Module):
+    def __init__(self, output_dim):
+        super().__init__()
+        self.dense1 = DenseRagged(units=30, use_bias=True, activation='relu')
+        self.dense2 = DenseRagged(units=20, use_bias=True, activation='relu')
+        self.dense3 = DenseRagged(units=10, use_bias=True, activation='relu')
+        self.permop = PermopRagged()
+        self.fc1 = nn.Linear(10, 50)
+        self.fc2 = nn.Linear(50, 100)
+        self.fc3 = nn.Linear(100, 200)
+        self.fc_out = nn.Linear(200, output_dim)
+    
+    def forward(self, x):
+        x = self.dense1(x)
+        x = self.dense2(x)
+        x = self.dense3(x)
+        x = self.permop(x)
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        x = torch.relu(self.fc3(x))
+        x = torch.sigmoid(self.fc_out(x))
+        return x
+
+model_PV = RegressionModel(output_dim=output_dim)
+model_PV.load_state_dict(model_state_dict)
+model_PV = model_PV.to(device)
 model_PV.eval()
 
 PV_setting = pck.load(open('datasets/' + dataset_PV_params + '.pkl', 'rb'))
