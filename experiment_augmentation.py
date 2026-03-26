@@ -798,7 +798,7 @@ print(f"Shape of first noisy test distance matrix: {dm_noisy_test[0].shape}")
 ds = [pairwise_distances(X).flatten() for X in data_train[:30]]
 maxd = np.max(np.concatenate(ds))
 
-n_augment_levels = list(range(2))
+n_augment_levels = [0;1;5;10;20]
 
 clean_accuracies = []
 noisy_accuracies = []
