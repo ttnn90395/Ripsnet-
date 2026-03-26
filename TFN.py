@@ -10,10 +10,10 @@ from typing import List, Tuple
 import gc
 
 # --- Global Parameters ---
-N_sets_train = 900
-N_sets_test  = 300
-N_points     = 600
-N_noise      = 200
+N_sets_train = 450
+N_sets_test  = 150
+N_points     = 300
+N_noise      = 100
 
 # Subsample each point cloud to this size before feeding into TFN.
 # Reduces the O(N²) pairwise matrix from 600×600 → 128×128 (22× fewer pairs).
