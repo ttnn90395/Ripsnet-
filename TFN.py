@@ -403,7 +403,7 @@ model_tfn, history_tfn, _ = train_model_classification(
     model_tfn, optimizer, criterion,
     data_train,      label_classif_train,
     clean_data_test, clean_label_classif_test,
-    epochs=10000,
+    epochs=10,
 )
 
 gc.collect()
