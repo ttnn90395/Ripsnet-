@@ -1030,7 +1030,7 @@ for n_augment in tqdm(n_augment_levels, desc="Augmentation Levels"):
         dm_train_augmented_tensors, PI_train_augmented_tensor_on_device,
         dm_clean_test_tensors, clean_PI_test_tensor,
         epochs=5000,  # Reduced epochs for faster execution of the loop
-        batch_size=64
+        batch_size=32
     )
     print(f"Trained DistanceMatrixRaggedModel for n_augment={n_augment}.")
 
