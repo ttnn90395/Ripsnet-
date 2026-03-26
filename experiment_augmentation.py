@@ -903,6 +903,11 @@ dm_noisy_test_tensors = [torch.tensor(dm, dtype=torch.float32).to(device) for dm
 
 n_augment_levels = list(range(2))
 
+le = LabelEncoder().fit(label_train)
+label_classif_train = le.transform(label_train)
+clean_label_classif_test  = le.transform(clean_label_test)
+noisy_label_classif_test  = le.transform(noisy_label_test)
+
 for n_augment in tqdm(n_augment_levels, desc="Augmentation Levels"):
     print(f"\n--- Processing n_augment = {n_augment} ---")
 
@@ -946,6 +951,8 @@ for n_augment in tqdm(n_augment_levels, desc="Augmentation Levels"):
     model_dm_pi = DistanceMatrixRaggedModel(output_dim=output_dim_pi).to(device)
     optimizer_dm_pi = Adamax(model_dm_pi.parameters(), lr=5e-4)
     criterion_dm_pi = nn.MSELoss()
+
+
 
     # Prepare inputs for training model_dm_pi
     dm_train_augmented_tensors = [torch.tensor(dm, dtype=torch.float32, device=device) for dm in dm_train_augmented]
