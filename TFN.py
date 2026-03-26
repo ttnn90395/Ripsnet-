@@ -5,28 +5,27 @@ import torch.nn.functional as F
 from torch.optim import Adamax
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import LabelEncoder
-from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
-import gudhi as gd
 from typing import List, Tuple
-import math
+import gc
 
 # --- Global Parameters ---
-N_sets_train = 900  # Number of train point clouds
-N_sets_test  = 300  # Number of test  point clouds
-N_points     = 600  # Point cloud cardinality
-N_noise      = 200  # Number of corrupted points
+N_sets_train = 900
+N_sets_test  = 300
+N_points     = 600
+N_noise      = 200
+
+# Subsample each point cloud to this size before feeding into TFN.
+# Reduces the O(N²) pairwise matrix from 600×600 → 128×128 (22× fewer pairs).
+TFN_N_SUBSAMPLE = 128
 
 # --- Device Configuration ---
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # --- Data Generation Functions ---
 def create_circle(N_points, r, x_0, y_0):
-    X = []
-    for i in range(N_points):
-        theta = np.random.uniform() * 2 * np.pi
-        X.append([(r * np.cos(theta)) + x_0, (r * np.sin(theta) + y_0)])
-    return np.array(X)
+    theta = np.random.uniform(0, 2 * np.pi, N_points)
+    return np.stack([r * np.cos(theta) + x_0, r * np.sin(theta) + y_0], axis=1)
 
 def create_1_circle_clean(N_points):
     r = 2
@@ -34,293 +33,162 @@ def create_1_circle_clean(N_points):
     return create_circle(N_points, r, x_0, y_0)
 
 def create_2_circle_clean(N_points):
-    r1 = 5
-    r2 = 3
+    r1, r2 = 5, 3
     x_0, y_0 = 30 * np.random.rand() - 15, 30 * np.random.rand() - 15
     x_1, y_1 = 30 * np.random.rand() - 15, 30 * np.random.rand() - 15
     while np.sqrt((x_0 - x_1) ** 2 + (y_0 - y_1) ** 2) <= r1 + r2:
         x_1, y_1 = 30 * np.random.rand() - 15, 30 * np.random.rand() - 15
-    circle1 = create_circle(N_points // 2, r1, x_0, y_0)
-    circle2 = create_circle(N_points - N_points // 2, r2, x_1, y_1)
-    X = [0] * N_points
-    X[:N_points // 2] = circle1
-    X[N_points // 2:] = circle2
+    c1 = create_circle(N_points // 2, r1, x_0, y_0)
+    c2 = create_circle(N_points - N_points // 2, r2, x_1, y_1)
+    X = np.concatenate([c1, c2], axis=0)
     np.random.shuffle(X)
-    return np.array(X)
+    return X
 
 def create_3_circle_clean(N_points):
-    r0 = 5
-    r1 = 3
-    r2 = 2
+    r0, r1, r2 = 5, 3, 2
     x_0, y_0 = 30 * np.random.rand() - 15, 30 * np.random.rand() - 15
     x_1, y_1 = 30 * np.random.rand() - 15, 30 * np.random.rand() - 15
     while np.sqrt((x_0 - x_1) ** 2 + (y_0 - y_1) ** 2) <= r0 + r1:
         x_1, y_1 = 30 * np.random.rand() - 15, 30 * np.random.rand() - 15
-
     x_2, y_2 = 30 * np.random.rand() - 15, 30 * np.random.rand() - 15
-    while(np.sqrt((x_0 - x_2)**2 + (y_0 - y_2)**2) <= r0 + r2) or (np.sqrt((x_1 - x_2)**2 + (y_1 - y_2)**2) <= r1 + r2):
+    while (np.sqrt((x_0 - x_2) ** 2 + (y_0 - y_2) ** 2) <= r0 + r2) or \
+          (np.sqrt((x_1 - x_2) ** 2 + (y_1 - y_2) ** 2) <= r1 + r2):
         x_2, y_2 = 30 * np.random.rand() - 15, 30 * np.random.rand() - 15
-
-    circle0 = create_circle(N_points // 3, r0, x_0, y_0)
-    circle1 = create_circle(N_points // 3, r1, x_1, y_1)
-    circle2 = create_circle(N_points // 3, r2, x_2, y_2)
-
-    # Handler in case N_points mod 3 != 0.
-    true_N_points = 3 * (N_points // 3)
-
-    X = [[0,0]] * true_N_points
-    X[:true_N_points // 3] = circle0
-    X[true_N_points // 3:2 * true_N_points // 3] = circle1
-    X[2 * true_N_points // 3:] = circle2
+    n = N_points // 3
+    X = np.concatenate([
+        create_circle(n, r0, x_0, y_0),
+        create_circle(n, r1, x_1, y_1),
+        create_circle(n, r2, x_2, y_2),
+    ], axis=0)
     np.random.shuffle(X)
-    return np.array(X)
+    return X
+
+def _add_noise(X, N_noise, x_min, x_max, y_min, y_max):
+    noise = np.stack([
+        np.random.uniform(x_min, x_max, N_noise),
+        np.random.uniform(y_min, y_max, N_noise),
+    ], axis=1)
+    idx = np.random.choice(len(X), size=N_noise, replace=False)
+    X[idx] = noise
+    return X
 
 def create_1_circle_noisy(N_points, N_noise):
-    r = 2
-    x_0, y_0 = 10 * np.random.rand() - 5, 10 * np.random.rand() - 5
+    r, x_0, y_0 = 2, 10 * np.random.rand() - 5, 10 * np.random.rand() - 5
     X = create_circle(N_points, r, x_0, y_0)
-    noise = []
-    for i in range(N_noise):
-        noise.append([np.random.uniform(x_0 - r, x_0 + r),
-                      np.random.uniform(y_0 - r, y_0 + r)])
-    X = np.array(X)
-    X[np.random.choice(np.arange(len(X)), size=N_noise, replace=False, p=None)] = np.array(noise)
-    return X
+    return _add_noise(X, N_noise, x_0 - r, x_0 + r, y_0 - r, y_0 + r)
 
 def create_2_circle_noisy(N_points, N_noise):
-    r1 = 5
-    r2 = 3
+    r1, r2 = 5, 3
     x_0, y_0 = 30 * np.random.rand() - 15, 30 * np.random.rand() - 15
     x_1, y_1 = 30 * np.random.rand() - 15, 30 * np.random.rand() - 15
-    while(np.sqrt((x_0 - x_1)**2 + (y_0 - y_1)**2) <= r1 + r2):
+    while np.sqrt((x_0 - x_1) ** 2 + (y_0 - y_1) ** 2) <= r1 + r2:
         x_1, y_1 = 30 * np.random.rand() - 15, 30 * np.random.rand() - 15
-    circle1 = create_circle(N_points // 2, r1, x_0, y_0)
-    circle2 = create_circle(N_points - N_points // 2, r2, x_1, y_1)
-    X = [0] * N_points
-    X[:N_points // 2] = circle1
-    X[N_points // 2:] = circle2
+    c1 = create_circle(N_points // 2, r1, x_0, y_0)
+    c2 = create_circle(N_points - N_points // 2, r2, x_1, y_1)
+    X = np.concatenate([c1, c2], axis=0)
     np.random.shuffle(X)
-    noise = []
-    for i in range(N_noise):
-        noise.append([np.random.uniform(min(x_0 - r1, x_1 - r2), max(x_0 + r1, x_1 + r2)),
-                      np.random.uniform(min(y_0 - r1, y_1 - r2), max(y_0 + r1, y_1 + r2))])
-    X = np.array(X)
-    X[np.random.choice(np.arange(len(X)), size=N_noise, replace=False, p=None)] = np.array(noise)
-    return X
+    return _add_noise(X, N_noise,
+                      min(x_0 - r1, x_1 - r2), max(x_0 + r1, x_1 + r2),
+                      min(y_0 - r1, y_1 - r2), max(y_0 + r1, y_1 + r2))
 
 def create_3_circle_noisy(N_points, N_noise):
-    r0 = 5
-    r1 = 3
-    r2 = 2
+    r0, r1, r2 = 5, 3, 2
     x_0, y_0 = 30 * np.random.rand() - 15, 30 * np.random.rand() - 15
     x_1, y_1 = 30 * np.random.rand() - 15, 30 * np.random.rand() - 15
     while np.sqrt((x_0 - x_1) ** 2 + (y_0 - y_1) ** 2) <= r0 + r1:
         x_1, y_1 = 30 * np.random.rand() - 15, 30 * np.random.rand() - 15
     x_2, y_2 = 30 * np.random.rand() - 15, 30 * np.random.rand() - 15
-    while(np.sqrt((x_0 - x_2)**2 + (y_0 - y_2)**2) <= r0 + r2) or (np.sqrt((x_1 - x_2)**2 + (y_1 - y_2)**2) <= r1 + r2):
+    while (np.sqrt((x_0 - x_2) ** 2 + (y_0 - y_2) ** 2) <= r0 + r2) or \
+          (np.sqrt((x_1 - x_2) ** 2 + (y_1 - y_2) ** 2) <= r1 + r2):
         x_2, y_2 = 30 * np.random.rand() - 15, 30 * np.random.rand() - 15
-    circle0 = create_circle(N_points // 3, r0, x_0, y_0)
-    circle1 = create_circle(N_points // 3, r1, x_1, y_1)
-    circle2 = create_circle(N_points // 3, r2, x_2, y_2)
-
-    true_N_points = 3 * (N_points // 3)
-    X = [[0,0]] * true_N_points
-    X[:true_N_points // 3] = circle0
-    X[true_N_points // 3:2 * true_N_points // 3] = circle1
-    X[2 * true_N_points // 3:] = circle2
-
+    n = N_points // 3
+    X = np.concatenate([
+        create_circle(n, r0, x_0, y_0),
+        create_circle(n, r1, x_1, y_1),
+        create_circle(n, r2, x_2, y_2),
+    ], axis=0)
     np.random.shuffle(X)
-    noise = []
-    for i in range(N_noise):
-        noise.append([np.random.uniform(np.min([x_0 - r0, x_1 - r1, x_2 - r2]), np.max([x_0 + r0, x_1 + r1, x_2 + r2])),
-                      np.random.uniform(np.min([y_0 - r0, y_1 - r1, y_2 - r2]), np.max([y_0 + r0, y_1 + r1, y_2 + r2]))])
-    X = np.array(X)
-    X[np.random.choice(np.arange(len(X)), size=N_noise, replace=False, p=None)] = np.array(noise)
-    return X
+    return _add_noise(X, N_noise,
+                      min(x_0 - r0, x_1 - r1, x_2 - r2),
+                      max(x_0 + r0, x_1 + r1, x_2 + r2),
+                      min(y_0 - r0, y_1 - r1, y_2 - r2),
+                      max(y_0 + r0, y_1 + r1, y_2 + r2))
 
-def create_multiple_circles(N_sets_train, N_points, noisy=False, N_noise=0, n_augment_per_sample = 0):
-
-    data_train, PD_train = [[] for _ in range(N_sets_train)], []
-    label_train = np.zeros((N_sets_train,))
-
-    if not noisy:
-        for i in tqdm(range(N_sets_train // 3)):
-            data_train[i] = create_1_circle_clean(N_points)
-            label_train[i] = 1
-        for i in tqdm(range(N_sets_train // 3, 2 * N_sets_train // 3)):
-            data_train[i] = create_2_circle_clean(N_points)
-            label_train[i] = 2
-        for i in tqdm(range(2 * N_sets_train // 3, N_sets_train)):
-            data_train[i] = create_3_circle_clean(N_points)
-            label_train[i] = 3
-    else:
-        for i in tqdm(range(N_sets_train // 3)):
-            data_train[i] = create_1_circle_noisy(N_points, N_noise)
-            label_train[i] = 1
-        for i in tqdm(range(N_sets_train // 3, 2 * N_sets_train // 3)):
-            data_train[i] = create_2_circle_noisy(N_points, N_noise)
-            label_train[i] = 2
-        for i in tqdm(range(2 * N_sets_train // 3, N_sets_train)):
-            data_train[i] = create_3_circle_noisy(N_points, N_noise)
-            label_train[i] = 3
-
-    shuffler = np.random.permutation(len(data_train))
-    label_train = label_train[shuffler]
-    data_train = [data_train[p] for p in shuffler]
-    return data_train, label_train
-
-# --- TFN Specific Utility Functions ---
-def convert_2d_to_3d(pc_list):
+def create_multiple_circles(N_sets, N_points, noisy=False, N_noise=0):
     """
-    Converts a list of 2D point clouds to 3D by adding a zero z-coordinate.
-    Input: List of numpy arrays, each (N, 2).
-    Output: List of numpy arrays, each (N, 3).
+    Returns data as a list of CPU numpy arrays (never moved to GPU en masse).
+    Labels are returned as a numpy int array.
     """
-    converted_pcs = []
-    for pc_2d in pc_list:
-        if pc_2d.shape[1] == 2:
-            pc_3d = np.concatenate((pc_2d, np.zeros((pc_2d.shape[0], 1))), axis=1)
-        else:
-            pc_3d = pc_2d # Assuming it's already 3D or similar
-        converted_pcs.append(pc_3d)
-    return converted_pcs
+    data, labels = [], np.zeros(N_sets, dtype=np.int64)
+    fns = (
+        (create_1_circle_noisy, create_2_circle_noisy, create_3_circle_noisy)
+        if noisy else
+        (create_1_circle_clean, create_2_circle_clean, create_3_circle_clean)
+    )
+    third = N_sets // 3
+    for label_idx, (start, end, fn) in enumerate(zip(
+        [0, third, 2 * third],
+        [third, 2 * third, N_sets],
+        fns,
+    ), start=1):
+        for i in tqdm(range(start, end)):
+            data.append(fn(N_points, N_noise) if noisy else fn(N_points))
+            labels[i] = label_idx
 
-def train_model_classification(model, optimizer, criterion, train_inputs, train_targets, val_inputs, val_targets, epochs=20, batch_size=32):
+    shuffler = np.random.permutation(N_sets)
+    labels = labels[shuffler]
+    data = [data[p] for p in shuffler]
+    return data, labels
+
+# --- TFN Utilities ---
+def convert_2d_to_3d_numpy(pc_list: List[np.ndarray]) -> List[np.ndarray]:
+    """Adds a zero z-column in-place (numpy only, no GPU memory used)."""
+    return [
+        np.concatenate([pc, np.zeros((pc.shape[0], 1), dtype=pc.dtype)], axis=1)
+        if pc.shape[1] == 2 else pc
+        for pc in pc_list
+    ]
+
+def subsample_pc(pc: np.ndarray, n: int) -> np.ndarray:
     """
-    Train a classification model (e.g., TFN).
-    Returns (best_model, history, best_model_state).
+    Randomly subsample a point cloud to n points.
+    If pc already has ≤ n points, return it unchanged.
     """
-    model = model.to(device)
-    patience = 10
-    best_val_loss = float('inf')
-    patience_counter = 0
-    num_epochs = epochs if epochs is not None else 10000
-    history = {'train_loss': [], 'val_loss': [], 'train_accuracy': [], 'val_accuracy': []}
-    best_model_state = None
+    if len(pc) <= n:
+        return pc
+    idx = np.random.choice(len(pc), size=n, replace=False)
+    return pc[idx]
 
-    train_targets_on_device = torch.tensor(train_targets, dtype=torch.long, device=device)
-    val_targets_on_device = torch.tensor(val_targets, dtype=torch.long, device=device)
+def numpy_to_tensor(pc: np.ndarray) -> torch.Tensor:
+    """Convert a single numpy point cloud to a float32 CUDA/CPU tensor."""
+    return torch.tensor(pc, dtype=torch.float32, device=device)
 
-    train_inputs_on_device = train_inputs # Already list of tensors on device
-    val_inputs_on_device = val_inputs # Already list of tensors on device
-
-    for epoch in range(num_epochs):
-        model.train()
-        permutation = torch.randperm(len(train_inputs_on_device), device=device)
-        epoch_loss = 0.0
-        correct_train = 0
-        total_train = 0
-
-        for i in range(0, len(train_inputs_on_device), batch_size):
-            optimizer.zero_grad()
-            indices = permutation[i:i + batch_size]
-            batch_inputs = [train_inputs_on_device[int(idx)] for idx in indices]
-            batch_targets = train_targets_on_device[indices]
-
-            outputs = model(batch_inputs)
-            loss = criterion(outputs, batch_targets)
-            loss.backward()
-            optimizer.step()
-            epoch_loss += loss.item() * len(batch_inputs)
-
-            _, predicted = torch.max(outputs.data, 1)
-            total_train += batch_targets.size(0)
-            correct_train += (predicted == batch_targets).sum().item()
-
-        epoch_loss /= len(train_inputs_on_device)
-        train_accuracy = 100 * correct_train / total_train
-        history['train_loss'].append(epoch_loss)
-        history['train_accuracy'].append(train_accuracy)
-
-        model.eval()
-        correct_val = 0
-        total_val = 0
-        val_loss = 0.0
-        with torch.no_grad():
-            val_outputs = model(val_inputs_on_device)
-            val_loss = criterion(val_outputs, val_targets_on_device).item()
-            
-            _, predicted = torch.max(val_outputs.data, 1)
-            total_val += val_targets_on_device.size(0)
-            correct_val += (predicted == val_targets_on_device).sum().item()
-
-        val_accuracy = 100 * correct_val / total_val
-        history['val_loss'].append(val_loss)
-        history['val_accuracy'].append(val_accuracy)
-
-        print(f'Epoch {epoch+1}/{num_epochs}, Train Loss: {epoch_loss:.6f}, Train Acc: {train_accuracy:.2f}%, Val Loss: {val_loss:.6f}, Val Acc: {val_accuracy:.2f}%')
-
-        if val_loss < best_val_loss - 1e-4:
-            best_val_loss = val_loss
-            patience_counter = 0
-            best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-        else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                print("Early stopping triggered.")
-                break
-
-    if best_model_state is not None:
-        model.load_state_dict({k: v.to(device) for k, v in best_model_state.items()})
-
-    return model, history, best_model_state
-
-# --- TFN Model Definition (TensorFieldNetwork, RBFExpansion, TFNLayer) ---
+# --- RBF & TFN Model ---
 class RBFExpansion(nn.Module):
     def __init__(self, num_rbf: int = 16, cutoff: float = 5.0):
         super().__init__()
         self.num_rbf = num_rbf
         self.cutoff = cutoff
-        centers = torch.linspace(0.0, cutoff, num_rbf)
-        self.register_buffer("centers", centers)
+        self.register_buffer("centers", torch.linspace(0.0, cutoff, num_rbf))
         self.width = (cutoff / num_rbf) ** 2
 
     def forward(self, distances: torch.Tensor) -> torch.Tensor:
-        diff = distances.unsqueeze(-1) - self.centers
-        return torch.exp(-diff ** 2 / self.width)
+        return torch.exp(-(distances.unsqueeze(-1) - self.centers) ** 2 / self.width)
+
 
 class TFNLayer(nn.Module):
-    def __init__(
-        self,
-        in_f0: int,
-        in_f1: int,
-        out_f0: int,
-        out_f1: int,
-        num_rbf: int = 16,
-    ):
+    def __init__(self, in_f0, in_f1, out_f0, out_f1, num_rbf=16):
         super().__init__()
-        self.W00 = nn.Sequential(
-            nn.Linear(num_rbf, 32), nn.SiLU(),
-            nn.Linear(32, in_f0 * out_f0)
-        )
-        self.W10 = nn.Sequential(
-            nn.Linear(num_rbf, 32), nn.SiLU(),
-            nn.Linear(32, in_f1 * out_f0)
-        )
-        self.W01 = nn.Sequential(
-            nn.Linear(num_rbf, 32), nn.SiLU(),
-            nn.Linear(32, in_f0 * out_f1)
-        )
-        self.W11 = nn.Sequential(
-            nn.Linear(num_rbf, 32), nn.SiLU(),
-            nn.Linear(32, in_f1 * out_f1)
-        )
-
+        self.W00 = nn.Sequential(nn.Linear(num_rbf, 32), nn.SiLU(), nn.Linear(32, in_f0 * out_f0))
+        self.W10 = nn.Sequential(nn.Linear(num_rbf, 32), nn.SiLU(), nn.Linear(32, in_f1 * out_f0))
+        self.W01 = nn.Sequential(nn.Linear(num_rbf, 32), nn.SiLU(), nn.Linear(32, in_f0 * out_f1))
+        self.W11 = nn.Sequential(nn.Linear(num_rbf, 32), nn.SiLU(), nn.Linear(32, in_f1 * out_f1))
         self.norm0 = nn.LayerNorm(out_f0)
         self.norm1 = nn.LayerNorm(out_f1)
-
         self.in_f0, self.in_f1 = in_f0, in_f1
         self.out_f0, self.out_f1 = out_f0, out_f1
 
-    def forward(
-        self,
-        pos: torch.Tensor,
-        f0: torch.Tensor,
-        f1: torch.Tensor,
-        rbf: torch.Tensor,
-        r_hat: torch.Tensor,
-        mask: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, pos, f0, f1, rbf, r_hat, mask):
         N = pos.shape[0]
 
         w00 = self.W00(rbf).view(N, N, self.in_f0, self.out_f0)
@@ -346,45 +214,32 @@ class TFNLayer(nn.Module):
 
         return new_f0, new_f1
 
+
 def _pairwise_geometry(pos: torch.Tensor, rbf_encoder: RBFExpansion):
-    diff = pos.unsqueeze(1) - pos.unsqueeze(0)
+    diff = pos.unsqueeze(1) - pos.unsqueeze(0)       # (N, N, 3) — but N is now TFN_N_SUBSAMPLE
     dist = diff.norm(dim=-1)
     r_hat = diff / dist.unsqueeze(-1).clamp(min=1e-8)
-
     rbf = rbf_encoder(dist)
-
     N = pos.shape[0]
     mask = ~torch.eye(N, dtype=torch.bool, device=pos.device)
     return rbf, r_hat, mask
 
+
 class TensorFieldNetwork(nn.Module):
-    def __init__(
-        self,
-        num_classes: int,
-        hidden_f0: int = 64,
-        hidden_f1: int = 16,
-        num_layers: int = 3,
-        num_rbf: int = 16,
-        cutoff: float = 5.0,
-        classifier_dims: List[int] = [128, 64],
-    ):
+    def __init__(self, num_classes, hidden_f0=64, hidden_f1=16,
+                 num_layers=3, num_rbf=16, cutoff=5.0,
+                 classifier_dims=(128, 64)):
         super().__init__()
         self.rbf = RBFExpansion(num_rbf=num_rbf, cutoff=cutoff)
 
-        init_f0 = 1
-        init_f1 = 1
-
-        layers = []
-        in_f0, in_f1 = init_f0, init_f1
+        layers, in_f0, in_f1 = [], 1, 1
         for _ in range(num_layers):
             layers.append(TFNLayer(in_f0, in_f1, hidden_f0, hidden_f1, num_rbf))
             in_f0, in_f1 = hidden_f0, hidden_f1
         self.layers = nn.ModuleList(layers)
 
         inv_dim = hidden_f0 + hidden_f1
-
-        rho = []
-        in_d = inv_dim
+        rho, in_d = [], inv_dim
         for d in classifier_dims:
             rho += [nn.Linear(in_d, d), nn.ReLU()]
             in_d = d
@@ -392,93 +247,195 @@ class TensorFieldNetwork(nn.Module):
         self.rho = nn.Sequential(*rho)
 
     def _encode_single(self, pos: torch.Tensor) -> torch.Tensor:
-        N = pos.shape[0]
-
         f0 = pos.norm(dim=-1, keepdim=True)
         f1 = pos.unsqueeze(1)
-
         rbf, r_hat, mask = _pairwise_geometry(pos, self.rbf)
-
         for layer in self.layers:
             f0, f1 = layer(pos, f0, f1, rbf, r_hat, mask)
-
-        f1_norm = f1.norm(dim=-1)
-        node_inv = torch.cat([f0, f1_norm], dim=-1)
-
-        global_feat = node_inv.max(dim=0).values
-        return global_feat
+        return torch.cat([f0, f1.norm(dim=-1)], dim=-1).max(dim=0).values
 
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
-        if len(batch) == 0:
-            device = next(self.parameters()).device
-            return torch.empty(0, self.rho[-1].out_features, device=device)
+        if not batch:
+            return torch.empty(0, self.rho[-1].out_features, device=next(self.parameters()).device)
+        return self.rho(torch.stack([self._encode_single(pc) for pc in batch]))
 
-        global_feats = torch.stack([self._encode_single(pc) for pc in batch], dim=0)
-        return self.rho(global_feats)
 
-# --- Main Execution Block ---
+# --- Memory-efficient training loop ---
+def train_model_classification(
+    model, optimizer, criterion,
+    train_data_np, train_targets,
+    val_data_np, val_targets,
+    epochs=20, batch_size=32,
+    subsample=TFN_N_SUBSAMPLE,
+):
+    """
+    train_data_np / val_data_np : lists of numpy arrays (CPU).
+    Tensors are created on-the-fly per batch and immediately released.
+    """
+    model.to(device)
+    patience = 10
+    best_val_loss = float('inf')
+    patience_counter = 0
+    history = {'train_loss': [], 'val_loss': [], 'train_accuracy': [], 'val_accuracy': []}
+    best_model_state = None
 
-# 1. Data Preparation
-print("Generating data...")
-data_train,      label_train       = create_multiple_circles(N_sets_train, N_points, noisy=0, N_noise=N_noise)
-clean_data_test, clean_label_test  = create_multiple_circles(N_sets_test,  N_points, noisy=0, N_noise=N_noise)
-noisy_data_test, noisy_label_test  = create_multiple_circles(N_sets_test,  N_points, noisy=1, N_noise=N_noise)
+    train_targets_t = torch.tensor(train_targets, dtype=torch.long, device=device)
+    val_targets_t   = torch.tensor(val_targets,   dtype=torch.long, device=device)
+    n_train = len(train_data_np)
+
+    for epoch in range(epochs):
+        model.train()
+        perm = np.random.permutation(n_train)
+        epoch_loss, correct, total = 0.0, 0, 0
+
+        for start in range(0, n_train, batch_size):
+            idx = perm[start:start + batch_size]
+
+            # --- Build batch tensors on-the-fly, subsample to save memory ---
+            batch_pcs = [
+                numpy_to_tensor(subsample_pc(train_data_np[i], subsample))
+                for i in idx
+            ]
+            batch_targets = train_targets_t[idx]
+
+            optimizer.zero_grad()
+            outputs = model(batch_pcs)
+            loss = criterion(outputs, batch_targets)
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item() * len(batch_pcs)
+            _, predicted = outputs.max(1)
+            correct += (predicted == batch_targets).sum().item()
+            total   += len(batch_targets)
+
+            # Explicitly free batch tensors
+            del batch_pcs, outputs, loss
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+
+        epoch_loss /= n_train
+        train_acc = 100 * correct / total
+        history['train_loss'].append(epoch_loss)
+        history['train_accuracy'].append(train_acc)
+
+        # --- Validation: process in batches too ---
+        model.eval()
+        val_loss, val_correct, val_total = 0.0, 0, 0
+        n_val = len(val_data_np)
+
+        with torch.no_grad():
+            for start in range(0, n_val, batch_size):
+                idx = np.arange(start, min(start + batch_size, n_val))
+                batch_pcs = [
+                    numpy_to_tensor(subsample_pc(val_data_np[i], subsample))
+                    for i in idx
+                ]
+                batch_targets = val_targets_t[idx]
+                outputs = model(batch_pcs)
+                val_loss    += criterion(outputs, batch_targets).item() * len(batch_pcs)
+                _, predicted = outputs.max(1)
+                val_correct += (predicted == batch_targets).sum().item()
+                val_total   += len(batch_targets)
+
+                del batch_pcs, outputs
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
+
+        val_loss /= n_val
+        val_acc   = 100 * val_correct / val_total
+        history['val_loss'].append(val_loss)
+        history['val_accuracy'].append(val_acc)
+
+        print(f"Epoch {epoch+1}/{epochs} | "
+              f"Train loss {epoch_loss:.4f} acc {train_acc:.1f}% | "
+              f"Val loss {val_loss:.4f} acc {val_acc:.1f}%")
+
+        if val_loss < best_val_loss - 1e-4:
+            best_val_loss = val_loss
+            patience_counter = 0
+            best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print("Early stopping triggered.")
+                break
+
+    if best_model_state is not None:
+        model.load_state_dict({k: v.to(device) for k, v in best_model_state.items()})
+
+    return model, history, best_model_state
+
+
+def evaluate_model(model, data_np, targets, batch_size=32, subsample=TFN_N_SUBSAMPLE):
+    """
+    Batched evaluation that avoids loading the entire test set on GPU at once.
+    Returns accuracy (float in [0, 1]).
+    """
+    model.eval()
+    targets_t = torch.tensor(targets, dtype=torch.long, device=device)
+    all_preds = []
+    n = len(data_np)
+
+    with torch.no_grad():
+        for start in range(0, n, batch_size):
+            idx = np.arange(start, min(start + batch_size, n))
+            batch_pcs = [
+                numpy_to_tensor(subsample_pc(data_np[i], subsample))
+                for i in idx
+            ]
+            outputs = model(batch_pcs)
+            _, predicted = outputs.max(1)
+            all_preds.append(predicted.cpu())
+
+            del batch_pcs, outputs
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+
+    all_preds = torch.cat(all_preds).numpy()
+    return accuracy_score(targets, all_preds)
+
+
+# ──────────────────────────────────────────────
+# Main
+# ──────────────────────────────────────────────
+print("Generating data  (stored as numpy on CPU — no GPU memory used yet)...")
+data_train,      label_train      = create_multiple_circles(N_sets_train, N_points, noisy=False, N_noise=N_noise)
+clean_data_test, clean_label_test = create_multiple_circles(N_sets_test,  N_points, noisy=False, N_noise=N_noise)
+noisy_data_test, noisy_label_test = create_multiple_circles(N_sets_test,  N_points, noisy=True,  N_noise=N_noise)
+
+# Convert to 3-D (still numpy, still CPU)
+data_train      = convert_2d_to_3d_numpy(data_train)
+clean_data_test = convert_2d_to_3d_numpy(clean_data_test)
+noisy_data_test = convert_2d_to_3d_numpy(noisy_data_test)
 
 le = LabelEncoder().fit(label_train)
-label_classif_train = le.transform(label_train)
-clean_label_classif_test  = le.transform(clean_label_test)
-noisy_label_classif_test  = le.transform(noisy_label_test)
+label_classif_train     = le.transform(label_train)
+clean_label_classif_test = le.transform(clean_label_test)
+noisy_label_classif_test = le.transform(noisy_label_test)
 
-print("Data generated and labels cleaned.")
+print(f"Data ready. Each cloud will be subsampled to {TFN_N_SUBSAMPLE} pts inside the training loop.")
 
-tf_data_train_3d = convert_2d_to_3d(data_train)
-tf_clean_data_test_3d = convert_2d_to_3d(clean_data_test)
-tf_noisy_data_test_3d = convert_2d_to_3d(noisy_data_test)
+# Model
+num_classes = len(np.unique(label_classif_train))
+model_tfn   = TensorFieldNetwork(num_classes=num_classes)
+optimizer   = Adamax(model_tfn.parameters(), lr=5e-4)
+criterion   = nn.CrossEntropyLoss()
 
-tf_data_train_3d_tensor = [torch.tensor(pc, dtype=torch.float32).to(device) for pc in tf_data_train_3d]
-tf_clean_data_test_3d_tensor = [torch.tensor(pc, dtype=torch.float32).to(device) for pc in tf_clean_data_test_3d]
-tf_noisy_data_test_3d_tensor = [torch.tensor(pc, dtype=torch.float32).to(device) for pc in tf_noisy_data_test_3d]
-
-print("Data prepared in 3D tensor format for TFN.")
-
-# 2. Model Initialization
-num_classes_tfn = len(np.unique(label_classif_train))
-model_tfn = TensorFieldNetwork(num_classes=num_classes_tfn)
-model_tfn.to(device)
-
-criterion_tfn = nn.CrossEntropyLoss()
-optimizer_tfn = Adamax(model_tfn.parameters(), lr=5e-4)
-
-# Define num_epochs if not already defined (e.g., from a global context)
-num_epochs = 10000 # Default for standalone execution
-
-print(f"TensorFieldNetwork initialized with {num_classes_tfn} classes. Training for {num_epochs} epochs.")
-
-# 3. Model Training
-model_tfn, history_tfn, best_model_state_tfn = train_model_classification(
-    model_tfn, optimizer_tfn, criterion_tfn,
-    tf_data_train_3d_tensor, label_classif_train,
-    tf_clean_data_test_3d_tensor, clean_label_classif_test,
-    epochs=num_epochs, batch_size=32
+print(f"TFN initialised ({num_classes} classes). Training...")
+model_tfn, history_tfn, best_state_tfn = train_model_classification(
+    model_tfn, optimizer, criterion,
+    data_train,      label_classif_train,
+    clean_data_test, clean_label_classif_test,
+    epochs=10000, batch_size=32,
 )
 
-best_val_accuracy_tfn = max(history_tfn['val_accuracy']) if history_tfn.get('val_accuracy') else 0.0
-print(f"Training TensorFieldNetwork complete. Best val_accuracy = {best_val_accuracy_tfn:.2f}%")
+# Explicit GC pass before evaluation
+gc.collect()
+if device.type == "cuda":
+    torch.cuda.empty_cache()
 
-# 4. Model Evaluation
-model_tfn.eval()
+clean_acc = evaluate_model(model_tfn, clean_data_test, clean_label_classif_test)
+noisy_acc = evaluate_model(model_tfn, noisy_data_test, noisy_label_classif_test)
 
-with torch.no_grad():
-    outputs_clean = model_tfn(tf_clean_data_test_3d_tensor)
-    _, predicted_clean = torch.max(outputs_clean.data, 1)
-    predicted_clean = predicted_clean.cpu().numpy()
-    
-    outputs_noisy = model_tfn(tf_noisy_data_test_3d_tensor)
-    _, predicted_noisy = torch.max(outputs_noisy.data, 1)
-    predicted_noisy = predicted_noisy.cpu().numpy()
-
-clean_test_acc_tfn = accuracy_score(clean_label_classif_test, predicted_clean)
-noisy_test_acc_tfn = accuracy_score(noisy_label_classif_test, predicted_noisy)
-
-print(f"TensorFieldNetwork Accuracy on clean test set: {clean_test_acc_tfn:.4f}")
-print(f"TensorFieldNetwork Accuracy on noisy test set: {noisy_test_acc_tfn:.4f}")
+print(f"\nTFN accuracy — clean test: {clean_acc:.4f} | noisy test: {noisy_acc:.4f}")
