@@ -686,6 +686,73 @@ def compute_ensemble_robustness(pc, ensemble_model, augmentation_fn, n_augment_p
 
 print("Helper functions for ensemble robustness defined.")
 
+def augment_permutations(pc, n, rng):
+    augmented = []
+    for _ in range(n):
+        shuffled_pc = rng.permutation(pc, axis=0) # Permute rows (points) of the point cloud
+        augmented.append(shuffled_pc)
+    return augmented
+
+def compute_permutation_robustness_score(pc, model, n_augment_per_score, device, seed=42):
+    """
+    Calculates the average Euclidean (L2) distance between the vector prediction of an original
+    point cloud and those of its permuted versions.
+    It adapts its input based on the model type (PointNet/RaggedPersistenceModel vs DistanceMatrixRaggedModel).
+    """
+    rng = np.random.default_rng(seed)
+    model.eval()
+
+    # Determine input type based on model class
+    is_distance_matrix_model = False
+    if 'DistanceMatrixRaggedModel' in globals() and isinstance(model, globals()['DistanceMatrixRaggedModel']):
+        is_distance_matrix_model = True
+
+    # Prepare input for the original point cloud
+    if is_distance_matrix_model:
+        # Convert point cloud to distance matrix. 'distance_matrix' function must be in scope.
+        dm_original = distance_matrix(pc)
+        input_original = [torch.tensor(dm_original, dtype=torch.float32).to(device)]
+    else:
+        # Use point cloud directly
+        input_original = [torch.tensor(pc, dtype=torch.float32).to(device)]
+
+    # 1. Compute vector output for the original point cloud
+    with torch.no_grad():
+        pred_original = model(input_original)
+        if isinstance(pred_original, (list, tuple)):
+            pred_original = pred_original[0]
+        pred_original = pred_original.cpu().numpy().flatten()
+
+    # 2. Generate augmented point clouds by permutation
+    permuted_pcs = augment_permutations(pc, n_augment_per_score, rng)
+
+    euclidean_distances = []
+    for perm_pc in permuted_pcs:
+        # Prepare input for permuted point cloud
+        if is_distance_matrix_model:
+            dm_permuted = distance_matrix(perm_pc)
+            input_permuted = [torch.tensor(dm_permuted, dtype=torch.float32).to(device)]
+        else:
+            input_permuted = [torch.tensor(perm_pc, dtype=torch.float32).to(device)]
+
+        # 3. Compute vector output for each permuted point cloud
+        with torch.no_grad():
+            pred_permuted = model(input_permuted)
+            if isinstance(pred_permuted, (list, tuple)):
+                pred_permuted = pred_permuted[0]
+            pred_permuted = pred_permuted.cpu().numpy().flatten()
+
+        # 4. Calculate L2 (Euclidean) distance
+        dist = np.linalg.norm(pred_original - pred_permuted)
+        euclidean_distances.append(dist)
+
+    # 5. Return the mean of these distances
+    if len(euclidean_distances) > 0:
+        return np.mean(euclidean_distances)
+    else:
+        return 0.0
+
+print("Functions `augment_permutations` and `compute_permutation_robustness_score` defined.")
 
 def distance_matrix(point_cloud):
     """
