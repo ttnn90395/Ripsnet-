@@ -968,7 +968,7 @@ dm_clean_test_tensors = [torch.tensor(dm, dtype=torch.float32).to(device) for dm
 clean_PI_test_tensor = clean_PI_test.to(device)  # already a tensor, just move to device
 dm_noisy_test_tensors = [torch.tensor(dm, dtype=torch.float32).to(device) for dm in dm_noisy_test]
 
-n_augment_levels = list(range(21))
+n_augment_levels = [0,1,2,3,4,5]
 
 le = LabelEncoder().fit(label_train)
 label_classif_train = le.transform(label_train)
