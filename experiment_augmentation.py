@@ -376,7 +376,7 @@ def train_model(model, optimizer, criterion, train_inputs, train_targets, val_in
     Train a ragged-input model. Returns (best_model, history, best_model_state).
     """
     model = model.to(device)
-    patience = 20
+    patience = 100
     best_val_loss = float('inf')
     patience_counter = 0
     num_epochs = epochs if epochs is not None else 10000
@@ -443,7 +443,7 @@ def train_model(model, optimizer, criterion, train_inputs, train_targets, val_in
 
         print(f'Epoch {epoch+1}/{num_epochs}, Train Loss: {epoch_loss:.6f}, Val Loss: {val_loss:.6f}')
 
-        if val_loss < best_val_loss - 1e-4:
+        if val_loss < best_val_loss - 1e-5:
             best_val_loss = val_loss
             patience_counter = 0
             # save best model (on CPU to avoid holding GPU memory)
@@ -1029,8 +1029,8 @@ for n_augment in tqdm(n_augment_levels, desc="Augmentation Levels"):
         model_dm_pi, optimizer_dm_pi, criterion_dm_pi,
         dm_train_augmented_tensors, PI_train_augmented_tensor_on_device,
         dm_clean_test_tensors, clean_PI_test_tensor,
-        epochs=500,  # Reduced epochs for faster execution of the loop
-        batch_size=32
+        epochs=5000,  # Reduced epochs for faster execution of the loop
+        batch_size=64
     )
     print(f"Trained DistanceMatrixRaggedModel for n_augment={n_augment}.")
 
