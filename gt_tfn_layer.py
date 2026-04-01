@@ -441,3 +441,4 @@ if __name__ == "__main__":
         diff = (logits - logits_rot).abs().max().item()
         print(f"  Invariance check (max diff after rotation): {diff:.2e}")
         print(f"  {'OK — invariant' if diff < 1e-3 else 'Not invariant (expected for fp32)'}")
+    

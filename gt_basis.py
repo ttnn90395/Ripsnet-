@@ -1,833 +1,339 @@
 """
-gt_basis.py
-===========
-Gelfand-Tsetlin (GT) basis for SO(n) — dimension-agnostic irrep machinery.
+gt_basis.py  —  Gelfand-Tsetlin basis for SO(n).
 
-Provides:
-  - GTSignature          : immutable label (λ₁ ≥ λ₂ ≥ … ≥ λ_k) for an SO(n) irrep
-  - weyl_dim             : dimension of the irrep via the Weyl formula
-  - branching_rules      : SO(n) → SO(n-1) interlacing decomposition
-  - GTBasis              : evaluates GT harmonic basis functions on the unit (n-1)-sphere
-  - CGCoefficients       : computes/caches Clebsch-Gordan tensors for SO(n) recursively
-
-Design notes
-------------
-* The GT recursion bottoms out at SO(2), whose irreps are 1-D and labeled by a
-  single integer m.  SO(3) irreps are labeled by l (a single non-negative
-  integer), recovering the usual spherical harmonics Y_l^m when n=3.
-* CG coefficients are computed via the standard recursive formula:
-      <λ, m | λ₁, m₁; λ₂, m₂>_SO(n)
-    = Σ_{μ,ν₁,ν₂}  <μ, ν | μ₁, ν₁; μ₂, ν₂>_SO(n-1)
-                  × <λ, μ | ...>  ×  <λ₁, μ₁ | ...>  ×  <λ₂, μ₂ | ...>
-  where the outer sums run over all allowed SO(n-1) branches.
-* For n=3 the output matches the standard Wigner 3j / CG tables exactly
-  (verified in the __main__ block below).
-* All tensors are returned as real-valued torch.Tensor objects.
-
-Limitations / truncation
-------------------------
-Large max_order causes combinatorial growth in irrep count.  For practical
-equivariant networks keep max_order ≤ 2 for n ≤ 6, max_order ≤ 1 for n ≤ 10.
+Provides: GTSignature, weyl_dim, GTBasis, CGCoefficients
 """
-
 from __future__ import annotations
-import math
-import itertools
-from functools import lru_cache
+import math, itertools
 from typing import List, Tuple, Dict, Optional
-import torch
-import numpy as np
-from scipy.special import sph_harm          # used for n=3 base case
-from scipy.linalg import block_diag
+import torch, numpy as np
+from scipy.special import sph_harm
 
 
-# ---------------------------------------------------------------------------
-# 1.  GTSignature
-# ---------------------------------------------------------------------------
+# ── GTSignature ─────────────────────────────────────────────────────────────
 
 class GTSignature:
-    """
-    Immutable label for an SO(n) irreducible representation.
-
-    For SO(n) with rank k = floor(n/2), an irrep is labeled by
-        λ = (λ₁, λ₂, …, λ_k)   with  λ₁ ≥ λ₂ ≥ … ≥ |λ_k| ≥ 0.
-    For n odd the last entry is non-negative; for n even it may be negative
-    (distinguishing the two spin-k representations), but we restrict to
-    λ_k ≥ 0 throughout (no spinorial irreps).
-
-    Parameters
-    ----------
-    lam : tuple of int
-        The signature entries (λ₁, …, λ_k).  Must be non-increasing.
-    n   : int
-        Ambient dimension; determines the rank k = floor(n/2).
-    """
-
     __slots__ = ("_lam", "_n")
-
-    def __init__(self, lam: Tuple[int, ...], n: int):
+    def __init__(self, lam: Tuple[int,...], n: int):
         k = n // 2
-        if len(lam) != k:
-            raise ValueError(f"SO({n}) needs rank-{k} signature, got {len(lam)} entries.")
-        for i in range(len(lam) - 1):
-            if lam[i] < lam[i + 1]:
-                raise ValueError(f"Signature must be non-increasing: {lam}")
-        if lam[-1] < 0:
-            raise ValueError("Spinorial (negative last entry) signatures not supported.")
+        if len(lam) != k: raise ValueError(f"SO({n}) needs rank-{k} sig.")
+        for i in range(len(lam)-1):
+            if lam[i] < lam[i+1]: raise ValueError(f"Non-increasing: {lam}")
+        if lam[-1] < 0: raise ValueError("No spinorial sigs.")
         object.__setattr__(self, "_lam", tuple(int(x) for x in lam))
-        object.__setattr__(self, "_n", int(n))
-
-    # prevent mutation
-    def __setattr__(self, *_):
-        raise AttributeError("GTSignature is immutable.")
-
+        object.__setattr__(self, "_n",   int(n))
+    def __setattr__(self, *_): raise AttributeError("Immutable")
     @property
-    def lam(self) -> Tuple[int, ...]:
-        return self._lam
-
+    def lam(self)  -> Tuple[int,...]: return self._lam
     @property
-    def n(self) -> int:
-        return self._n
-
+    def n(self)    -> int:            return self._n
     @property
-    def rank(self) -> int:
-        return self._n // 2
-
-    def __repr__(self) -> str:
-        return f"GTSignature(lam={self._lam}, n={self._n})"
-
-    def __eq__(self, other) -> bool:
-        return isinstance(other, GTSignature) and self._lam == other._lam and self._n == other._n
-
-    def __hash__(self) -> int:
-        return hash((self._lam, self._n))
+    def rank(self) -> int:            return self._n // 2
+    def __repr__(self)  -> str:  return f"GTSignature(lam={self._lam}, n={self._n})"
+    def __eq__(self, o) -> bool: return isinstance(o,GTSignature) and self._lam==o._lam and self._n==o._n
+    def __hash__(self)  -> int:  return hash((self._lam, self._n))
 
     def restrict(self) -> List["GTSignature"]:
-        """
-        Return all GTSignatures for SO(n-1) that appear in the branching of this
-        SO(n) irrep, i.e. all μ satisfying the interlacing condition:
-            λ₁ ≥ μ₁ ≥ λ₂ ≥ μ₂ ≥ … ≥ λ_k ≥ |μ_k|  (n even, rank stays k, last may be ±)
-            λ₁ ≥ μ₁ ≥ λ₂ ≥ μ₂ ≥ … ≥ μ_{k-1} ≥ λ_k ≥ 0  (n odd, rank drops by 0 conceptually)
-        We handle the recursion uniformly by treating SO(n-1) as having rank
-        floor((n-1)/2).
-        """
-        n2 = self._n - 1            # target group
-        k2 = n2 // 2                # its rank
-        lam = self._lam
-        k   = len(lam)
-
-        if n2 < 2:
-            return []
-
-        # Build ranges for each μ_i using the interlacing constraints.
-        # For SO(n) → SO(n-1):
-        #   n even (k = n/2):   μ has k entries; λ_i ≥ μ_i ≥ λ_{i+1} for i<k, λ_k ≥ μ_k ≥ 0
-        #   n odd  (k =(n-1)/2): SO(n-1) also has rank k; same constraints, last ≥ 0
-        #
-        # In both cases k2 == k  (when n is even, floor((n-1)/2) = k-1 which
-        # would be wrong — handle explicitly):
-
+        n2 = self._n - 1
+        if n2 < 2: return []
+        lam, k = self._lam, len(self._lam)
         if self._n % 2 == 0:
-            # SO(2k) → SO(2k-1): SO(2k-1) has rank k-1
-            # μ = (μ₁,…,μ_{k-1}) with λ_i ≥ μ_i ≥ λ_{i+1}  (i=1..k-1)
-            ranges = []
-            for i in range(k - 1):
-                lo = lam[i + 1]          # λ_{i+1}
-                hi = lam[i]              # λ_i
-                ranges.append(range(lo, hi + 1))
-            results = []
-            for mu in itertools.product(*ranges):
-                # check non-increasing
-                if all(mu[j] >= mu[j + 1] for j in range(len(mu) - 1)):
-                    results.append(GTSignature(mu, n2))
-            return results
-
+            ranges = [range(lam[i+1], lam[i]+1) for i in range(k-1)]
         else:
-            # SO(2k+1) → SO(2k): SO(2k) has rank k
-            # μ = (μ₁,…,μ_k) with λ_i ≥ μ_i ≥ λ_{i+1} for i<k, μ_k ≥ 0 and μ_k ≤ λ_k
-            ranges = []
-            for i in range(k - 1):
-                lo = lam[i + 1]
-                hi = lam[i]
-                ranges.append(range(lo, hi + 1))
-            # last entry
-            ranges.append(range(0, lam[-1] + 1))
-            results = []
-            for mu in itertools.product(*ranges):
-                if all(mu[j] >= mu[j + 1] for j in range(len(mu) - 1)):
-                    results.append(GTSignature(mu, n2))
-            return results
+            ranges = [range(lam[i+1], lam[i]+1) for i in range(k-1)]
+            ranges.append(range(0, lam[-1]+1))
+        results = []
+        for mu in itertools.product(*ranges):
+            if all(mu[j] >= mu[j+1] for j in range(len(mu)-1)):
+                results.append(GTSignature(mu, n2))
+        return results
 
-    def dim(self) -> int:
-        """Dimension of this irrep via the Weyl dimension formula."""
-        return weyl_dim(self._n, self._lam)
-
+    def dim(self) -> int: return weyl_dim(self._n, self._lam)
     @staticmethod
-    def scalar(n: int) -> "GTSignature":
-        """The trivial (scalar) irrep of SO(n): λ = (0, …, 0)."""
-        return GTSignature(tuple([0] * (n // 2)), n)
-
+    def scalar(n: int) -> "GTSignature": return GTSignature(tuple([0]*(n//2)), n)
     @staticmethod
     def vector(n: int) -> "GTSignature":
-        """The standard vector irrep of SO(n): λ = (1, 0, …, 0)."""
-        k = n // 2
-        return GTSignature((1,) + (0,) * (k - 1), n)
+        k = n//2; return GTSignature((1,)+(0,)*(k-1), n)
 
 
-# ---------------------------------------------------------------------------
-# 2.  Weyl dimension formula
-# ---------------------------------------------------------------------------
+# ── weyl_dim ────────────────────────────────────────────────────────────────
 
-def weyl_dim(n: int, lam: Tuple[int, ...]) -> int:
+def weyl_dim(n: int, lam: Tuple[int,...]) -> int:
     """
-    Dimension of the SO(n) irrep with highest weight λ via the Weyl formula.
-
-    For SO(2k+1) (odd n):
-        dim = prod_{1≤i<j≤k} (λ_i - λ_j + j - i)(λ_i + λ_j + 2k+1-i-j)
-              / prod_{1≤i<j≤k} (j - i)(2k+1-i-j)
-              × prod_{i=1}^{k} (λ_i + k + 1 - i) / (k + 1 - i)
-
-    For SO(2k) (even n):
-        dim = prod_{1≤i<j≤k} (λ_i - λ_j + j - i)(λ_i + λ_j + 2k-i-j)
-              / prod_{1≤i<j≤k} (j - i)(2k-i-j)
-              × prod_{i=1}^{k} (λ_i + k - i) / (k - i)   [for k-i > 0]
-
-    Uses exact integer arithmetic (via fractions.Fraction) to avoid float
-    errors for large weights.
+    Dimension of SO(n) irrep with highest weight lam via Weyl formula.
+    B_k (odd n):  prod_{i<j}[(li-lj+j-i)(li+lj+2k-i-j+1)/(j-i)(2k-i-j+1)]
+                  * prod_i  [(2li+2k-2i+1)/(2k-2i+1)]
+    D_k (even n): prod_{i<j}[(li-lj+j-i)(li+lj+2k-i-j)/(j-i)(2k-i-j)]
+    Exact arithmetic; verified SO(3)→2l+1, SO(4) vector=4, SO(5) vector=5.
     """
     from fractions import Fraction
     k = n // 2
-    if len(lam) != k:
-        raise ValueError(f"Expected rank-{k} signature for SO({n}).")
-
-    lam = tuple(int(x) for x in lam)
-
-    if n == 2:
-        # SO(2): irreps are 1-D (single entry m), dim always 1 except for m=0
-        return 1
-
-    result = Fraction(1)
-
-    if n % 2 == 1:
-        # SO(2k+1)
-        for i in range(1, k + 1):
-            li = lam[i - 1]
-            denom = Fraction(k + 1 - i)
-            if denom == 0:
-                continue
-            result *= Fraction(li + k + 1 - i, k + 1 - i)
-        for i in range(1, k + 1):
-            for j in range(i + 1, k + 1):
-                li, lj = lam[i - 1], lam[j - 1]
-                num   = (li - lj + j - i) * (li + lj + 2 * k + 1 - i - j)
-                denom = (j - i) * (2 * k + 1 - i - j)
-                result *= Fraction(num, denom)
-    else:
-        # SO(2k)
-        for i in range(1, k + 1):
-            li = lam[i - 1]
-            d = k - i
-            if d > 0:
-                result *= Fraction(li + d, d)
-            elif d == 0:
-                if li != 0:
-                    result *= Fraction(li, 1)   # convention for last factor when d=0
-        for i in range(1, k + 1):
-            for j in range(i + 1, k + 1):
-                li, lj = lam[i - 1], lam[j - 1]
-                a = j - i
-                b = 2 * k - i - j
-                num   = (li - lj + a) * (li + lj + b)
-                denom = a * b if b != 0 else a
-                if denom != 0:
-                    result *= Fraction(num, denom)
-
-    return max(1, int(round(float(result))))
+    if len(lam) != k: raise ValueError(f"Expected rank-{k} sig for SO({n}).")
+    lam = [int(x) for x in lam]
+    if n <= 2: return 1
+    num, den = Fraction(1), Fraction(1)
+    if n % 2 == 1:                                    # B_k
+        for i in range(1, k+1):
+            for j in range(i+1, k+1):
+                num *= (lam[i-1]-lam[j-1]+j-i) * (lam[i-1]+lam[j-1]+2*k-i-j+1)
+                den *= (j-i) * (2*k-i-j+1)
+            num *= (2*lam[i-1]+2*k-2*i+1)
+            den *= (2*k-2*i+1)
+    else:                                             # D_k
+        for i in range(1, k+1):
+            for j in range(i+1, k+1):
+                num *= (lam[i-1]-lam[j-1]+j-i) * (lam[i-1]+lam[j-1]+2*k-i-j)
+                den *= (j-i) * (2*k-i-j)
+    return max(1, int(round(float(num/den))))
 
 
-# ---------------------------------------------------------------------------
-# 3.  GTBasis — harmonic functions on S^{n-1}
-# ---------------------------------------------------------------------------
+# ── GTBasis ──────────────────────────────────────────────────────────────────
 
 class GTBasis:
     """
-    Evaluates GT harmonic basis functions on the unit (n-1)-sphere.
-
-    For n=3 these are exactly the real spherical harmonics Y_l^m up to
-    max_order=l_max.  For general n they are the Gegenbauer-polynomial-based
-    zonal harmonics combined with lower-dimensional harmonics via the GT chain.
-
-    Parameters
-    ----------
-    n         : int    ambient dimension (points live in R^n)
-    max_order : int    maximum value of λ₁ (analogous to l_max in SO(3))
-
-    Usage
-    -----
-    basis = GTBasis(n=3, max_order=2)
-    unit_dirs : Tensor of shape (N, N, n)   # unit direction vectors
-    features  : Tensor of shape (N, N, basis.num_basis)
-    features  = basis(unit_dirs)
+    GT harmonic basis functions on S^{n-1}.
+    n=3: real spherical harmonics (scipy). n>=4: Gegenbauer recursion.
     """
-
     def __init__(self, n: int, max_order: int):
-        self.n = n
-        self.max_order = max_order
-        # Enumerate all signatures with λ₁ ≤ max_order
-        self.signatures: List[GTSignature] = _enumerate_signatures(n, max_order)
-        self.dims: List[int] = [s.dim() for s in self.signatures]
-        self.num_basis: int = sum(self.dims)
+        self.n = n; self.max_order = max_order
+        self.signatures: List[GTSignature] = _enum_sigs(n, max_order)
+        self.dims:       List[int]         = [s.dim() for s in self.signatures]
+        self.num_basis:  int               = sum(self.dims)
 
     def __call__(self, unit_dirs: torch.Tensor) -> torch.Tensor:
-        """
-        Evaluate all basis functions on the given unit vectors.
+        return self._eval_n3(unit_dirs) if self.n==3 else self._eval_general(unit_dirs)
 
-        Parameters
-        ----------
-        unit_dirs : (..., n)   unit vectors on S^{n-1}
-
-        Returns
-        -------
-        (..., num_basis)   real-valued harmonic features
-        """
-        if self.n == 3:
-            return self._eval_n3(unit_dirs)
-        else:
-            return self._eval_general(unit_dirs)
-
-    # ------------------------------------------------------------------
-    # n=3: use scipy's real spherical harmonics, exact and fast
-    # ------------------------------------------------------------------
-    def _eval_n3(self, unit_dirs: torch.Tensor) -> torch.Tensor:
-        """Real spherical harmonics for SO(3), max_order = l_max."""
-        shape = unit_dirs.shape[:-1]
-        x, y, z = unit_dirs[..., 0], unit_dirs[..., 1], unit_dirs[..., 2]
-        # spherical coords
-        theta = torch.acos(z.clamp(-1 + 1e-7, 1 - 1e-7))   # polar
-        phi   = torch.atan2(y, x)                             # azimuthal
-
-        theta_np = theta.detach().cpu().numpy().reshape(-1)
-        phi_np   = phi.detach().cpu().numpy().reshape(-1)
-
-        parts = []
+    def _eval_n3(self, d: torch.Tensor) -> torch.Tensor:
+        shape = d.shape[:-1]
+        x,y,z = d[...,0], d[...,1], d[...,2]
+        theta  = torch.acos(z.clamp(-1+1e-7,1-1e-7))
+        phi    = torch.atan2(y,x)
+        th_np  = theta.detach().cpu().numpy().reshape(-1)
+        ph_np  = phi.detach().cpu().numpy().reshape(-1)
+        parts  = []
         for sig in self.signatures:
-            l = sig.lam[0]   # for SO(3), rank=1, single entry
-            block = []
-            for m in range(-l, l + 1):
-                # scipy sph_harm(m, l, phi, theta) — note argument order
-                Y = sph_harm(abs(m), l, phi_np, theta_np)
-                if m < 0:
-                    val = math.sqrt(2) * Y.imag
-                elif m > 0:
-                    val = math.sqrt(2) * ((-1) ** m) * Y.real
-                else:
-                    val = Y.real
+            l = sig.lam[0]; block=[]
+            for m in range(-l,l+1):
+                Y = sph_harm(abs(m),l,ph_np,th_np)
+                if   m<0: val=math.sqrt(2)*Y.imag
+                elif m>0: val=math.sqrt(2)*((-1)**m)*Y.real
+                else:     val=Y.real
                 block.append(val.astype(np.float32))
-            parts.append(np.stack(block, axis=-1))  # (N_flat, 2l+1)
+            parts.append(np.stack(block,axis=-1))
+        arr = np.concatenate(parts,axis=-1)
+        return torch.from_numpy(arr).to(d.device).reshape(*shape,self.num_basis)
 
-        arr = np.concatenate(parts, axis=-1)   # (N_flat, num_basis)
-        out = torch.from_numpy(arr).to(unit_dirs.device)
-        return out.reshape(*shape, self.num_basis)
+    def _eval_general(self, d: torch.Tensor) -> torch.Tensor:
+        shape = d.shape[:-1]; flat = d.reshape(-1,self.n)
+        parts = [self._eval_sig(flat,sig) for sig in self.signatures]
+        return torch.cat(parts,dim=-1).reshape(*shape,self.num_basis)
 
-    # ------------------------------------------------------------------
-    # General n: Gegenbauer-polynomial GT harmonics
-    # ------------------------------------------------------------------
-    def _eval_general(self, unit_dirs: torch.Tensor) -> torch.Tensor:
-        """
-        GT harmonics for SO(n), n ≥ 4.
-
-        We use the standard factorization of hyperspherical harmonics via
-        the GT chain.  Each harmonic Y^λ_m(ω) on S^{n-1} factors as:
-
-            Y^λ_m(ω) = C_λ₁^{α}(cos θ_{n-1}) · sin^{λ₁}(θ_{n-1}) · Y^{μ}_{m'}(ω')
-
-        where ω' is the projection onto S^{n-2}, θ_{n-1} is the polar angle
-        from the last axis, C is a Gegenbauer polynomial, and μ is the
-        appropriate GT branch.  We recurse down to n=3 for the base case.
-
-        This gives an orthonormal basis that transforms as the corresponding
-        SO(n) irrep under rotation.
-        """
-        shape = unit_dirs.shape[:-1]
-        flat  = unit_dirs.reshape(-1, self.n)   # (M, n)
-        M     = flat.shape[0]
-
-        parts = []
-        for sig in self.signatures:
-            block = self._eval_signature(flat, sig)  # (M, dim)
-            parts.append(block)
-
-        out = torch.cat(parts, dim=-1)   # (M, num_basis)
-        return out.reshape(*shape, self.num_basis)
-
-    def _eval_signature(self, dirs: torch.Tensor, sig: GTSignature) -> torch.Tensor:
-        """
-        Evaluate all basis functions for one GT signature.
-
-        Returns (M, dim) real tensor.
-        """
-        n   = sig.n
-        dim = sig.dim()
-        M   = dirs.shape[0]
-
-        if n == 2:
-            # SO(2): irreps are e^{imφ}; basis = {cos(mφ), sin(mφ)} for m>0, {1} for m=0
-            m  = sig.lam[0]
-            phi = torch.atan2(dirs[:, 1], dirs[:, 0])
-            if m == 0:
-                return torch.ones(M, 1, device=dirs.device)
-            else:
-                return torch.stack([torch.cos(m * phi), torch.sin(m * phi)], dim=-1)
-
-        if n == 3:
-            # Use scipy base case wrapped in torch
-            tmp_basis = GTBasis(3, sig.lam[0])
-            val = tmp_basis._eval_n3(dirs)    # (M, total_basis_for_order_l)
-            # pick only the block for this signature
-            offset = 0
-            for s in tmp_basis.signatures:
-                d = s.dim()
-                if s == sig:
-                    return val[:, offset:offset + d]
-                offset += d
-            return torch.zeros(M, dim, device=dirs.device)
-
-        # n >= 4: GT recursion
-        # Polar decomposition: last coordinate gives cos(θ), rest give ω' on S^{n-2}
-        z     = dirs[:, -1].clamp(-1 + 1e-7, 1 - 1e-7)    # cos(θ_{n-1})
-        sin_t = torch.sqrt(1 - z ** 2).clamp(min=1e-8)
-        omega = dirs[:, :-1] / sin_t.unsqueeze(-1)           # unit vector on S^{n-2}
-
-        lam1  = sig.lam[0]
-        branches = sig.restrict()                             # SO(n-1) signatures
-
-        cols = []
-        for mu in branches:
-            # Gegenbauer polynomial C_{lam1 - mu1}^{alpha}(z) evaluated at z
-            # with alpha = mu.dim() + (n-3)/2  (the SO(n-1) Gegenbauer index)
-            order  = lam1 - mu.lam[0]
-            alpha  = mu.dim() + (self.n - 3) / 2
-            C_vals = _gegenbauer(order, alpha, z)             # (M,)
-
-            # radial factor: sin^{mu1}(θ)
-            radial = sin_t ** mu.lam[0]                       # (M,)
-
-            # lower-dimensional harmonics on S^{n-2}
-            sub_basis = GTBasis(self.n - 1, mu.lam[0])
-            Y_mu = sub_basis._eval_signature(omega, mu)        # (M, mu.dim())
-
-            # combine: (M, mu.dim())
-            factor = (C_vals * radial).unsqueeze(-1)          # (M, 1)
-            cols.append(factor * Y_mu)
-
-        if not cols:
-            return torch.zeros(M, dim, device=dirs.device)
-
-        result = torch.cat(cols, dim=-1)   # (M, dim)
-        # normalize (Gegenbauer norms are not always 1)
-        norms = result.norm(dim=0, keepdim=True).clamp(min=1e-8)
-        return result / norms
+    def _eval_sig(self, dirs: torch.Tensor, sig: GTSignature) -> torch.Tensor:
+        n,dim,M = sig.n, sig.dim(), dirs.shape[0]
+        if n==2:
+            m=sig.lam[0]; phi=torch.atan2(dirs[:,1],dirs[:,0])
+            if m==0: return torch.ones(M,1,device=dirs.device)
+            return torch.stack([torch.cos(m*phi),torch.sin(m*phi)],dim=-1)
+        if n==3:
+            tmp=GTBasis(3,sig.lam[0]); val=tmp._eval_n3(dirs); off=0
+            for s in tmp.signatures:
+                d2=s.dim()
+                if s==sig: return val[:,off:off+d2]
+                off+=d2
+            return torch.zeros(M,dim,device=dirs.device)
+        # n>=4
+        z     = dirs[:,-1].clamp(-1+1e-7,1-1e-7)
+        sin_t = torch.sqrt(1-z**2).clamp(min=1e-8)
+        omega = dirs[:,:-1]/sin_t.unsqueeze(-1)
+        cols  = []
+        for mu in sig.restrict():
+            Cv = _gegenbauer(sig.lam[0]-mu.lam[0], mu.dim()+(n-3)/2, z)
+            Yr = GTBasis(n-1,mu.lam[0])._eval_sig(omega,mu)
+            cols.append((Cv*sin_t**mu.lam[0]).unsqueeze(-1)*Yr)
+        if not cols: return torch.zeros(M,dim,device=dirs.device)
+        res=torch.cat(cols,dim=-1); nrm=res.norm(dim=0,keepdim=True).clamp(min=1e-8)
+        return res/nrm
 
 
-def _gegenbauer(n: int, alpha: float, x: torch.Tensor) -> torch.Tensor:
-    """
-    Evaluate Gegenbauer polynomial C_n^alpha(x) via 3-term recurrence.
-    Returns a tensor of the same shape as x.
-    """
-    if n == 0:
-        return torch.ones_like(x)
-    if n == 1:
-        return 2 * alpha * x
-    C_prev2 = torch.ones_like(x)
-    C_prev1 = 2 * alpha * x
-    for k in range(2, n + 1):
-        C_curr  = (2 * x * (k + alpha - 1) * C_prev1
-                   - (k + 2 * alpha - 2) * C_prev2) / k
-        C_prev2 = C_prev1
-        C_prev1 = C_curr
-    return C_prev1
-
-
-def _enumerate_signatures(n: int, max_order: int) -> List[GTSignature]:
-    """All GTSignatures for SO(n) with λ₁ ≤ max_order, sorted by λ₁."""
-    k = n // 2
-    sigs = []
-    for l1 in range(max_order + 1):
-        # enumerate all non-increasing tuples (l1, l2, ..., lk) with 0 ≤ lk ≤ ... ≤ l1
-        def _rec(remaining_rank, upper_bound, current):
-            if remaining_rank == 0:
-                sigs.append(GTSignature(tuple(current), n))
-                return
-            for v in range(0, upper_bound + 1):
-                _rec(remaining_rank - 1, v, current + [v])
-        _rec(k - 1, l1, [l1])
-    return sigs
-
-
-# ---------------------------------------------------------------------------
-# 4.  CGCoefficients
-# ---------------------------------------------------------------------------
+# ── CGCoefficients ───────────────────────────────────────────────────────────
 
 class CGCoefficients:
-    """
-    Computes and caches Clebsch-Gordan tensors for SO(n).
-
-    CG(λ₁, λ₂ → λ₃) is the tensor:
-        C[m₁, m₂, m₃]   of shape (dim(λ₁), dim(λ₂), dim(λ₃))
-    satisfying:
-        V_{λ₁} ⊗ V_{λ₂} = ⊕_{λ₃ ∈ λ₁⊗λ₂} V_{λ₃}
-
-    For n=3, this matches the standard Wigner 3j / CG table (real basis).
-
-    The recursion uses the GT branching:
-        <λ, m | λ₁, m₁; λ₂, m₂>_SO(n)
-      = Σ_{μ,ν₁,ν₂} <μ, ν | μ₁, ν₁; μ₂, ν₂>_SO(n-1)
-                   × W(λ,μ) × W(λ₁,μ₁) × W(λ₂,μ₂)
-    where W(λ,μ) are the GT isoscalar factors (reduced matrix elements in the
-    SO(n) ⊃ SO(n-1) basis), computed here via the Racah factorization lemma.
-
-    Parameters
-    ----------
-    n         : int   ambient dimension
-    max_order : int   maximum λ₁ considered
-    """
-
+    """Clebsch-Gordan tensors for SO(n), built recursively and cached."""
     def __init__(self, n: int, max_order: int):
-        self.n = n
-        self.max_order = max_order
-        self._cache: Dict[Tuple, torch.Tensor] = {}
-        # Pre-compute all CG tables up to max_order
+        self.n=n; self.max_order=max_order
+        self._cache: Dict[Tuple,torch.Tensor] = {}
         self._precompute()
 
-    # ------------------------------------------------------------------
     def _precompute(self):
-        sigs = _enumerate_signatures(self.n, self.max_order)
+        sigs = _enum_sigs(self.n, self.max_order)
         for s1 in sigs:
             for s2 in sigs:
-                for s3 in _tensor_product_sigs(s1, s2, self.n, self.max_order):
-                    key = (s1.lam, s2.lam, s3.lam)
+                cap = min(self.max_order, s1.lam[0]+s2.lam[0])
+                for s3 in _enum_sigs(self.n, cap):
+                    key=(s1.lam,s2.lam,s3.lam)
                     if key not in self._cache:
-                        self._cache[key] = self._compute_cg(s1, s2, s3)
+                        self._cache[key]=self._compute_cg(s1,s2,s3)
 
-    def get(self, lam1: GTSignature, lam2: GTSignature,
-            lam3: GTSignature) -> Optional[torch.Tensor]:
-        """
-        Return the CG tensor C[m₁, m₂, m₃] of shape
-        (dim(lam1), dim(lam2), dim(lam3)), or None if lam3 ∉ lam1 ⊗ lam2.
-        """
-        key = (lam1.lam, lam2.lam, lam3.lam)
-        return self._cache.get(key, None)
+    def get(self, l1:GTSignature, l2:GTSignature, l3:GTSignature) -> Optional[torch.Tensor]:
+        return self._cache.get((l1.lam,l2.lam,l3.lam))
 
-    def tensor_product_irreps(self, lam1: GTSignature,
-                              lam2: GTSignature) -> List[GTSignature]:
-        """All λ₃ that appear in lam1 ⊗ lam2."""
-        return [s for s in _tensor_product_sigs(lam1, lam2, self.n, self.max_order)
-                if self._cache.get((lam1.lam, lam2.lam, s.lam)) is not None]
+    def tensor_product_irreps(self, l1:GTSignature, l2:GTSignature) -> List[GTSignature]:
+        cap=min(self.max_order,l1.lam[0]+l2.lam[0])
+        return [s for s in _enum_sigs(self.n,cap)
+                if self._cache.get((l1.lam,l2.lam,s.lam),torch.zeros(1)).norm()>1e-8]
 
-    # ------------------------------------------------------------------
-    def _compute_cg(self, s1: GTSignature, s2: GTSignature,
-                    s3: GTSignature) -> torch.Tensor:
-        """
-        Compute the CG tensor for s1 ⊗ s2 → s3 via the GT recursion.
-
-        Returns real tensor of shape (d1, d2, d3).
-        """
-        d1, d2, d3 = s1.dim(), s2.dim(), s3.dim()
-        n = self.n
-
-        # Base case: SO(2)
-        if n == 2:
-            return self._cg_so2(s1, s2, s3)
-
-        # Base case: SO(3) — use exact Wigner 3j via sympy/hardcoded recursion
-        if n == 3:
-            return self._cg_so3(s1, s2, s3)
-
-        # General n ≥ 4: GT recursion
-        C = torch.zeros(d1, d2, d3)
-
-        branches1 = s1.restrict()   # SO(n-1) irreps inside s1
-        branches2 = s2.restrict()   # SO(n-1) irreps inside s3
-        branches3 = s3.restrict()   # SO(n-1) irreps inside s2
-
-        # Offsets for the GT basis decomposition d_i = Σ_μ dim(μ)
-        off1 = _branch_offsets(s1)
-        off2 = _branch_offsets(s2)
-        off3 = _branch_offsets(s3)
-
-        # GT isoscalar factors W(parent, child): see _isoscalar
-        # CG at level n is a sum over compatible (μ₁, μ₂, μ₃) triples
-        # We use the Racah factorization:
-        #   C^{s3,m3}_{s1,m1;s2,m2} = Σ_{μ₁∈s1, μ₂∈s2, μ₃∈s3 | μ₃∈μ₁⊗μ₂}
-        #     W(s1,μ₁) · W(s2,μ₂) · W(s3,μ₃) · C^{μ₃,ν₃}_{μ₁,ν₁;μ₂,ν₂}
-
-        # Build sub-CG for SO(n-1)
-        sub_cg = CGCoefficients(n - 1, self.max_order) if n - 1 >= 2 else None
-
-        for i1, mu1 in enumerate(branches1):
-            w1 = _isoscalar(s1, mu1)         # float
-            sl1_s, sl1_e = off1[i1], off1[i1] + mu1.dim()
-            for i2, mu2 in enumerate(branches2):
-                w2 = _isoscalar(s2, mu2)
-                sl2_s, sl2_e = off2[i2], off2[i2] + mu2.dim()
-                # possible mu3
-                for i3, mu3 in enumerate(branches3):
-                    if sub_cg is None:
-                        continue
-                    cg_sub = sub_cg.get(mu1, mu2, mu3)
-                    if cg_sub is None:
-                        continue
-                    w3 = _isoscalar(s3, mu3)
-                    sl3_s, sl3_e = off3[i3], off3[i3] + mu3.dim()
-                    # accumulate
-                    # C[sl1, sl2, sl3] += w1*w2*w3 * cg_sub[ν1,ν2,ν3]
-                    C[sl1_s:sl1_e, sl2_s:sl2_e, sl3_s:sl3_e] += (
-                        w1 * w2 * w3 * cg_sub
-                    )
-
-        # Orthogonalize (the w products may not give a perfectly unitary CG;
-        # apply QR along the m3 axis to ensure orthonormality)
-        C = _orthonormalize_cg(C, d1, d2, d3)
+    def _compute_cg(self, s1,s2,s3) -> torch.Tensor:
+        d1,d2,d3=s1.dim(),s2.dim(),s3.dim()
+        if self.n==2:
+            return (torch.ones(1,1,1) if s1.lam[0]+s2.lam[0]==s3.lam[0]
+                    else torch.zeros(1,1,1))
+        if self.n==3:
+            l1,l2,l3=s1.lam[0],s2.lam[0],s3.lam[0]
+            Cc=_so3_cg_complex(l1,l2,l3)
+            if Cc is None: return torch.zeros(d1,d2,d3)
+            U1,U2,U3=_real2complex(l1),_real2complex(l2),_real2complex(l3)
+            Cr=np.einsum('am,bn,mno,op->abo',U1.conj(),U2.conj(),Cc,U3).real
+            return torch.from_numpy(Cr.astype(np.float32))
+        # n>=4: GT recursion
+        C=torch.zeros(d1,d2,d3)
+        b1,b2,b3=s1.restrict(),s2.restrict(),s3.restrict()
+        o1,o2,o3=_branch_offs(s1),_branch_offs(s2),_branch_offs(s3)
+        sub=CGCoefficients(self.n-1,self.max_order)
+        for i1,mu1 in enumerate(b1):
+            w1=_isoscalar(s1,mu1); sl1=slice(o1[i1],o1[i1]+mu1.dim())
+            for i2,mu2 in enumerate(b2):
+                w2=_isoscalar(s2,mu2); sl2=slice(o2[i2],o2[i2]+mu2.dim())
+                for i3,mu3 in enumerate(b3):
+                    cg_sub=sub.get(mu1,mu2,mu3)
+                    if cg_sub is None: continue
+                    w3=_isoscalar(s3,mu3); sl3=slice(o3[i3],o3[i3]+mu3.dim())
+                    C[sl1,sl2,sl3]+=w1*w2*w3*cg_sub
+        mat=C.reshape(d1*d2,d3)
+        if mat.shape[0]>=mat.shape[1] and mat.norm()>1e-10:
+            Q,_=torch.linalg.qr(mat); C=Q.reshape(d1,d2,d3)
         return C
 
-    # ------------------------------------------------------------------
-    def _cg_so2(self, s1: GTSignature, s2: GTSignature,
-                s3: GTSignature) -> torch.Tensor:
-        """SO(2) CG: m₃ = m₁ + m₂ selection rule, 1-D irreps."""
-        m1, m2, m3 = s1.lam[0], s2.lam[0], s3.lam[0]
-        if m1 + m2 == m3:
-            return torch.ones(1, 1, 1)
-        return torch.zeros(1, 1, 1)
 
-    def _cg_so3(self, s1: GTSignature, s2: GTSignature,
-                s3: GTSignature) -> torch.Tensor:
-        """
-        CG coefficients for SO(3) in the real spherical harmonic basis.
+# ── helpers ──────────────────────────────────────────────────────────────────
 
-        l = s.lam[0].  Computed via the standard recursion (no sympy needed).
-        Shape: (2l1+1, 2l2+1, 2l3+1).
-        """
-        l1, l2, l3 = s1.lam[0], s2.lam[0], s3.lam[0]
-        d1, d2, d3 = 2*l1+1, 2*l2+1, 2*l3+1
+def _enum_sigs(n:int,max_order:int)->List[GTSignature]:
+    k,sigs=n//2,[]
+    for l1 in range(max_order+1):
+        def _rec(rem,upper,cur):
+            if rem==0: sigs.append(GTSignature(tuple(cur),n)); return
+            for v in range(0,upper+1): _rec(rem-1,v,cur+[v])
+        _rec(k-1,l1,[l1])
+    return sigs
 
-        # Complex CG via recursion, then transform to real basis
-        C_complex = _so3_cg_complex(l1, l2, l3)   # (d1, d2, d3) complex
-        if C_complex is None:
-            return torch.zeros(d1, d2, d3)
+def _gegenbauer(order:int,alpha:float,x:torch.Tensor)->torch.Tensor:
+    if order==0: return torch.ones_like(x)
+    if order==1: return 2*alpha*x
+    C0,C1=torch.ones_like(x),2*alpha*x
+    for k in range(2,order+1):
+        C2=(2*x*(k+alpha-1)*C1-(k+2*alpha-2)*C0)/k; C0,C1=C1,C2
+    return C1
 
-        # Real-to-complex change-of-basis for each l
-        U1 = _real2complex(l1)   # (2l+1, 2l+1) complex unitary
-        U2 = _real2complex(l2)
-        U3 = _real2complex(l3)
+def _branch_offs(sig:GTSignature)->List[int]:
+    offs,pos=[],0
+    for mu in sig.restrict(): offs.append(pos); pos+=mu.dim()
+    return offs
 
-        # C_real = U1† ⊗ U2† · C_complex · U3
-        # In index notation:  C_real[m1,m2,m3] = Σ U1†[m1,μ1] U2†[m2,μ2] C_complex[μ1,μ2,μ3] U3[μ3,m3]
-        import numpy as np
-        Cc = C_complex.numpy()
-        Cr = np.einsum('am,bn,mno,op->abo', U1.conj().numpy(), U2.conj().numpy(), Cc, U3.numpy()).real
-        return torch.from_numpy(Cr.astype(np.float32))
+def _isoscalar(parent:GTSignature,child:GTSignature)->float:
+    branches=parent.restrict(); total=sum(b.dim() for b in branches)
+    if total==0 or child not in branches: return 0.
+    return math.sqrt(child.dim()/total)
 
 
-# ---------------------------------------------------------------------------
-# Helper functions
-# ---------------------------------------------------------------------------
+# ── SO(3) CG in complex basis ────────────────────────────────────────────────
 
-def _tensor_product_sigs(s1: GTSignature, s2: GTSignature,
-                         n: int, max_order: int) -> List[GTSignature]:
+def _so3_cg_complex(l1:int,l2:int,l3:int):
     """
-    All GT signatures that CAN appear in s1 ⊗ s2 (necessary conditions only;
-    actual appearance is checked via the CG tensor).
-    For SO(n), the Littlewood-Richardson rule gives:
-        λ₃ components satisfy |λ₁_i - λ₂_i| ≤ λ₃_i ≤ λ₁_i + λ₂_i
-    plus the non-increasing and max_order constraints.
+    Validated Condon-Shortley two-pass recursion.
+    Returns numpy complex64 (d1,d2,d3) or None.
+    Pass 1: GS top-rung against ALL previous columns (ensures global unitarity).
+    Pass 2: J- recursion fills each block; every new column joins GS basis.
     """
-    all_sigs = _enumerate_signatures(n, min(max_order, s1.lam[0] + s2.lam[0]))
-    return all_sigs   # conservative: return all; non-applicable ones give zero CG
+    if abs(l1-l2)>l3 or l3>l1+l2: return None
+    d1,d2=2*l1+1,2*l2+1
+    def idx(l,m): return int(m+l)
+    def Jm(l,m):  return math.sqrt(max(l*(l+1)-m*(m-1),0.))
+    all_cols: List[np.ndarray]=[]
+    tables:   Dict[int,np.ndarray]={}
+    for l3c in range(l1+l2,abs(l1-l2)-1,-1):
+        d3c=2*l3c+1; C=np.zeros((d1,d2,d3c),dtype=np.complex128)
+        pairs=[(m1,l3c-m1) for m1 in range(-l1,l1+1) if -l2<=l3c-m1<=l2]
+        v=None
+        for m1s,m2s in pairs:
+            cand=np.zeros(d1*d2,dtype=np.complex128)
+            cand[idx(l1,m1s)*d2+idx(l2,m2s)]=1.
+            for u in all_cols: cand-=np.dot(u.conj(),cand)*u
+            nc=np.linalg.norm(cand)
+            if nc>1e-10: v=cand/nc; break
+        if v is None: continue
+        best=max(pairs,key=lambda p:abs(v[idx(l1,p[0])*d2+idx(l2,p[1])]))
+        c=v[idx(l1,best[0])*d2+idx(l2,best[1])]
+        if abs(c)>1e-12: v*=abs(c)/c
+        for m1 in range(-l1,l1+1):
+            for m2 in range(-l2,l2+1):
+                C[idx(l1,m1),idx(l2,m2),idx(l3c,l3c)]=v[idx(l1,m1)*d2+idx(l2,m2)]
+        all_cols.append(v.copy())
+        for m3 in range(l3c,-l3c,-1):
+            den=Jm(l3c,m3)
+            if den<1e-14: continue
+            for m1 in range(-l1,l1+1):
+                for m2 in range(-l2,l2+1):
+                    val=0.
+                    if -l1<=m1+1<=l1: val+=Jm(l1,m1+1)*C[idx(l1,m1+1),idx(l2,m2),  idx(l3c,m3)]
+                    if -l2<=m2+1<=l2: val+=Jm(l2,m2+1)*C[idx(l1,m1),  idx(l2,m2+1),idx(l3c,m3)]
+                    C[idx(l1,m1),idx(l2,m2),idx(l3c,m3-1)]=val/den
+            nc=C[:,:,idx(l3c,m3-1)].reshape(-1).copy()
+            nn=np.linalg.norm(nc)
+            if nn>1e-12: all_cols.append(nc/nn)
+        tables[l3c]=C
+    if l3 not in tables: return None
+    return tables[l3].astype(np.complex64)
 
 
-def _branch_offsets(sig: GTSignature) -> List[int]:
-    """Starting indices in the GT basis for each SO(n-1) branch of sig."""
-    branches = sig.restrict()
-    offsets = []
-    pos = 0
-    for mu in branches:
-        offsets.append(pos)
-        pos += mu.dim()
-    return offsets
-
-
-def _isoscalar(parent: GTSignature, child: GTSignature) -> float:
-    """
-    GT isoscalar factor (reduced matrix element) W(parent → child).
-
-    For a simple approximation we use the ratio sqrt(dim(child)/dim(parent))
-    weighted by the number of branches, which is exact for SO(3) and a
-    reasonable initialization for SO(n); the _orthonormalize_cg step corrects
-    for any deviation from unitarity.
-    """
-    branches = parent.restrict()
-    total_dim = sum(b.dim() for b in branches)
-    if total_dim == 0:
-        return 0.0
-    return math.sqrt(child.dim() / total_dim) if child in branches else 0.0
-
-
-def _orthonormalize_cg(C: torch.Tensor, d1: int, d2: int, d3: int) -> torch.Tensor:
-    """
-    Reshape C to (d1*d2, d3), QR-decompose, and return Q reshaped back.
-    This ensures the CG tensor is orthonormal in the (m₃) direction,
-    consistent with the Schur orthogonality relations.
-    """
-    mat = C.reshape(d1 * d2, d3)
-    if mat.shape[0] < mat.shape[1] or mat.norm() < 1e-10:
-        return C
-    Q, _ = torch.linalg.qr(mat)
-    return Q.reshape(d1, d2, d3)
-
-
-# ---------------------------------------------------------------------------
-# SO(3) complex CG via the standard m-recursion
-# ---------------------------------------------------------------------------
-
-def _so3_cg_complex(l1: int, l2: int, l3: int):
-    """
-    Complex CG table <l1,m1;l2,m2|l3,m3> using the recursion relation.
-    Returns numpy complex64 array of shape (2l1+1, 2l2+1, 2l3+1), or None
-    if the triangle rule is violated.
-    """
-    import numpy as np
-    if abs(l1 - l2) > l3 or l3 > l1 + l2:
-        return None
-
-    d1, d2, d3 = 2*l1+1, 2*l2+1, 2*l3+1
-    C = np.zeros((d1, d2, d3), dtype=np.complex64)
-
-    def idx(l, m):
-        return m + l
-
-    def f(l, m):
-        return math.sqrt(max(l * (l + 1) - m * (m + 1), 0))
-
-    # Seed: <l1,l1;l2,m2|l3,l3> via top-rung condition
-    # J₊|l3,l3> = 0  →  Σ_m2 <l1,l1;l2,m2|l3,l3> * (J₊)_m2 = 0
-    # We bootstrap from the stretched state <l1,l1;l2,l2|l1+l2,l1+l2>=1
-
-    if l3 == l1 + l2:
-        C[idx(l1, l1), idx(l2, l2), idx(l3, l3)] = 1.0
-        # Apply J₋ recursively to generate all m3 < l3
-        for m3 in range(l3, -l3, -1):
-            for m1 in range(-l1, l1 + 1):
-                m2 = m3 - m1
-                if abs(m2) > l2:
-                    continue
-                # <l1,m1-1;l2,m2> component via J₋ on l1
-                if m1 - 1 >= -l1:
-                    C[idx(l1, m1-1), idx(l2, m2), idx(l3, m3-1)] += (
-                        f(l1, m1-1) / f(l3, m3-1) * C[idx(l1,m1), idx(l2,m2), idx(l3,m3)]
-                        if f(l3, m3-1) > 0 else 0
-                    )
-                # <l1,m1;l2,m2-1> component
-                if m2 - 1 >= -l2:
-                    C[idx(l1, m1), idx(l2, m2-1), idx(l3, m3-1)] += (
-                        f(l2, m2-1) / f(l3, m3-1) * C[idx(l1,m1), idx(l2,m2), idx(l3,m3)]
-                        if f(l3, m3-1) > 0 else 0
-                    )
-    else:
-        # For l3 < l1+l2 we need the full recursion; use a simple
-        # Gram-Schmidt approach in the (m1+m2=m3) subspaces
-        for m3 in range(l3, -l3 - 1, -1):
-            col = np.zeros(d1 * d2, dtype=np.complex64)
-            k = 0
-            for m1 in range(-l1, l1 + 1):
-                for m2 in range(-l2, l2 + 1):
-                    if m1 + m2 == m3:
-                        col[k] = 1.0   # placeholder; GS will orthogonalize
-                    k += 1
-            # Orthogonalize against all l3' > l3 already computed
-            # (simplified — fill with delta for now; exact for leading irrep)
-            for m1 in range(-l1, l1 + 1):
-                m2 = m3 - m1
-                if abs(m2) <= l2:
-                    C[idx(l1, m1), idx(l2, m2), idx(l3, m3)] = (
-                        1.0 / math.sqrt(2 * l3 + 1)
-                    )
-
-    # Normalize columns (m3)
-    for m3_i in range(d3):
-        col = C[:, :, m3_i].reshape(-1)
-        norm = np.linalg.norm(col)
-        if norm > 1e-10:
-            C[:, :, m3_i] /= norm
-
-    return C
-
-
-def _real2complex(l: int) -> torch.Tensor:
-    """
-    Unitary change-of-basis matrix U from real to complex spherical harmonics.
-    U[m, μ] converts Y^R_m → Y^C_μ.
-    Shape (2l+1, 2l+1), dtype complex64.
-    """
-    d = 2 * l + 1
-    U = torch.zeros(d, d, dtype=torch.complex64)
-    for m in range(-l, l + 1):
-        i = m + l
-        if m < 0:
-            U[i, (-m) + l] =  1j / math.sqrt(2)
-            U[i, m  + l]   = -1j / math.sqrt(2) * ((-1) ** m)
-        elif m > 0:
-            U[i, m  + l]   =  1 / math.sqrt(2) * ((-1) ** m)
-            U[i, (-m) + l] =  1 / math.sqrt(2)
-        else:
-            U[i, l] = 1.0
+def _real2complex(l:int)->np.ndarray:
+    """Real-to-complex SH basis change, numpy complex128."""
+    d=2*l+1; U=np.zeros((d,d),dtype=np.complex128)
+    for m in range(-l,l+1):
+        i=m+l
+        if m<0:   U[i,(-m)+l]=1j/math.sqrt(2); U[i,m+l]=-1j/math.sqrt(2)*((-1)**m)
+        elif m>0: U[i,m+l]=1/math.sqrt(2)*((-1)**m); U[i,(-m)+l]=1/math.sqrt(2)
+        else:     U[i,l]=1.
     return U
 
 
-# ---------------------------------------------------------------------------
-# Self-test
-# ---------------------------------------------------------------------------
+# ── self-test ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print("=== GTSignature ===")
-    s = GTSignature((2, 1), n=4)
-    print(f"  {s}  dim={s.dim()}")
-    print(f"  branches: {s.restrict()}")
+    print("=== weyl_dim ===")
+    for n,lam,exp in [(3,(0,),1),(3,(1,),3),(3,(2,),5),(4,(1,0),4),(4,(1,1),3),(5,(1,0),5)]:
+        got=weyl_dim(n,lam)
+        print(f"  SO({n}) {lam}: {got}  {'OK' if got==exp else f'FAIL exp={exp}'}")
 
-    print("\n=== Weyl dimension ===")
-    cases = [
-        (3, (0,), 1),  (3, (1,), 3),  (3, (2,), 5),
-        (4, (1,0), 4), (4, (1,1), 6), (5, (1,0), 5),
-    ]
-    for n, lam, expected in cases:
-        got = weyl_dim(n, lam)
-        status = "OK" if got == expected else f"FAIL (expected {expected})"
-        print(f"  SO({n}) λ={lam}: dim={got}  {status}")
+    print("\n=== _so3_cg_complex ===")
+    for l1,l2,l3 in [(1,1,0),(1,1,1),(1,1,2),(2,1,1),(2,2,2)]:
+        C=_so3_cg_complex(l1,l2,l3)
+        if C is None: continue
+        d1,d2,d3=2*l1+1,2*l2+1,2*l3+1
+        err=abs((C.reshape(d1*d2,d3).conj().T@C.reshape(d1*d2,d3))-np.eye(d3)).max()
+        viol=sum(1 for m1 in range(-l1,l1+1) for m2 in range(-l2,l2+1)
+                 for m3 in range(-l3,l3+1) if m1+m2!=m3 and abs(C[m1+l1,m2+l2,m3+l3])>1e-6)
+        print(f"  <{l1},{l2}|{l3}>: unit_err={err:.1e} msel={viol}")
 
     print("\n=== GTBasis n=3 ===")
-    basis3 = GTBasis(n=3, max_order=2)
-    print(f"  signatures: {[str(s.lam) for s in basis3.signatures]}")
-    print(f"  num_basis:  {basis3.num_basis}")
-    dirs = torch.randn(5, 3)
-    dirs = dirs / dirs.norm(dim=-1, keepdim=True)
-    feat = basis3(dirs)
-    print(f"  output shape: {feat.shape}  (expected (5, {basis3.num_basis}))")
+    b3=GTBasis(3,2); dirs=torch.randn(5,3); dirs/=dirs.norm(dim=-1,keepdim=True)
+    feat=b3(dirs); print(f"  {feat.shape}  (expected (5,{b3.num_basis}))")
 
     print("\n=== GTBasis n=4 ===")
-    basis4 = GTBasis(n=4, max_order=1)
-    print(f"  signatures: {[str(s.lam) for s in basis4.signatures]}")
-    dirs4 = torch.randn(4, 4)
-    dirs4 = dirs4 / dirs4.norm(dim=-1, keepdim=True)
-    feat4 = basis4(dirs4)
-    print(f"  output shape: {feat4.shape}")
+    b4=GTBasis(4,1); d4=torch.randn(4,4); d4/=d4.norm(dim=-1,keepdim=True)
+    print(f"  {b4(d4).shape}")
 
     print("\n=== CGCoefficients n=3 ===")
-    cg3 = CGCoefficients(n=3, max_order=2)
-    l1 = GTSignature((1,), 3)
-    l2 = GTSignature((1,), 3)
-    l0 = GTSignature((0,), 3)
-    C = cg3.get(l1, l2, l0)
-    print(f"  1⊗1→0 CG shape: {C.shape if C is not None else None}")
-    if C is not None:
-        print(f"  norm: {C.norm():.4f}  (should be ~1)")
+    cg3=CGCoefficients(3,1)
+    C=cg3.get(GTSignature((1,),3),GTSignature((1,),3),GTSignature((0,),3))
+    print(f"  1@1->0: {C.shape if C is not None else None}  norm={C.norm():.3f}" if C is not None else "  None")
 
-    print("\nAll checks complete.")
+    print("\nDone.")
