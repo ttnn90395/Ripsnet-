@@ -316,11 +316,35 @@ for hidx in range(len(homdim)):
 
 data_sets_torch = [torch.FloatTensor(data_sets[i]).to(device) for i in range(len(data_sets))]
 starttimeNN = time()
+
+def prepare_input_for_model(model_name, x):
+    # x is a point cloud tensor of shape (N, 2)
+    if model_name in ['TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN']:
+        arr = x.cpu().numpy()
+        arr = np.concatenate([arr, np.zeros((arr.shape[0], 1), dtype=arr.dtype)], axis=1)
+        return torch.FloatTensor(arr).to(device)
+    if model_name == 'PointNetTutorial':
+        return x[:, :2]
+    if model_name in ['ScalarDistanceDeepSet', 'DistanceMatrixRaggedModel', 'RaggedPersistenceModel']:
+        arr = x.cpu().numpy()
+        dmat = np.linalg.norm(arr[:, None, :] - arr[None, :, :], axis=-1)
+        return torch.FloatTensor(dmat).to(device)
+    # fallback: pass the point cloud directly for sparse ragged-like models
+    return x
+
 def model_predict(model, x, model_name):
-    if model_name in ['TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN', 'PointNetTutorial', 'DistanceMatrixRaggedModel']:
-        out = model([x])
+    inp = prepare_input_for_model(model_name, x)
+    if model_name in ['TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN', 'PointNetTutorial', 'ScalarDistanceDeepSet', 'RaggedPersistenceModel', 'DistanceMatrixRaggedModel']:
+        out = model([inp])
+    elif model_name == 'MultiInputModel':
+        # Provide a placeholder scalar feature for MultiInputModel
+        scalar = torch.zeros((1, 1), device=device)
+        out = model([inp], scalar)
+    elif model_name == 'ScalarInputMLP':
+        # Scalar input model expects 1D input; use a zero placeholder
+        out = model(torch.zeros((1, 1), device=device))
     else:
-        out = model(x.unsqueeze(0))
+        out = model(inp.unsqueeze(0))
     return out
 
 with torch.no_grad():
