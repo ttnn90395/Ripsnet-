@@ -102,8 +102,30 @@ else:
                     model_paths[model_name0] = c
 
     if not models_to_test:
+        from glob import glob
+        for d in candidate_dirs:
+            candidates = glob(os.path.join(d, f'*{requested_model}*'))
+            for c in candidates:
+                if c.endswith('.pt') or c.endswith('.pth'):
+                    model_name0 = os.path.splitext(os.path.basename(c))[0]
+                    models_to_test.append(model_name0)
+                    model_paths[model_name0] = c
+
+    if not models_to_test:
+        print(f"\nDEBUG: Could not find model '{requested_model}'")
+        print(f"  Looked in candidate_dirs: {candidate_dirs}")
+        print(f"  Tried exact file: {requested_model} (not a direct path)")
+        for d in candidate_dirs:
+            print(f"  Tried exact in dir: {os.path.join(d, requested_model)}.[pt|pth]")
+            if os.path.isdir(d):
+                print(f"    Directory exists, contents: {os.listdir(d)[:5]}")
+            else:
+                print(f"    Directory does not exist")
+        print(f"  Wildcards: searched for *{requested_model}* in each dir\n")
         raise ValueError(
-            f"Unknown model '{requested_model}', valid: {MODEL_NAME} or model checkpoint in models/*.pt/*.pth"
+            f"Unknown model '{requested_model}', valid: {MODEL_NAME} or model checkpoint in models/*.pt/*.pth\n"
+            f"Looked in: {candidate_dirs}\n"
+            f"Hint: Train model first with train_nn.py, then use checkpoint name."
         )
 
 print('models_to_test:', models_to_test)
