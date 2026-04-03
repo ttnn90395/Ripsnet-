@@ -377,7 +377,8 @@ def evaluate_model(model, data_np, targets,
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-print("Generating data (CPU numpy — no GPU memory used yet)...")
+if __name__ == "__main__":
+    print("Generating data (CPU numpy — no GPU memory used yet)...")
 data_train,      label_train       = create_multiple_circles(N_sets_train, N_points, noisy=False, N_noise=N_noise)
 clean_data_test, clean_label_test  = create_multiple_circles(N_sets_test,  N_points, noisy=False, N_noise=N_noise)
 noisy_data_test, noisy_label_test  = create_multiple_circles(N_sets_test,  N_points, noisy=True,  N_noise=N_noise)

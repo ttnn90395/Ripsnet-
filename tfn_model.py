@@ -37,14 +37,12 @@ from torch.nn.utils.rnn import pad_sequence
 from typing import List, Optional
 
 # Core GT machinery
-from gt_tfn_layer import (
+from models import (
     GTTensorFieldNetwork,
-    RBFExpansion,
+    GTTFN_RBFExpansion as RBFExpansion,
     ChannelMixer,
     EquivariantGate,
     ResidualProjection,
-)
-from gt_improvements import (
     HierarchicalGTTFN,
     OnEquivariantWrapper,
 )
