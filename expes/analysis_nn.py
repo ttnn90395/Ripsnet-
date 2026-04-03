@@ -3,6 +3,7 @@
 #    2. p-values of Kolmogorov-Smirnov tests on each PI pixel,
 #    3. comparison between classification results on true and predicted PIs.
 
+import os
 import matplotlib.pyplot as plt
 import dill as pck
 import numpy as np
@@ -22,7 +23,18 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import pairwise_distances
 from xgboost import XGBClassifier
-from models import DenseRagged, PermopRagged
+
+# ensure top repo is in path for models.py import from expes/
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+
+from models import (
+    TensorFieldNetwork, GTTensorFieldNetwork, HierarchicalGTTFN,
+    ScalarDistanceDeepSet, PointNetTutorial, ScalarInputMLP, MultiInputModel,
+    DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,
+)
 
 model_name = sys.argv[1]
 dataset_PV_params = sys.argv[2]
@@ -88,32 +100,65 @@ checkpoint = torch.load('models/' + model_name + '.pt', map_location=device)
 model_state_dict = checkpoint['model_state_dict']
 output_dim = checkpoint.get('output_dim', None)
 
-# Recreate the model architecture used in training
-# (We use a simple default regression model)
-class RegressionModel(nn.Module):
-    def __init__(self, output_dim):
-        super().__init__()
-        self.dense1 = DenseRagged(units=30, use_bias=True, activation='relu')
-        self.dense2 = DenseRagged(units=20, use_bias=True, activation='relu')
-        self.dense3 = DenseRagged(units=10, use_bias=True, activation='relu')
-        self.permop = PermopRagged()
-        self.fc1 = nn.Linear(10, 50)
-        self.fc2 = nn.Linear(50, 100)
-        self.fc3 = nn.Linear(100, 200)
-        self.fc_out = nn.Linear(200, output_dim)
-    
-    def forward(self, x):
-        x = self.dense1(x)
-        x = self.dense2(x)
-        x = self.dense3(x)
-        x = self.permop(x)
-        x = torch.relu(self.fc1(x))
-        x = torch.relu(self.fc2(x))
-        x = torch.relu(self.fc3(x))
-        x = torch.sigmoid(self.fc_out(x))
-        return x
+def build_analysis_model(name, output_dim):
+    if name == 'TensorFieldNetwork':
+        return TensorFieldNetwork(num_classes=output_dim)
+    if name == 'GTTensorFieldNetwork':
+        return GTTensorFieldNetwork(n=2, num_classes=output_dim)
+    if name == 'HierarchicalGTTFN':
+        return HierarchicalGTTFN(n=2, num_classes=output_dim)
+    if name == 'ScalarDistanceDeepSet':
+        return ScalarDistanceDeepSet(output_dim=output_dim)
+    if name == 'PointNetTutorial':
+        return PointNetTutorial(output_dim=output_dim)
+    if name == 'ScalarInputMLP':
+        return ScalarInputMLP(output_dim=output_dim)
+    if name == 'MultiInputModel':
+        return MultiInputModel(target_output_dim=output_dim, scalar_input_dim=1)
+    if name == 'DenseRagged':
+        return nn.Sequential(DenseRagged(in_features=None, out_features=output_dim), nn.Flatten())
+    if name == 'PermopRagged':
+        # not a complete end-to-end model; placeholder with linear head
+        return nn.Sequential(PermopRagged(), nn.Linear(output_dim, output_dim))
+    if name == 'RaggedPersistenceModel':
+        return RaggedPersistenceModel(output_dim=output_dim)
+    if name == 'DistanceMatrixRaggedModel':
+        return DistanceMatrixRaggedModel(output_dim=output_dim, num_points=600)
+    # fallback
+    class RegressionModel(nn.Module):
+        def __init__(self, output_dim):
+            super().__init__()
+            self.dense1 = DenseRagged(units=30, use_bias=True, activation='relu')
+            self.dense2 = DenseRagged(units=20, use_bias=True, activation='relu')
+            self.dense3 = DenseRagged(units=10, use_bias=True, activation='relu')
+            self.permop = PermopRagged()
+            self.fc1 = nn.Linear(10, 50)
+            self.fc2 = nn.Linear(50, 100)
+            self.fc3 = nn.Linear(100, 200)
+            self.fc_out = nn.Linear(200, output_dim)
 
-model_PV = RegressionModel(output_dim=output_dim)
+        def forward(self, x):
+            x = self.dense1(x)
+            x = self.dense2(x)
+            x = self.dense3(x)
+            x = self.permop(x)
+            x = torch.relu(self.fc1(x))
+            x = torch.relu(self.fc2(x))
+            x = torch.relu(self.fc3(x))
+            x = torch.sigmoid(self.fc_out(x))
+            return x
+
+    return RegressionModel(output_dim=output_dim)
+
+model_path = 'models/' + model_name + '.pt'
+checkpoint = torch.load(model_path, map_location=device)
+if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+    model_state_dict = checkpoint['model_state_dict']
+    output_dim = checkpoint.get('output_dim', output_dim)
+else:
+    model_state_dict = checkpoint
+
+model_PV = build_analysis_model(model_name, output_dim)
 model_PV.load_state_dict(model_state_dict)
 model_PV = model_PV.to(device)
 model_PV.eval()
@@ -271,11 +316,24 @@ for hidx in range(len(homdim)):
 
 data_sets_torch = [torch.FloatTensor(data_sets[i]).to(device) for i in range(len(data_sets))]
 starttimeNN = time()
+def model_predict(model, x, model_name):
+    if model_name in ['TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN', 'PointNetTutorial', 'DistanceMatrixRaggedModel']:
+        out = model([x])
+    else:
+        out = model(x.unsqueeze(0))
+    return out
+
 with torch.no_grad():
     PV_NN = []
     for data_item in data_sets_torch:
-        output = model_PV(data_item.unsqueeze(0))
-        PV_NN.append(output.cpu().numpy())
+        output = model_predict(model_PV, data_item, model_name)
+        if isinstance(output, torch.Tensor):
+            output_np = output.cpu().numpy()
+        else:
+            output_np = np.asarray(output)
+        if output_np.ndim > 1 and output_np.shape[0] == 1:
+            output_np = output_np[0]
+        PV_NN.append(output_np)
 PV_NN = np.vstack(PV_NN)
 timeNN = time() - starttimeNN
 
