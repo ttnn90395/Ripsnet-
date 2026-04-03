@@ -3,8 +3,7 @@ import numpy as np
 import os
 import sys
 
-#path = "/users/eleves-a/2023/ten.nguyen-hanaoka/UCRArchive_2018" # Input the path to your data folder
-path = "/users/eleves-a/2023/ten.nguyen-hanaoka/Ripsnet-/UCRArchive_2018.zip"
+path = "/users/eleves-a/2023/ten.nguyen-hanaoka/UCRArchive_2018" # Input the path to your data folder
 
 expes = sys.argv[1] # 'ucr' or 'synth'
 mode = sys.argv[2] # 'cluster' or 'laptop'
