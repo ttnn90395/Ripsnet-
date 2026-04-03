@@ -496,7 +496,7 @@ for hidx, hdim in enumerate(homdim):
 plt.figure()
 for i in range(9):
     plt.subplot(3, 3, i + 1)
-    plt.scatter(data_test[prefix + i, :, 0], data_test[prefix + i, :, 1], s=3)
+    plt.scatter(data_test[prefix + i][:, 0], data_test[prefix + i][:, 1], s=3)
 plt.suptitle('Train point cloud')
 plt.savefig('results/' + dataset_name + '_point_clouds_on_train.png')
 
@@ -588,7 +588,7 @@ for hidx, hdim in enumerate(homdim):
 plt.figure()
 for i in range(9):
     plt.subplot(3, 3, i + 1)
-    plt.scatter(data_test[prefix + i, :, 0], data_test[prefix + i, :, 1], s=3)
+    plt.scatter(data_test[prefix + i][:, 0], data_test[prefix + i][:, 1], s=3)
 plt.suptitle('Train point cloud')
 plt.savefig('results/' + dataset_name + '_point_clouds_on_train.png')
 

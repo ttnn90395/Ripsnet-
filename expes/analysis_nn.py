@@ -52,9 +52,9 @@ def create_model_large():
     class LargeModel(nn.Module):
         def __init__(self):
             super().__init__()
-            self.dense1 = DenseRagged(units=50, use_bias=True, activation='relu')
-            self.dense2 = DenseRagged(units=30, use_bias=True, activation='relu')
-            self.dense3 = DenseRagged(units=10, use_bias=True, activation='relu')
+            self.dense1 = DenseRagged(out_features=50, activation='relu')
+            self.dense2 = DenseRagged(out_features=30, activation='relu')
+            self.dense3 = DenseRagged(out_features=10, activation='relu')
             self.permop = PermopRagged()
             self.fc = nn.Linear(10, 3)
         
@@ -71,7 +71,7 @@ def create_model_small():
     class SmallModel(nn.Module):
         def __init__(self):
             super().__init__()
-            self.dense1 = DenseRagged(units=50, use_bias=True, activation='relu')
+            self.dense1 = DenseRagged(out_features=50, activation='relu')
             self.permop = PermopRagged()
             self.fc = nn.Linear(50, 3)
         
@@ -130,9 +130,9 @@ def build_analysis_model(name, output_dim):
     class RegressionModel(nn.Module):
         def __init__(self, output_dim):
             super().__init__()
-            self.dense1 = DenseRagged(units=30, use_bias=True, activation='relu')
-            self.dense2 = DenseRagged(units=20, use_bias=True, activation='relu')
-            self.dense3 = DenseRagged(units=10, use_bias=True, activation='relu')
+            self.dense1 = DenseRagged(out_features=30, activation='relu')
+            self.dense2 = DenseRagged(out_features=20, activation='relu')
+            self.dense3 = DenseRagged(out_features=10, activation='relu')
             self.permop = PermopRagged()
             self.fc1 = nn.Linear(10, 50)
             self.fc2 = nn.Linear(50, 100)
