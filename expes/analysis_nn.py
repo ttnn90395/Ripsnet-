@@ -194,8 +194,7 @@ plt.savefig('results/' + dataset_test_name + '_point_clouds_on_test.png')
 
 PD_gudhi = []
 starttimeG = time()
-for i in range(N_sets):
-
+for i in tqdm(range(N_sets), desc="Computing Gudhi PIs"):
     rcX = gd.AlphaComplex(points=data_sets[i]).create_simplex_tree()
     rcX.persistence()
     final_dg = []
@@ -207,7 +206,7 @@ for i in range(N_sets):
     PD_gudhi.append(final_dg)
 
 PV_gudhi = []
-for hidx in range(len(homdim)):
+for hidx in tqdm(range(len(homdim)), desc="Processing Gudhi PVs"):
     if PV_type == 'PI':
         a, b = PV_params[hidx]['weight'][0], PV_params[hidx]['weight'][1]
         PV_params[hidx]['weight'] = lambda x: a * np.tanh(x[1])**b
@@ -225,7 +224,7 @@ timeG = time() - starttimeG
 
 noise_PD_gudhi = []
 starttimeG1 = time()
-for i in range(N_sets):
+for i in tqdm(range(N_sets), desc="Computing Gudhi-noise PIs"):
     m, p, dimension_max = 0.05, 2, 2
     if dataset_PV_params[:5] == 'synth':
         st_DTM = velour.AlphaDTMFiltration(data_sets[i], m, p, dimension_max)
@@ -242,7 +241,7 @@ for i in range(N_sets):
 starttimeG2 = time()
 
 noise_PV_params = []
-for hidx in range(len(homdim)):
+for hidx in tqdm(range(len(homdim)), desc="Processing noise PV params"):
     noise_pds_train = DiagramSelector(use=True).fit_transform([noise_PD_gudhi[i][hidx] for i in range(len(data_classif_train))])
     noise_pds_test  = DiagramSelector(use=True).fit_transform([noise_PD_gudhi[i][hidx] for i in range(len(data_classif_train), len(data_classif_train) + len(data_classif_test))])
     noise_vpdtr, noise_vpdte = np.vstack(noise_pds_train), np.vstack(noise_pds_test)    
@@ -260,7 +259,7 @@ for hidx in range(len(homdim)):
 
 starttimeG3 = time()
 noise_PV_gudhi = []
-for hidx in range(len(homdim)):
+for hidx in tqdm(range(len(homdim)), desc="Computing noise PVs"):
     hdim = homdim[hidx]    
     if PV_type == 'PI':
         a, b = noise_PV_params[hidx]['weight'][0], noise_PV_params[hidx]['weight'][1]
@@ -349,7 +348,7 @@ def model_predict(model, x, model_name):
 
 with torch.no_grad():
     PV_NN = []
-    for data_item in data_sets_torch:
+    for data_item in tqdm(data_sets_torch, desc="Predicting with NN"):
         output = model_predict(model_PV, data_item, model_name)
         if isinstance(output, torch.Tensor):
             output_np = output.cpu().numpy()
@@ -440,7 +439,7 @@ if dataset_PV_params[:5] == 'synth':
     best_loss = float('inf')
     patience_counter = 0
     
-    for epoch in range(num_epochs):
+    for epoch in tqdm(range(num_epochs), desc="Training large baseline"):
         model_baseline.train()
         total_loss = 0
         total_acc = 0
@@ -493,7 +492,7 @@ if dataset_PV_params[:5] == 'synth':
     best_loss = float('inf')
     patience_counter = 0
     
-    for epoch in range(num_epochs):
+    for epoch in tqdm(range(num_epochs), desc="Training small baseline"):
         model_baseline.train()
         total_loss = 0
         total_acc = 0

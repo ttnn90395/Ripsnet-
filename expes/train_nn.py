@@ -29,6 +29,9 @@ MODEL_NAMES = [
     'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
 ]
 
+# Ensure models directory exists
+os.makedirs('models', exist_ok=True)
+
 dataset_name = sys.argv[1]
 model_name   = sys.argv[2]
 normalize    = int(sys.argv[3])
@@ -174,7 +177,7 @@ def train_all_models():
         'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
     ]
     results = {}
-    for mname in model_names:
+    for mname in tqdm(model_names, desc="Training all models"):
         try:
             print(f'=== Training {mname} ===')
             m = build_model_by_name(mname).to(device)
@@ -182,7 +185,7 @@ def train_all_models():
             test_data_model = prepare_data_for_model(mname, data_test_torch)
             optimizer = optimizer_class(m.parameters(), lr=optim_lr)
             criterion_loc = nn.MSELoss()
-            for epoch in range(min(5, num_epochs)):
+            for epoch in tqdm(range(min(5, num_epochs)), desc=f"Epochs for {mname}"):
                 train_loss = train_epoch(m, train_data_model, np.hstack(PVs_train), optimizer, criterion_loc, mname)
                 val_loss = evaluate(m, test_data_model, np.hstack(PVs_test), criterion_loc, mname)
                 print(f'[{mname}] epoch {epoch+1}/{min(5,num_epochs)} train={train_loss:.4f} val={val_loss:.4f}')
@@ -207,7 +210,7 @@ if model_name in MODEL_NAMES:
     optimizer = optimizer_class(m.parameters(), lr=optim_lr)
     criterion_loc = nn.MSELoss()
 
-    for epoch in range(min(5, num_epochs)):
+    for epoch in tqdm(range(min(5, num_epochs)), desc=f"Training {model_name}"):
         train_loss = train_epoch(m, train_data_model, np.hstack(PVs_train), optimizer, criterion_loc, model_name)
         val_loss = evaluate(m, test_data_model, np.hstack(PVs_test), criterion_loc, model_name)
         print(f'[{model_name}] epoch {epoch+1}/{min(5,num_epochs)} train={train_loss:.4f} val={val_loss:.4f}')
@@ -408,7 +411,7 @@ if len(list_models) > 1:
     indices = np.arange(len(data_train_torch))
     stacked_targets = np.hstack(PVs_train)
     
-    for mdl in list_models:
+    for mdl in tqdm(list_models, desc="Cross-validating models"):
         optimizer = optimizer_class(mdl.parameters(), lr=optim_lr)
         final_val_loss = 0
         fold_idx = 0
@@ -433,7 +436,7 @@ early_stopping = EarlyStopping(patience=200, min_delta=1e-5)
 history_loss = []
 history_val_loss = []
 
-for epoch in range(num_epochs):
+for epoch in tqdm(range(num_epochs), desc="Fine-tuning epochs"):
     train_loss = train_epoch(best_CV_model, data_train_torch, np.hstack(PVs_train), optimizer, criterion)
     val_loss = evaluate(best_CV_model, data_test_torch, np.hstack(PVs_test), criterion)
     history_loss.append(train_loss)
