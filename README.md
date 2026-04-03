@@ -8,8 +8,7 @@ Beware that you need first to:
 
 1. download the UCR data sets at https://www.cs.ucr.edu/%7Eeamonn/time_series_data_2018/
 
-2. make sure that y
-ou input the right path to these data sets on your machine at line 55 of "datasets/ucr_time_series.py" and line 6 of "launch_expe.py" 
+2. make sure that you input the right path to these data sets on your machine at line 55 of "datasets/ucr_time_series.py" and line 6 of "launch_expe.py" 
 
 Our code requires (in addition to standard Python packages such as NumPy, PyTorch, Scikit-Learn) the following modules: 
 
