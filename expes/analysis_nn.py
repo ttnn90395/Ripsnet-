@@ -38,7 +38,11 @@ from models import (
     DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,
 )
 
-model_name = sys.argv[1]
+MODEL_NAME = ['TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN', 'ScalarDistanceDeepSet', 'PointNetTutorial', 'ScalarInputMLP', 'MultiInputModel', 'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel', 'DistanceMatrixRaggedModel']
+
+# CLI args:
+# if first arg is 'all', evaluate all models; else map to provided model name
+requested_model = sys.argv[1]
 dataset_PV_params = sys.argv[2]
 dataset_train_name = sys.argv[3]
 dataset_test_name = sys.argv[4]
@@ -48,39 +52,16 @@ mode = sys.argv[7]
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-def create_model_large():
-    class LargeModel(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.dense1 = DenseRagged(out_features=50, activation='relu')
-            self.dense2 = DenseRagged(out_features=30, activation='relu')
-            self.dense3 = DenseRagged(out_features=10, activation='relu')
-            self.permop = PermopRagged()
-            self.fc = nn.Linear(10, 3)
-        
-        def forward(self, x):
-            x = self.dense1(x)
-            x = self.dense2(x)
-            x = self.dense3(x)
-            x = self.permop(x)
-            x = self.fc(x)
-            return x
-    return LargeModel()
+if requested_model == 'all':
+    models_to_test = MODEL_NAME
+else:
+    if requested_model not in MODEL_NAME:
+        raise ValueError(f"Unknown model '{requested_model}', valid: {MODEL_NAME}")
+    models_to_test = [requested_model]
 
-def create_model_small():
-    class SmallModel(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.dense1 = DenseRagged(out_features=50, activation='relu')
-            self.permop = PermopRagged()
-            self.fc = nn.Linear(50, 3)
-        
-        def forward(self, x):
-            x = self.dense1(x)
-            x = self.permop(x)
-            x = self.fc(x)
-            return x
-    return SmallModel()
+print('models_to_test:', models_to_test)
+print('dataset_PV_params:', dataset_PV_params, 'dataset_train_name:', dataset_train_name, 'dataset_test_name:', dataset_test_name, 'normalize:', normalize, 'PV_type:', PV_type, 'mode:', mode)
+
 
 #custom metric
 def DTW(a, b):   
@@ -97,10 +78,20 @@ def DTW(a, b):
 
 print(sys.argv)
 
-# Load the trained model from train_nn.py
-checkpoint = torch.load('models/' + model_name + '.pt', map_location=device)
-model_state_dict = checkpoint['model_state_dict']
-output_dim = checkpoint.get('output_dim', None)
+PV_setting = pck.load(open('datasets/' + dataset_PV_params + '.pkl', 'rb'))
+PV_params, homdim = PV_setting['PV_params'], PV_setting['hdims']
+PV_size = PV_params[0]['resolution']
+
+data = pck.load(open('datasets/' + dataset_train_name + ".pkl", 'rb'))
+label_classif_train = data["label_train"]
+data_classif_train  = data["data_train"]
+PVs_train           = data["PV_train"]
+ts_classif_train    = np.vstack(data["ts_train"])
+
+data = pck.load(open('datasets/' + dataset_test_name + ".pkl", 'rb'))
+label_classif_test  = data["label_test"]
+data_classif_test   = data["data_test"]
+ts_classif_test     = np.vstack(data["ts_test"])
 
 def build_analysis_model(name, output_dim):
     if name == 'TensorFieldNetwork':
@@ -118,10 +109,9 @@ def build_analysis_model(name, output_dim):
     if name == 'MultiInputModel':
         return MultiInputModel(target_output_dim=output_dim, scalar_input_dim=1)
     if name == 'DenseRagged':
-        return nn.Sequential(DenseRagged(in_features=None, out_features=output_dim), nn.Flatten())
+        return DenseRagged(in_features=None, out_features=output_dim)
     if name == 'PermopRagged':
-        # not a complete end-to-end model; placeholder with linear head
-        return nn.Sequential(PermopRagged(), nn.Linear(output_dim, output_dim))
+        return PermopRagged()
     if name == 'RaggedPersistenceModel':
         return RaggedPersistenceModel(output_dim=output_dim)
     if name == 'DistanceMatrixRaggedModel':
@@ -152,33 +142,7 @@ def build_analysis_model(name, output_dim):
 
     return RegressionModel(output_dim=output_dim)
 
-model_path = 'models/' + model_name + '.pt'
-checkpoint = torch.load(model_path, map_location=device)
-if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-    model_state_dict = checkpoint['model_state_dict']
-    output_dim = checkpoint.get('output_dim', output_dim)
-else:
-    model_state_dict = checkpoint
 
-model_PV = build_analysis_model(model_name, output_dim)
-model_PV.load_state_dict(model_state_dict)
-model_PV = model_PV.to(device)
-model_PV.eval()
-
-PV_setting = pck.load(open('datasets/' + dataset_PV_params + '.pkl', 'rb'))
-PV_params, homdim = PV_setting['PV_params'], PV_setting['hdims']
-PV_size = PV_params[0]['resolution']
-
-data = pck.load(open('datasets/' + dataset_train_name + ".pkl", 'rb'))
-label_classif_train = data["label_train"]
-data_classif_train  = data["data_train"]
-PVs_train           = data["PV_train"]
-ts_classif_train    = np.vstack(data["ts_train"])
-
-data = pck.load(open('datasets/' + dataset_test_name + ".pkl", 'rb'))
-label_classif_test  = data["label_test"]
-data_classif_test   = data["data_test"]
-ts_classif_test     = np.vstack(data["ts_test"])
 
 PV_size = PV_params[0]['resolution'][0] if PV_type == 'PI' else PV_params[0]['resolution'] 
 data_sets = data_classif_train + data_classif_test
@@ -316,7 +280,6 @@ for hidx in range(len(homdim)):
 # Compute their PIs with the NN and save computation time
 
 data_sets_torch = [torch.FloatTensor(data_sets[i]).to(device) for i in range(len(data_sets))]
-starttimeNN = time()
 
 def prepare_input_for_model(model_name, x):
     # x is a point cloud tensor of shape (N, 2)
@@ -335,7 +298,7 @@ def prepare_input_for_model(model_name, x):
 
 def model_predict(model, x, model_name):
     inp = prepare_input_for_model(model_name, x)
-    if model_name in ['TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN', 'PointNetTutorial', 'ScalarDistanceDeepSet', 'RaggedPersistenceModel', 'DistanceMatrixRaggedModel']:
+    if model_name in ['TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN', 'PointNetTutorial', 'DistanceMatrixRaggedModel', 'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel', 'ScalarDistanceDeepSet']:
         out = model([inp])
     elif model_name == 'MultiInputModel':
         # Provide a placeholder scalar feature for MultiInputModel
@@ -346,46 +309,68 @@ def model_predict(model, x, model_name):
         out = model(torch.zeros((1, 1), device=device))
     else:
         out = model(inp.unsqueeze(0))
-    return out
+for model_name in MODEL_NAME:
+    checkpoint = torch.load('models/' + model_name + '.pt', map_location=device)
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        model_state_dict = checkpoint['model_state_dict']
+        output_dim = checkpoint.get('output_dim', None)
+    else:
+        model_state_dict = checkpoint
 
-with torch.no_grad():
-    PV_NN = []
-    for data_item in tqdm(data_sets_torch, desc="Predicting with NN"):
-        output = model_predict(model_PV, data_item, model_name)
-        if isinstance(output, torch.Tensor):
-            output_np = output.cpu().numpy()
-        else:
-            output_np = np.asarray(output)
-        if output_np.ndim > 1 and output_np.shape[0] == 1:
-            output_np = output_np[0]
-        PV_NN.append(output_np)
-PV_NN = np.vstack(PV_NN)
-timeNN = time() - starttimeNN
+    model_PV = build_analysis_model(model_name, output_dim)
+    model_PV.load_state_dict(model_state_dict)
+    model_PV = model_PV.to(device)
+    model_PV.eval()
 
-print('Time taken by Gudhi = {:.2f} seconds'.format(timeG))
-print('Time taken by Gudhi-noise = {:.2f} seconds'.format(timeGn))
-print('Time taken by the NN = {:.2f} seconds'.format(timeNN))
+    starttimeNN = time()
 
-# Plot the predicted PVs
+    with torch.no_grad():
+        PV_NN = []
+        for data_item in tqdm(data_sets_torch, desc="Predicting with NN"):
+            output = model_predict(model_PV, data_item, model_name)
+            if isinstance(output, torch.Tensor):
+                output_np = output.cpu().numpy()
+            else:
+                output_np = np.asarray(output)
+            if output_np.ndim > 1 and output_np.shape[0] == 1:
+                output_np = output_np[0]
+            PV_NN.append(output_np)
+    PV_NN = np.vstack(PV_NN)
+    timeNN = time() - starttimeNN
 
-for hidx in range(len(homdim)):
+    print('Time taken by the NN (' + model_name + ') = {:.2f} seconds'.format(timeNN))
 
-    hdim = homdim[hidx]
+    # Plot the predicted PVs
 
-    plt.figure()
-    for i in range(9):
-        plt.subplot(3, 3, i + 1)
-        if PV_type == 'PI':
-            plt.imshow(np.flip(np.reshape(PV_NN[len(data_classif_train)+i][(hidx)*(PV_size*PV_size):(hidx+1)*(PV_size*PV_size)], [PV_size, PV_size]), 0), cmap='jet') #, vmin=0, vmax=1)
-            plt.colorbar()
-        elif PV_type == 'PL':
-            nls = PV_params[hidx]['num_landscapes']
-            for lidx in range(nls):
-                plt.plot(PV_NN[len(data_classif_train)+i][(hidx)*(PV_size*nls)+lidx*PV_size:(hidx)*(PV_size*nls)+(lidx+1)*PV_size])
+    for hidx in range(len(homdim)):
+
+        hdim = homdim[hidx]
+
+
+        plt.figure()
+        
+        for i in range(9):
+            plt.subplot(3, 3, i + 1)
+            if PV_type == 'PI':
+                plt.imshow(np.flip(np.reshape(PV_NN[len(data_classif_train)+i][(hidx)*(PV_size*PV_size):(hidx+1)*(PV_size*PV_size)], [PV_size, PV_size]), 0), cmap='jet') #, vmin=0, vmax=1)
+                plt.colorbar()
+            elif PV_type == 'PL':
+                nls = PV_params[hidx]['num_landscapes']
+                for lidx in range(nls):
+                    plt.plot(PV_NN[len(data_classif_train)+i][(hidx)*(PV_size*nls)+lidx*PV_size:(hidx)*(PV_size*nls)+(lidx+1)*PV_size])
     plt.suptitle('Test predicted PV in hdim ' + str(hdim))
     plt.savefig('results/' + dataset_test_name + '_predicted_PVs_h' + str(hdim) + '_on_test.png')
 
-PV_train_NN, PV_test_NN = PV_NN[:len(data_classif_train)], PV_NN[len(data_classif_train):]
+    PV_train_NN, PV_test_NN = PV_NN[:len(data_classif_train)], PV_NN[len(data_classif_train):]
+
+    XR1 = time()
+    model_classif_NN = XGBClassifier(eval_metric='logloss', use_label_encoder=False)
+    model_classif_NN.fit(PV_train_NN, label_classif_train)
+    train_acc = model_classif_NN.score(PV_train_NN, label_classif_train)
+    test_acc  = model_classif_NN.score(PV_test_NN,  label_classif_test)
+    XR2 = time()
+
+    print('Train--Test accuracy RipsNet (' + model_name + ') (XGB) of data set ' + str(dataset_test_name) + ': ' + str("{:.2f}".format(100*train_acc)) + ' -- ' + str("{:.2f}".format(100*test_acc)) + ', with parameters [' + ', '.join([str(k) + ':' + str(v) for k,v in PV_params[0].items()] + ['a:' + str(a), 'b:' + str(b)]) + '] and normalization ' + str(normalize))
 PV_train_gudhi, PV_test_gudhi = np.hstack(PV_gudhi)[:len(data_classif_train)], np.hstack(PV_gudhi)[len(data_classif_train):]
 noise_PV_train_gudhi, noise_PV_test_gudhi = np.hstack(noise_PV_gudhi)[:len(data_classif_train)], np.hstack(noise_PV_gudhi)[len(data_classif_train):]
 
@@ -407,14 +392,6 @@ test_acc_gudhi =  model_classif_gudhi.score(PV_test_gudhi,  label_classif_test)
 XG2 = time()
 print('Train--Test accuracy Gudhi (XGB) of data set ' + str(dataset_test_name) + ': ' + str("{:.2f}".format(100*train_acc_gudhi)) + ' -- ' + str("{:.2f}".format(100*test_acc_gudhi)) + ', with parameters [' + ', '.join([str(k) + ':' + str(v) for k,v in PV_params[0].items()] + ['a:' + str(a), 'b:' + str(b)]) + '] and normalization ' + str(normalize))
 
-XR1 = time()
-model_classif_NN = XGBClassifier(eval_metric='logloss', use_label_encoder=False)
-model_classif_NN.fit(PV_train_NN, label_classif_train)
-train_acc = model_classif_NN.score(PV_train_NN, label_classif_train)
-test_acc  = model_classif_NN.score(PV_test_NN,  label_classif_test)
-XR2 = time()
-print('Train--Test accuracy RipsNet (XGB) of data set ' + str(dataset_test_name) + ': ' + str("{:.2f}".format(100*train_acc)) + ' -- ' + str("{:.2f}".format(100*test_acc)) + ', with parameters [' + ', '.join([str(k) + ':' + str(v) for k,v in PV_params[0].items()] + ['a:' + str(a), 'b:' + str(b)]) + '] and normalization ' + str(normalize))
-
 XGN1 = time()
 model_classif_noise = XGBClassifier(eval_metric='logloss', use_label_encoder=False)
 model_classif_noise.fit(noise_PV_train_gudhi, label_classif_train)
@@ -423,141 +400,21 @@ test_acc  = model_classif_noise.score(noise_PV_test_gudhi,  label_classif_test)
 XGN2 = time()
 print('Train--Test accuracy Gudhi-noise (XGB) of data set ' + str(dataset_test_name) + ': ' + str("{:.2f}".format(100*train_acc)) + ' -- ' + str("{:.2f}".format(100*test_acc)) + ', with parameters [' + ', '.join([str(k) + ':' + str(v) for k,v in noise_PV_params[0].items()] + ['a:' + str(a), 'b:' + str(b)]) + '] and normalization ' + str(normalize))
 
-if dataset_PV_params[:5] == 'synth':
+XB11 = time()
+model_baseline = KNeighborsClassifier(metric=DTW)
+model_baseline.fit(ts_classif_train, label_classif_train)
+train_acc = model_baseline.score(ts_classif_train, label_classif_train)
+test_acc = model_baseline.score(ts_classif_test, label_classif_test)
+XB12 = time()
+print('Train--Test accuracy baseline (DTW + k-NN) of data set ' + str(dataset_test_name) + ': ' + str("{:.2f}".format(100*train_acc)) + ' -- ' + str("{:.2f}".format(100*test_acc)))
 
-    data_classif_train_torch = [torch.FloatTensor(data_classif_train[i]).to(device) for i in range(len(data_classif_train))]
-    data_classif_test_torch = [torch.FloatTensor(data_classif_test[i]).to(device) for i in range(len(data_classif_test))]
-    label_train_tensor = torch.LongTensor(label_classif_train).to(device)
-    label_test_tensor = torch.LongTensor(label_classif_test).to(device)
-
-    criterion = nn.CrossEntropyLoss()
-
-    XB11 = time()
-    model_baseline = create_model_large().to(device)
-    optimizer = torch.optim.Adam(model_baseline.parameters())
-    
-    num_epochs = 10000
-    patience = 200
-    best_loss = float('inf')
-    patience_counter = 0
-    
-    for epoch in tqdm(range(num_epochs), desc="Training large baseline"):
-        model_baseline.train()
-        total_loss = 0
-        total_acc = 0
-        for i in range(len(data_classif_train_torch)):
-            x = data_classif_train_torch[i].unsqueeze(0)
-            y = label_train_tensor[i:i+1]
-            output = model_baseline(x)
-            loss = criterion(output, y)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-            preds = torch.argmax(output, dim=1)
-            total_acc += (preds == y).float().mean().item()
-        
-        model_baseline.eval()
-        val_loss = 0
-        val_acc = 0
-        with torch.no_grad():
-            for i in range(len(data_classif_test_torch)):
-                x = data_classif_test_torch[i].unsqueeze(0)
-                y = label_test_tensor[i:i+1]
-                output = model_baseline(x)
-                loss = criterion(output, y)
-                val_loss += loss.item()
-                preds = torch.argmax(output, dim=1)
-                val_acc += (preds == y).float().mean().item()
-        
-        val_loss /= len(data_classif_test_torch)
-        val_acc /= len(data_classif_test_torch)
-        
-        if val_loss < best_loss - 1e-4:
-            best_loss = val_loss
-            patience_counter = 0
-        else:
-            patience_counter += 1
-        
-        if patience_counter >= patience:
-            break
-    
-    train_acc = total_acc / len(data_classif_train_torch)
-    test_acc = val_acc
-    XB12 = time()
-    print('Train--Test accuracy baseline (large NN DeepSet) of data set ' + str(dataset_test_name) + ': ' + str("{:.2f}".format(100*train_acc)) + ' -- ' + str("{:.2f}".format(100*test_acc)))
-
-    XB21 = time()
-    model_baseline = create_model_small().to(device)
-    optimizer = torch.optim.Adam(model_baseline.parameters())
-    
-    best_loss = float('inf')
-    patience_counter = 0
-    
-    for epoch in tqdm(range(num_epochs), desc="Training small baseline"):
-        model_baseline.train()
-        total_loss = 0
-        total_acc = 0
-        for i in range(len(data_classif_train_torch)):
-            x = data_classif_train_torch[i].unsqueeze(0)
-            y = label_train_tensor[i:i+1]
-            output = model_baseline(x)
-            loss = criterion(output, y)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-            preds = torch.argmax(output, dim=1)
-            total_acc += (preds == y).float().mean().item()
-        
-        model_baseline.eval()
-        val_loss = 0
-        val_acc = 0
-        with torch.no_grad():
-            for i in range(len(data_classif_test_torch)):
-                x = data_classif_test_torch[i].unsqueeze(0)
-                y = label_test_tensor[i:i+1]
-                output = model_baseline(x)
-                loss = criterion(output, y)
-                val_loss += loss.item()
-                preds = torch.argmax(output, dim=1)
-                val_acc += (preds == y).float().mean().item()
-        
-        val_loss /= len(data_classif_test_torch)
-        val_acc /= len(data_classif_test_torch)
-        
-        if val_loss < best_loss - 1e-4:
-            best_loss = val_loss
-            patience_counter = 0
-        else:
-            patience_counter += 1
-        
-        if patience_counter >= patience:
-            break
-    
-    train_acc = total_acc / len(data_classif_train_torch)
-    test_acc = val_acc
-    XB22 = time()
-    print('Train--Test accuracy baseline (small NN DeepSet) of data set ' + str(dataset_test_name) + ': ' + str("{:.2f}".format(100*train_acc)) + ' -- ' + str("{:.2f}".format(100*test_acc)))
-
-
-else:
-
-    XB11 = time()
-    model_baseline = KNeighborsClassifier(metric=DTW)
-    model_baseline.fit(ts_classif_train, label_classif_train)
-    train_acc = model_baseline.score(ts_classif_train, label_classif_train)
-    test_acc = model_baseline.score(ts_classif_test, label_classif_test)
-    XB12 = time()
-    print('Train--Test accuracy baseline (DTW + k-NN) of data set ' + str(dataset_test_name) + ': ' + str("{:.2f}".format(100*train_acc)) + ' -- ' + str("{:.2f}".format(100*test_acc)))
-
-    XB21 = time()
-    model_baseline = KNeighborsClassifier(metric='euclidean')
-    model_baseline.fit(ts_classif_train, label_classif_train)
-    train_acc = model_baseline.score(ts_classif_train, label_classif_train)
-    test_acc = model_baseline.score(ts_classif_test, label_classif_test)
-    XB22 = time()
-    print('Train--Test accuracy baseline (Euc + k-NN) of data set ' + str(dataset_test_name) + ': ' + str("{:.2f}".format(100*train_acc)) + ' -- ' + str("{:.2f}".format(100*test_acc)))
+XB21 = time()
+model_baseline = KNeighborsClassifier(metric='euclidean')
+model_baseline.fit(ts_classif_train, label_classif_train)
+train_acc = model_baseline.score(ts_classif_train, label_classif_train)
+test_acc = model_baseline.score(ts_classif_test, label_classif_test)
+XB22 = time()
+print('Train--Test accuracy baseline (Euc + k-NN) of data set ' + str(dataset_test_name) + ': ' + str("{:.2f}".format(100*train_acc)) + ' -- ' + str("{:.2f}".format(100*test_acc)))
 
 print('Time taken by XGB-Gudhi = {:.2f} seconds'.format(XG2-XG1))
 print('Time taken by XGB-Gudhi-noise = {:.2f} seconds'.format(XGN2-XGN1))
