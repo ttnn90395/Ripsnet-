@@ -13,7 +13,7 @@ identifier = sys.argv[5] # run1
 
 if expes == 'ucr':
 
-    F = np.array(pd.read_csv("/users/eleves-a/2023/ten.nguyen-hanaoka/Ripsnet-/datasets/DataSummary.csv", sep=",", header=0, index_col=0))
+    F = np.array(pd.read_csv("/users/eleves-a/2023/ten.nguyen-hanaoka/Ripsnet-/expes/datasets/DataSummary.csv", sep=",", header=0, index_col=0))
     datasets = ['ChlorineConcentration', 'ProximalPhalanxTW', 'Plane', 'GunPoint', 'PhalangesOutlinesCorrect', 'SonyAIBORobotSurface2', 'ProximalPhalanxOutlineAgeGroup', 'ECG5000', 'ECG200', 'MedicalImages', 'PowerCons', 'DistalPhalanxOutlineCorrect', 'ItalyPowerDemand', 'MiddlePhalanxOutlineAgeGroup', 'SonyAIBORobotSurface1', 'UMD', 'TwoLeadECG', 'MiddlePhalanxOutlineCorrect', 'GunPointOldVersusYoung', 'MiddlePhalanxTW', 'CBF']
     good_idxs = np.argwhere([F[:,1][d] in datasets for d in range(len(F[:,1]))]).ravel()
 
