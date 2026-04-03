@@ -93,13 +93,15 @@ label_classif_test  = data["label_test"]
 data_classif_test   = data["data_test"]
 ts_classif_test     = np.vstack(data["ts_test"])
 
-def build_analysis_model(name, output_dim):
+def build_analysis_model(name, output_dim, n=None):
     if name == 'TensorFieldNetwork':
         return TensorFieldNetwork(num_classes=output_dim)
     if name == 'GTTensorFieldNetwork':
-        return GTTensorFieldNetwork(n=2, num_classes=output_dim)
+        n_dim = dim if n is None else n
+        return GTTensorFieldNetwork(n=n_dim, num_classes=output_dim)
     if name == 'HierarchicalGTTFN':
-        return HierarchicalGTTFN(n=2, num_classes=output_dim)
+        n_dim = dim if n is None else n
+        return HierarchicalGTTFN(n=n_dim, num_classes=output_dim)
     if name == 'ScalarDistanceDeepSet':
         return ScalarDistanceDeepSet(output_dim=output_dim)
     if name == 'PointNetTutorial':
@@ -147,6 +149,8 @@ def build_analysis_model(name, output_dim):
 PV_size = PV_params[0]['resolution'][0] if PV_type == 'PI' else PV_params[0]['resolution'] 
 data_sets = data_classif_train + data_classif_test
 N_sets = len(data_classif_train) + len(data_classif_test)
+# support variable point cloud dimensionality
+dim = data_sets[0].shape[1] if len(data_sets) > 0 else 2
 
 # Plot the points clouds
 
@@ -282,10 +286,11 @@ for hidx in range(len(homdim)):
 data_sets_torch = [torch.FloatTensor(data_sets[i]).to(device) for i in range(len(data_sets))]
 
 def prepare_input_for_model(model_name, x):
-    # x is a point cloud tensor of shape (N, 2)
+    # x is a point cloud tensor; for TFNs, we only extend 2D data to 3D.
+    arr = x.cpu().numpy()
     if model_name in ['TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN']:
-        arr = x.cpu().numpy()
-        arr = np.concatenate([arr, np.zeros((arr.shape[0], 1), dtype=arr.dtype)], axis=1)
+        if arr.shape[1] == 2:
+            arr = np.concatenate([arr, np.zeros((arr.shape[0], 1), dtype=arr.dtype)], axis=1)
         return torch.FloatTensor(arr).to(device)
     if model_name == 'PointNetTutorial':
         return x[:, :2]
@@ -320,7 +325,7 @@ for model_name in models_to_test:
         model_state_dict = checkpoint
         output_dim = None
 
-    model_PV = build_analysis_model(model_name, output_dim)
+    model_PV = build_analysis_model(model_name, output_dim, n=dim)
     model_PV.load_state_dict(model_state_dict)
     model_PV = model_PV.to(device)
     model_PV.eval()
