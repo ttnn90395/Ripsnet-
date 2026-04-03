@@ -12,12 +12,22 @@ import gudhi.representations
 from tqdm import tqdm
 import os
 import sys
+# ensure top repo is in path for models.py import from expes/
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 from sklearn.model_selection import KFold
 from models import (
     TensorFieldNetwork, GTTensorFieldNetwork, HierarchicalGTTFN,
     ScalarDistanceDeepSet, PointNetTutorial, ScalarInputMLP, MultiInputModel,
     DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,
 )
+
+MODEL_NAMES = [
+    'TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN',
+    'ScalarDistanceDeepSet', 'PointNetTutorial', 'ScalarInputMLP', 'MultiInputModel',
+    'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
+]
 
 dataset_name = sys.argv[1]
 model_name   = sys.argv[2]
@@ -189,6 +199,23 @@ def train_all_models():
 if model_name == 'all':
     train_all_models()
     sys.exit(0)
+
+if model_name in MODEL_NAMES:
+    m = build_model_by_name(model_name).to(device)
+    train_data_model = prepare_data_for_model(model_name, data_train_torch)
+    test_data_model = prepare_data_for_model(model_name, data_test_torch)
+    optimizer = optimizer_class(m.parameters(), lr=optim_lr)
+    criterion_loc = nn.MSELoss()
+
+    for epoch in range(min(5, num_epochs)):
+        train_loss = train_epoch(m, train_data_model, np.hstack(PVs_train), optimizer, criterion_loc, model_name)
+        val_loss = evaluate(m, test_data_model, np.hstack(PVs_test), criterion_loc, model_name)
+        print(f'[{model_name}] epoch {epoch+1}/{min(5,num_epochs)} train={train_loss:.4f} val={val_loss:.4f}')
+
+    torch.save(m.state_dict(), f'models/{model_name}.pth')
+    print(f'Saved model {model_name} at models/{model_name}.pth')
+    sys.exit(0)
+
 PVs_test_torch = [torch.FloatTensor(PVs_test[hidx]).to(device) for hidx in range(len(homdim))]
 PVs_train_stacked = torch.hstack(PVs_train_torch).to(device)
 PVs_test_stacked = torch.hstack(PVs_test_torch).to(device)
