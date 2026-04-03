@@ -79,6 +79,15 @@ else:
     optim_lr = 5e-4
     optimizer_class = optim.Adam
 
+# Mapping from model class name to checkpoint prefix (for analysis_nn.py to infer later)
+# Format: checkpoint_name is always (model_prefix)_(dataset_info)
+MODEL_TYPE_PREFIXES = {
+    'RaggedPersistenceModel': 'ripsnet',
+    'TensorFieldNetwork': 'tfn',
+    'GTTensorFieldNetwork': 'gttfn',
+    'HierarchicalGTTFN': 'hierarchical',
+}
+
 # Convert PVs to PyTorch tensors
 PVs_train_torch = [torch.FloatTensor(PVs_train[hidx]).to(device) for hidx in range(len(homdim))]
 PVs_test_torch = [torch.FloatTensor(PVs_test[hidx]).to(device) for hidx in range(len(homdim))]
@@ -209,7 +218,13 @@ def train_all_models():
                 val_loss = evaluate(m, test_data_model, np.hstack(PVs_test), criterion_loc, mname)
                 print(f'[{mname}] epoch {epoch+1}/{min(5,num_epochs)} train={train_loss:.4f} val={val_loss:.4f}')
             results[mname] = {'train_loss': train_loss, 'val_loss': val_loss}
-            torch.save(m.state_dict(), f'models/{mname}.pth')
+            checkpoint = {
+                'model_state_dict': m.state_dict(),
+                'model_type': mname,
+                'output_dim': output_dim,
+                'homdim': homdim,
+            }
+            torch.save(checkpoint, f'models/{mname}.pth')
         except Exception as e:
             print(f'ERROR {mname}:', e)
             results[mname] = {'error': str(e)}
@@ -234,7 +249,12 @@ if model_name in MODEL_NAMES:
         val_loss = evaluate(m, test_data_model, np.hstack(PVs_test), criterion_loc, model_name)
         print(f'[{model_name}] epoch {epoch+1}/{min(5,num_epochs)} train={train_loss:.4f} val={val_loss:.4f}')
 
-    torch.save(m.state_dict(), f'models/{model_name}.pth')
+    torch.save({
+        'model_state_dict': m.state_dict(),
+        'model_type': model_name,
+        'output_dim': output_dim,
+        'homdim': homdim,
+    }, f'models/{model_name}.pth')
     print(f'Saved model {model_name} at models/{model_name}.pth')
     sys.exit(0)
 

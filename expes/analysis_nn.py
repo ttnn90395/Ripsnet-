@@ -407,7 +407,42 @@ for model_name in models_to_test:
         model_PV = build_analysis_model(model_name, output_dim, n=dim)
     else:
         model_type = checkpoint.get('model_type', None)
-        if model_type in MODEL_NAME:
+        
+        # Mapping from checkpoint name prefix to MODEL_NAME
+        model_type_mapping = {
+            'ripsnet': 'RaggedPersistenceModel',
+            'tfn': 'TensorFieldNetwork',
+            'gttfn': 'GTTensorFieldNetwork',
+            'hierarchical': 'HierarchicalGTTFN',
+        }
+        
+        # Handle legacy 'best_model' type from old train_nn.py
+        if model_type == 'best_model':
+            inferred = None
+            # Try direct mapping first
+            for prefix, mapped_type in model_type_mapping.items():
+                if prefix.lower() in model_name.lower():
+                    inferred = mapped_type
+                    break
+            
+            # Try to infer from model_name or filename patterns
+            if not inferred:
+                for candidate in MODEL_NAME:
+                    if candidate.lower() in model_name.lower():
+                        inferred = candidate
+                        break
+            
+            if inferred:
+                print(f"  [Inferred model_type='{inferred}' from checkpoint name '{model_name}']")
+                model_PV = build_analysis_model(inferred, output_dim, n=dim)
+            else:
+                raise ValueError(
+                    f"Checkpoint '{model_path}' has model_type='best_model' but cannot infer model class.\n"
+                    f"  Checkpoint name: {model_name}\n"
+                    f"  Please retrain using current train_nn.py which saves proper model_type metadata.\n"
+                    f"  Or rename checkpoint to match one of: {MODEL_NAME}"
+                )
+        elif model_type in MODEL_NAME:
             model_PV = build_analysis_model(model_type, output_dim, n=dim)
         else:
             raise ValueError(
