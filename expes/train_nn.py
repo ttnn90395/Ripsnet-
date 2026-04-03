@@ -226,9 +226,9 @@ class DenseRaggedNet(nn.Module):
     def __init__(self, input_dim, output_dim, hidden_dims, activations):
         super(DenseRaggedNet, self).__init__()
         self.dense_layers = nn.ModuleList()
-        self.dense_layers.append(DenseRagged(hidden_dims[0], activation=activations[0]))
+        self.dense_layers.append(DenseRagged(out_features=hidden_dims[0], activation=activations[0]))
         for i in range(1, len(hidden_dims)):
-            self.dense_layers.append(DenseRagged(hidden_dims[i], activation=activations[i]))
+            self.dense_layers.append(DenseRagged(out_features=hidden_dims[i], activation=activations[i]))
         self.permop = PermopRagged()
         
         # Dense layers after pooling
@@ -283,9 +283,9 @@ def create_model_full():
     class FullModel(nn.Module):
         def __init__(self):
             super().__init__()
-            self.dense1 = DenseRagged(30, activation='relu')
-            self.dense2 = DenseRagged(20, activation='relu')
-            self.dense3 = DenseRagged(10, activation='relu')
+            self.dense1 = DenseRagged(out_features=30, activation='relu')
+            self.dense2 = DenseRagged(out_features=20, activation='relu')
+            self.dense3 = DenseRagged(out_features=10, activation='relu')
             self.permop = PermopRagged()
             self.fc1 = nn.Linear(10, 50)
             self.fc2 = nn.Linear(50, 100)
@@ -308,9 +308,9 @@ def create_model2():
     class Model2(nn.Module):
         def __init__(self):
             super().__init__()
-            self.dense1 = DenseRagged(30, activation='gelu')
-            self.dense2 = DenseRagged(20, activation='gelu')
-            self.dense3 = DenseRagged(10, activation='gelu')
+            self.dense1 = DenseRagged(out_features=30, activation='gelu')
+            self.dense2 = DenseRagged(out_features=20, activation='gelu')
+            self.dense3 = DenseRagged(out_features=10, activation='gelu')
             self.permop = PermopRagged()
             self.fc1 = nn.Linear(10, 50)
             self.fc2 = nn.Linear(50, 100)
@@ -333,7 +333,7 @@ def create_model3():
     class Model3(nn.Module):
         def __init__(self):
             super().__init__()
-            self.dense1 = DenseRagged(30, activation='relu')
+            self.dense1 = DenseRagged(out_features=30, activation='relu')
             self.permop = PermopRagged()
             self.fc1 = nn.Linear(30, 200)
             self.fc_out = nn.Linear(200, output_dim)
@@ -350,7 +350,7 @@ def create_model4():
     class Model4(nn.Module):
         def __init__(self):
             super().__init__()
-            self.dense1 = DenseRagged(30, activation='gelu')
+            self.dense1 = DenseRagged(out_features=30, activation='gelu')
             self.permop = PermopRagged()
             self.fc1 = nn.Linear(30, 200)
             self.fc_out = nn.Linear(200, output_dim)
