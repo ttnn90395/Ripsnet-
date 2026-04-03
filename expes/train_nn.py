@@ -242,7 +242,7 @@ class DenseRaggedNet(nn.Module):
         self.final_activation = nn.Sigmoid() if activations[-1] == 'sigmoid' else nn.Identity()
     
     def forward(self, x):
-        for dense in self.dense_layers[:-1]:
+        for dense in self.dense_layers:
             x = dense(x)
         x = self.permop(x)
         for layer in self.final_layers:
