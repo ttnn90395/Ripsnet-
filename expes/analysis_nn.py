@@ -52,14 +52,62 @@ mode = sys.argv[7]
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+model_paths = {}
+script_dir = os.path.dirname(os.path.abspath(__file__))
+candidate_dirs = [
+    'models',
+    os.path.join(script_dir, 'models'),
+    os.path.join(script_dir, '..', 'models'),
+    os.path.join(script_dir, '..', '..', 'models'),
+]
+
 if requested_model == 'all':
     models_to_test = MODEL_NAME
-else:
-    if requested_model not in MODEL_NAME:
-        raise ValueError(f"Unknown model '{requested_model}', valid: {MODEL_NAME}")
+    for m in models_to_test:
+        model_paths[m] = None
+elif requested_model in MODEL_NAME:
     models_to_test = [requested_model]
+    model_paths[requested_model] = None
+else:
+    models_to_test = []
+
+    # direct file path support
+    if os.path.isfile(requested_model):
+        model_name0 = os.path.splitext(os.path.basename(requested_model))[0]
+        models_to_test = [model_name0]
+        model_paths[model_name0] = requested_model
+
+    # exact file with extension in known dirs
+    if not models_to_test:
+        for d in candidate_dirs:
+            for ext in ('.pt', '.pth'):
+                candidate = os.path.join(d, requested_model + ext)
+                if os.path.isfile(candidate):
+                    model_name0 = requested_model
+                    models_to_test = [model_name0]
+                    model_paths[model_name0] = candidate
+                    break
+            if models_to_test:
+                break
+
+    # fuzzy wildcard in candidate dirs
+    if not models_to_test:
+        from glob import glob
+        for d in candidate_dirs:
+            candidates = glob(os.path.join(d, f'*{requested_model}*'))
+            for c in candidates:
+                if c.endswith('.pt') or c.endswith('.pth'):
+                    model_name0 = os.path.splitext(os.path.basename(c))[0]
+                    models_to_test.append(model_name0)
+                    model_paths[model_name0] = c
+
+    if not models_to_test:
+        raise ValueError(
+            f"Unknown model '{requested_model}', valid: {MODEL_NAME} or model checkpoint in models/*.pt/*.pth"
+        )
 
 print('models_to_test:', models_to_test)
+print('model_paths:', model_paths)
 print('dataset_PV_params:', dataset_PV_params, 'dataset_train_name:', dataset_train_name, 'dataset_test_name:', dataset_test_name, 'normalize:', normalize, 'PV_type:', PV_type, 'mode:', mode)
 
 
@@ -316,7 +364,14 @@ def model_predict(model, x, model_name):
         out = model(inp.unsqueeze(0))
 # loop over requested models and evaluate
 for model_name in models_to_test:
-    model_path = 'models/' + model_name + '.pt'
+    model_path = model_paths.get(model_name)
+    if model_path is None:
+        if os.path.exists(os.path.join('models', f'{model_name}.pt')):
+            model_path = os.path.join('models', f'{model_name}.pt')
+        elif os.path.exists(os.path.join('models', f'{model_name}.pth')):
+            model_path = os.path.join('models', f'{model_name}.pth')
+        else:
+            raise FileNotFoundError(f"No checkpoint found for model '{model_name}'")
     checkpoint = torch.load(model_path, map_location=device)
     if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
         model_state_dict = checkpoint['model_state_dict']
@@ -325,7 +380,18 @@ for model_name in models_to_test:
         model_state_dict = checkpoint
         output_dim = None
 
-    model_PV = build_analysis_model(model_name, output_dim, n=dim)
+    # For generic checkpoint naming (not necessarily class names), support stored model_type
+    if model_name in MODEL_NAME:
+        model_PV = build_analysis_model(model_name, output_dim, n=dim)
+    else:
+        model_type = checkpoint.get('model_type', None)
+        if model_type in MODEL_NAME:
+            model_PV = build_analysis_model(model_type, output_dim, n=dim)
+        else:
+            raise ValueError(
+                f"Checkpoint '{model_path}' has unknown model_type '{model_type}', cannot instantiate. "
+                f"Use MODEL_NAME or include model_type in checkpoint."
+            )
     model_PV.load_state_dict(model_state_dict)
     model_PV = model_PV.to(device)
     model_PV.eval()
