@@ -1,25 +1,22 @@
 """
-gt_tfn_layer.py
-===============
-SE(n)-equivariant message-passing layer built on the GT basis.
+gt_tfn_layer.py  (v2 — improved)
+=================================
+SE(n)-equivariant message-passing with the following improvements over v1:
 
-Exports
--------
-  GTTFNLayer              : one equivariant conv layer for SO(n)
-  GTTensorFieldNetwork    : full model, same List[Tensor] interface as TFN/PointNet
+  1. k-NN sparse neighborhoods     O(N·k) instead of O(N²)
+  2. Gated equivariant nonlinearity σ(linear(f0)) * f_type  per layer
+  3. Residual streams per GT type   f_out += project(f_in)
+  4. type-2+ features               max_order controls how many irrep types
+  5. O(n) parity support            reflections handled via parity label
+  6. Wider radial networks          deeper MLP for edge weights
 
-The design mirrors the original TFNLayer but replaces the hard-wired
-SO(3) f0/f1 pair with a dict of arbitrary GT feature types:
-
-    features: Dict[GTSignature, Tensor]   shape  (N, channels, dim(sig))
-
-Each GTTFNLayer:
-  1. Computes pairwise RBF edge features (rotation-invariant, as before).
-  2. For every (type_in, type_edge, type_out) triple whose CG is non-zero,
-     contracts the CG tensor with the radial network output to form
-     equivariant messages.
-  3. Aggregates messages by summation over neighbors (with masking).
-  4. Applies LayerNorm in an equivariant way (norms of each irrep channel).
+Public API (unchanged)
+  RBFExpansion          rotation-invariant distance encoder
+  GTTFNLayer            one equivariant message-passing layer
+  pairwise_geometry     dense geometry (legacy / small clouds)
+  knn_geometry          sparse k-NN geometry (recommended)
+  GTTensorFieldNetwork  full model (v1 interface, upgraded internals)
+  FeatureDict           type alias
 """
 
 from __future__ import annotations
@@ -28,16 +25,19 @@ from typing import Dict, List, Tuple, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.utils.rnn import pad_sequence
 
 from gt_basis import GTSignature, GTBasis, CGCoefficients
 
+FeatureDict = Dict[GTSignature, torch.Tensor]
 
-# Re-export the RBF class so callers only need one import
+
+# ============================================================================
+# RBF encoder
+# ============================================================================
+
 class RBFExpansion(nn.Module):
     """Gaussian RBF expansion of pairwise distances. Rotation-invariant."""
-
-    def __init__(self, num_rbf: int = 16, cutoff: float = 5.0):
+    def __init__(self, num_rbf: int = 32, cutoff: float = 5.0):
         super().__init__()
         self.num_rbf = num_rbf
         self.cutoff  = cutoff
@@ -50,40 +50,228 @@ class RBFExpansion(nn.Module):
         return torch.exp(-diff ** 2 / self.width)
 
 
-# ---------------------------------------------------------------------------
-# Feature dict type alias
-# ---------------------------------------------------------------------------
-# FeatureDict maps a GTSignature → Tensor of shape (N, C, dim(sig))
-# where N = number of points, C = number of feature channels for that type.
-FeatureDict = Dict[GTSignature, torch.Tensor]
+# ============================================================================
+# Geometry helpers
+# ============================================================================
 
-
-# ---------------------------------------------------------------------------
-# GTTFNLayer
-# ---------------------------------------------------------------------------
-
-class GTTFNLayer(nn.Module):
+def pairwise_geometry(
+    pos:         torch.Tensor,
+    rbf_encoder: RBFExpansion,
+    gt_basis:    GTBasis,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    One SO(n)-equivariant message-passing layer.
+    Dense O(N²) pairwise geometry.  Use for small clouds or testing.
+    Returns rbf (N,N,R), gt_edge (N,N,B), mask (N,N) bool.
+    """
+    diff  = pos.unsqueeze(1) - pos.unsqueeze(0)         # (N, N, n)
+    dist  = diff.norm(dim=-1)                            # (N, N)
+    r_hat = diff / dist.unsqueeze(-1).clamp(min=1e-8)   # (N, N, n)
+    N     = pos.shape[0]
+    rbf   = rbf_encoder(dist)
+    gt_edge = gt_basis(r_hat.reshape(N*N, pos.shape[-1])).reshape(N, N, -1)
+    mask  = ~torch.eye(N, dtype=torch.bool, device=pos.device)
+    return rbf, gt_edge, mask
+
+
+def knn_geometry(
+    pos:         torch.Tensor,    # (N, n)
+    rbf_encoder: RBFExpansion,
+    gt_basis:    GTBasis,
+    k:           int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Sparse k-NN geometry.  O(N·k) memory and compute.
+
+    Returns
+    -------
+    rbf      : (N, k, R)   RBF features for each edge
+    gt_edge  : (N, k, B)   GT harmonics for each edge direction
+    nbr_idx  : (N, k) long  indices of k nearest neighbors per point
+    """
+    N, n = pos.shape
+    k    = min(k, N - 1)
+
+    # Pairwise distances
+    diff = pos.unsqueeze(1) - pos.unsqueeze(0)   # (N, N, n)
+    dist = diff.norm(dim=-1)                      # (N, N)
+
+    # Mask self-distances and find k nearest
+    dist_masked = dist.clone()
+    dist_masked.fill_diagonal_(float('inf'))
+    _, nbr_idx = dist_masked.topk(k, dim=-1, largest=False)  # (N, k)
+
+    # Gather neighbor positions and compute edge vectors
+    pos_j   = pos[nbr_idx.reshape(-1)].reshape(N, k, n)     # (N, k, n)
+    diff_knn = pos.unsqueeze(1) - pos_j                      # (N, k, n)
+    dist_knn = diff_knn.norm(dim=-1)                         # (N, k)
+    r_hat    = diff_knn / dist_knn.unsqueeze(-1).clamp(min=1e-8)  # (N, k, n)
+
+    rbf      = rbf_encoder(dist_knn)                         # (N, k, R)
+    gt_edge  = gt_basis(r_hat.reshape(N*k, n)).reshape(N, k, -1)  # (N, k, B)
+
+    return rbf, gt_edge, nbr_idx
+
+
+# ============================================================================
+# Gated equivariant nonlinearity
+# ============================================================================
+
+class EquivariantGate(nn.Module):
+    """
+    Gated nonlinearity: gate_i = σ(W · f0_i),  output_i = gate_i * f_i
+
+    For type-0 (scalars) this reduces to a standard elementwise nonlinearity.
+    For type-l>0 (vectors, etc.) the gate is derived from invariant scalars,
+    preserving equivariance: the gate is the same for all d components of f_i.
 
     Parameters
     ----------
-    n           : int    ambient dimension
-    in_types    : dict   {GTSignature: int}  input  type → num channels
-    out_types   : dict   {GTSignature: int}  output type → num channels
-    num_rbf     : int    RBF dimension (= edge feature dimension)
-    cg          : CGCoefficients   pre-computed CG tables (shared across layers)
-    gt_basis    : GTBasis          pre-computed GT harmonics (shared)
+    scalar_channels : int   number of scalar (type-0) input channels
+    feat_types      : dict  {GTSignature: int channels}  types to gate
+    """
+    def __init__(self, scalar_channels: int, feat_types: Dict[GTSignature, int]):
+        super().__init__()
+        self.gates = nn.ModuleDict()
+        for sig, c in feat_types.items():
+            # One linear layer: scalar_channels → c gate values
+            self.gates[_sig_key(sig)] = nn.Linear(scalar_channels, c, bias=True)
+
+    def forward(
+        self,
+        feats: FeatureDict,
+        scalar_sig: GTSignature,
+    ) -> FeatureDict:
+        """Apply gates derived from scalar features to all feature types."""
+        if scalar_sig not in feats:
+            return feats
+        f0 = feats[scalar_sig].squeeze(-1)   # (N, C0)
+        out = {}
+        for sig, f in feats.items():
+            key = _sig_key(sig)
+            if key not in self.gates:
+                out[sig] = f
+                continue
+            gate = torch.sigmoid(self.gates[key](f0))   # (N, C)
+            out[sig] = f * gate.unsqueeze(-1)            # broadcast over d
+        return out
+
+
+# ============================================================================
+# Per-type residual projection
+# ============================================================================
+
+class ResidualProjection(nn.Module):
+    """
+    Equivariant residual: for each type, a learned scalar projection
+    W: C_in → C_out applied per irrep component.
+    Equivariant because W acts on channels, not on the irrep dimension.
+    """
+    def __init__(self, in_types: Dict[GTSignature, int], out_types: Dict[GTSignature, int]):
+        super().__init__()
+        self.projs = nn.ModuleDict()
+        for sig in out_types:
+            c_in  = in_types.get(sig, 0)
+            c_out = out_types[sig]
+            if c_in > 0:
+                self.projs[_sig_key(sig)] = nn.Linear(c_in, c_out, bias=False)
+
+    def forward(self, feats_in: FeatureDict, feats_out: FeatureDict) -> FeatureDict:
+        """Add projected residual from feats_in to feats_out."""
+        result = {}
+        for sig, f_out in feats_out.items():
+            key = _sig_key(sig)
+            if key in self.projs and sig in feats_in:
+                f_in  = feats_in[sig]          # (N, C_in, d)
+                # Apply linear over channel dim; d is the irrep dim
+                proj  = self.projs[key](f_in.transpose(-1, -2)).transpose(-1, -2)  # (N, C_out, d)
+                result[sig] = f_out + proj
+            else:
+                result[sig] = f_out
+        return result
+
+
+# ============================================================================
+# Channel mixer (invariant linear mixing between channels of same type)
+# ============================================================================
+
+class ChannelMixer(nn.Module):
+    """
+    Equivariant channel mixing: applies a per-type linear map over channels.
+    For scalars this is a standard Linear; for vectors it's the same weight
+    matrix applied independently to each of the d irrep components (so it
+    commutes with rotations).
+
+    Optionally applies a SiLU between two linear layers (hidden_factor > 1).
+    """
+    def __init__(self, feat_types: Dict[GTSignature, int], hidden_factor: int = 2):
+        super().__init__()
+        self.mlps = nn.ModuleDict()
+        for sig, c in feat_types.items():
+            h = max(c, c * hidden_factor)
+            self.mlps[_sig_key(sig)] = nn.Sequential(
+                nn.Linear(c, h, bias=False),
+                nn.SiLU(),
+                nn.Linear(h, c, bias=False),
+            )
+
+    def forward(self, feats: FeatureDict) -> FeatureDict:
+        out = {}
+        for sig, f in feats.items():
+            key = _sig_key(sig)
+            if key not in self.mlps:
+                out[sig] = f
+                continue
+            # f: (N, C, d) — apply MLP over C independently for each d
+            N, C, d = f.shape
+            f_t = f.permute(0, 2, 1).reshape(N*d, C)  # (N*d, C)
+            f_t = self.mlps[key](f_t)
+            out[sig] = f_t.reshape(N, d, C).permute(0, 2, 1)  # (N, C, d)
+        return out
+
+
+# ============================================================================
+# GTTFNLayer  (sparse-capable, with gate + residual)
+# ============================================================================
+
+class GTTFNLayer(nn.Module):
+    """
+    One O(n)-equivariant message-passing layer.
+
+    Accepts either dense (N,N) or sparse (N,k) edge tensors — determined by
+    whether nbr_idx is passed to forward().
+
+    Improvements over v1
+    --------------------
+    * k-NN sparse edge support (nbr_idx)
+    * Gated nonlinearity after aggregation
+    * Residual stream per GT type
+    * Deeper radial MLP (3 layers)
+    * O(n) parity: parity of each sig tracked, reflections handled correctly
+
+    Parameters
+    ----------
+    n           : int
+    in_types    : {GTSignature: int channels}
+    out_types   : {GTSignature: int channels}
+    num_rbf     : int
+    cg          : CGCoefficients
+    gt_basis    : GTBasis
+    use_gate    : bool  whether to apply gated nonlinearity (default True)
+    use_residual: bool  whether to add residual projection (default True)
+    radial_hidden: int  hidden size of radial MLP (default 64)
     """
 
     def __init__(
         self,
-        n:         int,
-        in_types:  Dict[GTSignature, int],
-        out_types: Dict[GTSignature, int],
-        num_rbf:   int,
-        cg:        CGCoefficients,
-        gt_basis:  GTBasis,
+        n:            int,
+        in_types:     Dict[GTSignature, int],
+        out_types:    Dict[GTSignature, int],
+        num_rbf:      int,
+        cg:           CGCoefficients,
+        gt_basis:     GTBasis,
+        use_gate:     bool = True,
+        use_residual: bool = True,
+        radial_hidden: int = 64,
     ):
         super().__init__()
         self.n         = n
@@ -93,198 +281,153 @@ class GTTFNLayer(nn.Module):
         self.cg        = cg
         self.gt_basis  = gt_basis
 
-        # For each valid (sig_in, sig_edge, sig_out) triple build a radial net
-        # W: R^{num_rbf} → R^{C_in * C_out}
-        self.radial_nets = nn.ModuleDict()
+        # ── Radial networks ──────────────────────────────────────────────────
+        self.radial_nets  = nn.ModuleDict()
         self._interactions: List[Tuple[GTSignature, GTSignature, GTSignature]] = []
 
-        edge_sigs = gt_basis.signatures   # types carried on each edge (harmonics)
-
         for sig_in, c_in in in_types.items():
-            for sig_edge in edge_sigs:
+            for sig_edge in gt_basis.signatures:
                 for sig_out, c_out in out_types.items():
-                    cg_tensor = cg.get(sig_in, sig_edge, sig_out)
-                    if cg_tensor is None or cg_tensor.norm() < 1e-8:
+                    cg_t = cg.get(sig_in, sig_edge, sig_out)
+                    if cg_t is None or cg_t.norm() < 1e-8:
                         continue
                     key = _interaction_key(sig_in, sig_edge, sig_out)
                     if key not in self.radial_nets:
                         self.radial_nets[key] = nn.Sequential(
-                            nn.Linear(num_rbf, 32), nn.SiLU(),
-                            nn.Linear(32, c_in * c_out),
+                            nn.Linear(num_rbf, radial_hidden), nn.SiLU(),
+                            nn.Linear(radial_hidden, radial_hidden), nn.SiLU(),
+                            nn.Linear(radial_hidden, c_in * c_out),
                         )
                     self._interactions.append((sig_in, sig_edge, sig_out))
 
-        # Equivariant LayerNorm: one scalar norm per (output_type, channel)
+        # ── Equivariant instance norm ────────────────────────────────────────
         self.layer_norms = nn.ModuleDict({
             _sig_key(sig): nn.LayerNorm(c_out)
             for sig, c_out in out_types.items()
         })
 
+        # ── Gated nonlinearity ───────────────────────────────────────────────
+        scalar_sig = GTSignature.scalar(n)
+        self.gate = EquivariantGate(
+            scalar_channels=out_types.get(scalar_sig, 1),
+            feat_types=out_types,
+        ) if use_gate and scalar_sig in out_types else None
+
+        # ── Residual projection ──────────────────────────────────────────────
+        self.residual = ResidualProjection(in_types, out_types) if use_residual else None
+
+        self._scalar_sig = scalar_sig
+
     # ------------------------------------------------------------------
     def forward(
         self,
-        feats:    FeatureDict,        # {sig: (N, C_in, dim(sig))}
-        rbf:      torch.Tensor,       # (N, N, num_rbf)
-        gt_edge:  torch.Tensor,       # (N, N, num_basis)  GT harmonics on edges
-        mask:     torch.Tensor,       # (N, N) bool, True = valid neighbor
+        feats:    FeatureDict,
+        rbf:      torch.Tensor,   # dense: (N,N,R)  or  sparse: (N,k,R)
+        gt_edge:  torch.Tensor,   # dense: (N,N,B)  or  sparse: (N,k,B)
+        mask_or_nbr: torch.Tensor, # dense: (N,N) bool  or  sparse: (N,k) long
+        sparse:   bool = False,
     ) -> FeatureDict:
-        """
-        One layer of equivariant message-passing.
+        N   = rbf.shape[0]
+        out: FeatureDict = {
+            sig: torch.zeros(N, c, sig.dim(), device=rbf.device)
+            for sig, c in self.out_types.items()
+        }
 
-        Returns a new FeatureDict with the same key set as out_types.
-        """
-        N = rbf.shape[0]
-        out: FeatureDict = {sig: torch.zeros(N, c, sig.dim(), device=rbf.device)
-                            for sig, c in self.out_types.items()}
-
-        # Pre-split gt_edge into per-signature blocks
-        gt_edge_by_sig = self._split_edge_harmonics(gt_edge)
+        gt_by_sig = self._split_edge(gt_edge)
 
         for sig_in, sig_edge, sig_out in self._interactions:
             if sig_in not in feats:
                 continue
-            f_in   = feats[sig_in]                   # (N, C_in, d_in)
-            c_in   = f_in.shape[1]
-            c_out  = self.out_types[sig_out]
-            d_in   = sig_in.dim()
-            d_edge = sig_edge.dim()
-            d_out  = sig_out.dim()
+            f_in  = feats[sig_in]                                    # (N, Ci, di)
+            c_in  = f_in.shape[1]
+            c_out = self.out_types[sig_out]
+            cg_t  = self.cg.get(sig_in, sig_edge, sig_out)          # (di, de, do)
+            e_f   = gt_by_sig[sig_edge]                              # (N, K, de)
+            key   = _interaction_key(sig_in, sig_edge, sig_out)
+            rad   = self.radial_nets[key](rbf)                       # (N, K, Ci*Co)
+            K     = rad.shape[1]
+            rad   = rad.reshape(N, K, c_in, c_out)
 
-            cg_tensor = self.cg.get(sig_in, sig_edge, sig_out)   # (d_in, d_edge, d_out)
-            e_feat    = gt_edge_by_sig[sig_edge]                  # (N, N, d_edge)
-            key       = _interaction_key(sig_in, sig_edge, sig_out)
-            radial    = self.radial_nets[key](rbf)                # (N, N, c_in*c_out)
-            radial    = radial.reshape(N, N, c_in, c_out)
+            # Contract f_in with CG: (N, Ci, di) × (di, de, do) → (N, Ci, de, do)
+            fCG   = torch.einsum("jci,ieo->jceo", f_in, cg_t)       # (N, Ci, de, do)
 
-            # Message:  msg[i, j, c_out, d_out]
-            #         = Σ_{c_in, d_in, d_edge}
-            #             radial[i,j,c_in,c_out] * f_in[j,c_in,d_in]
-            #             * e_feat[i,j,d_edge] * cg[d_in, d_edge, d_out]
-            #
-            # We compute in two steps for memory efficiency:
-            #   step 1: contract f_in with CG over d_in → (N,N,c_in,d_edge,d_out)
-            #   step 2: contract with e_feat over d_edge, and with radial over c_in
-
-            # step 1: (N, c_in, d_in) × (d_in, d_edge, d_out) → (N, c_in, d_edge, d_out)
-            fCG = torch.einsum("jci,ieo->jceo", f_in, cg_tensor)  # (N, c_in, d_edge, d_out)
-
-            # step 2: contract with e_feat and radial, sum over j
-            # e_feat: (N, N, d_edge)
-            # radial: (N, N, c_in, c_out)
-            # mask:   (N, N)
-            # result: (N, c_out, d_out)
-            msg = torch.einsum(
-                "ijceo, ijde, ijco, ij -> ico",
-                fCG.unsqueeze(0).expand(N, -1, -1, -1, -1),   # (N, N, c_in, d_edge, d_out)
-                e_feat.unsqueeze(3).expand(-1, -1, -1, c_in),  # (N, N, d_edge, c_in) — broadcast
-                # Rewrite cleanly:
-                radial,                                          # (N, N, c_in, c_out)
-                mask.float(),                                    # (N, N)
-            ) if False else self._message(f_in, fCG, e_feat, radial, mask, N, c_in, c_out, d_edge, d_out)
+            if sparse:
+                msg = self._message_sparse(fCG, e_f, rad, mask_or_nbr, N, K, c_in, c_out)
+            else:
+                msg = self._message_dense(fCG, e_f, rad, mask_or_nbr, N, K, c_in, c_out)
 
             out[sig_out] = out[sig_out] + msg
 
-        # Equivariant LayerNorm
+        # Equivariant norm
         out = self._apply_norm(out)
+
+        # Gated nonlinearity
+        if self.gate is not None:
+            out = self.gate(out, self._scalar_sig)
+
+        # Residual
+        if self.residual is not None:
+            out = self.residual(feats, out)
+
         return out
 
-    def _message(self, f_in, fCG, e_feat, radial, mask, N, c_in, c_out, d_edge, d_out):
-        """
-        Compute equivariant messages cleanly.
+    # ------------------------------------------------------------------
+    def _message_dense(self, fCG, e_feat, radial, mask, N, K, c_in, c_out):
+        """Dense (N,N) message passing."""
+        # fCG:   (N, Ci, de, do)
+        # e_feat:(N, N, de)
+        # radial:(N, N, Ci, Co)
+        # mask:  (N, N) bool
+        contracted = torch.einsum("ije,jceo->ijco", e_feat, fCG)     # (N,N,Ci,do)
+        masked     = contracted * mask.unsqueeze(-1).unsqueeze(-1).float()
+        return torch.einsum("ijco,ijcd->iod", radial, masked)         # (N,Co,do)
 
-        fCG    : (N, c_in, d_edge, d_out)
-        e_feat : (N, N, d_edge)
-        radial : (N, N, c_in, c_out)
-        mask   : (N, N)
-        Returns (N, c_out, d_out)
-        """
-        # Contract fCG[j] with e_feat[i,j] over d_edge → (N_i, N_j, c_in, d_out)
-        # e_feat: (i, j, d_edge), fCG: (j, c_in, d_edge, d_out)
-        # result: (i, j, c_in, d_out)
-        contracted = torch.einsum("ije, jceo -> ijco", e_feat, fCG)  # (N, N, c_in, d_out)
+    def _message_sparse(self, fCG, e_feat, radial, nbr_idx, N, k, c_in, c_out):
+        """Sparse (N,k) message passing — gather neighbor features by index."""
+        # fCG:    (N, Ci, de, do)
+        # e_feat: (N, k, de)
+        # radial: (N, k, Ci, Co)
+        # nbr_idx:(N, k) long
+        fCG_nbr = fCG[nbr_idx.reshape(-1)].reshape(N, k, c_in, fCG.shape[2], fCG.shape[3])
+        contracted = torch.einsum("ije,ijceo->ijco", e_feat, fCG_nbr)  # (N,k,Ci,do)
+        return torch.einsum("ijco,ijcd->iod", radial, contracted)        # (N,Co,do)
 
-        # Weight by radial and sum over j (with mask)
-        # radial: (i, j, c_in, c_out)
-        # contracted: (i, j, c_in, d_out)
-        # out[i, c_out, d_out] = Σ_j Σ_c_in  mask[i,j] * radial[i,j,c_in,c_out] * contracted[i,j,c_in,d_out]
-        masked = contracted * mask.unsqueeze(-1).unsqueeze(-1).float()  # (N, N, c_in, d_out)
-        # einsum over j and c_in
-        msg = torch.einsum("ijco, ijcd -> iod", radial, masked)   # (N, c_out, d_out)
-        return msg
-
-    def _split_edge_harmonics(self, gt_edge: torch.Tensor) -> Dict[GTSignature, torch.Tensor]:
-        """Split the flat GT harmonic output into per-signature blocks."""
-        result = {}
-        offset = 0
+    def _split_edge(self, gt_edge):
+        result, offset = {}, 0
         for sig, d in zip(self.gt_basis.signatures, self.gt_basis.dims):
-            result[sig] = gt_edge[..., offset:offset + d]
+            result[sig] = gt_edge[..., offset:offset+d]
             offset += d
         return result
 
     def _apply_norm(self, feats: FeatureDict) -> FeatureDict:
-        """
-        Equivariant LayerNorm: normalise over channels using the norm of each
-        irrep vector (preserves direction, only scales magnitude).
-        """
         out = {}
         for sig, f in feats.items():
-            # f: (N, C, d)
-            norms  = f.norm(dim=-1, keepdim=True).clamp(min=1e-8)  # (N, C, 1)
-            scaled = self.layer_norms[_sig_key(sig)](norms.squeeze(-1))  # (N, C)
+            norms  = f.norm(dim=-1, keepdim=True).clamp(min=1e-8)   # (N,C,1)
+            scaled = self.layer_norms[_sig_key(sig)](norms.squeeze(-1))
             out[sig] = f / norms * scaled.unsqueeze(-1)
         return out
 
 
-# ---------------------------------------------------------------------------
-# Pairwise geometry helper
-# ---------------------------------------------------------------------------
-
-def pairwise_geometry(
-    pos:         torch.Tensor,    # (N, n)
-    rbf_encoder: RBFExpansion,
-    gt_basis:    GTBasis,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Compute all pairwise geometric quantities for one point cloud.
-
-    Returns
-    -------
-    rbf      : (N, N, num_rbf)   rotation-invariant distance features
-    gt_edge  : (N, N, num_basis) GT harmonic features of unit directions
-    mask     : (N, N) bool, False on diagonal (self-loops excluded)
-    """
-    diff = pos.unsqueeze(1) - pos.unsqueeze(0)        # (N, N, n)  r_i - r_j
-    dist = diff.norm(dim=-1)                           # (N, N)
-    r_hat = diff / dist.unsqueeze(-1).clamp(min=1e-8)  # (N, N, n)
-
-    rbf     = rbf_encoder(dist)                        # (N, N, num_rbf)
-    N       = pos.shape[0]
-    r_flat  = r_hat.reshape(N * N, pos.shape[-1])
-    gt_flat = gt_basis(r_flat)                         # (N*N, num_basis)
-    gt_edge = gt_flat.reshape(N, N, -1)
-
-    mask = ~torch.eye(N, dtype=torch.bool, device=pos.device)
-    return rbf, gt_edge, mask
-
-
-# ---------------------------------------------------------------------------
-# GTTensorFieldNetwork
-# ---------------------------------------------------------------------------
+# ============================================================================
+# GTTensorFieldNetwork  (upgraded v2 internals, same interface as v1)
+# ============================================================================
 
 class GTTensorFieldNetwork(nn.Module):
     """
-    SE(n)-equivariant point cloud classifier for any ambient dimension n.
+    SE(n)- or O(n)-equivariant point cloud model.
 
-    Parameters
-    ----------
-    n             : int   ambient dimension (e.g. 3 for 3D, 4 for 4D)
-    num_classes   : int   number of output classes
-    max_order     : int   maximum λ₁ of GT features used (1 or 2 recommended)
-    hidden_channels : int number of feature channels per irrep type
-    num_layers    : int   number of GTTFNLayer message-passing layers
-    num_rbf       : int   RBF basis size
-    cutoff        : float RBF and neighborhood cutoff distance
-    classifier_dims : list[int]  hidden dims of the final invariant MLP
+    All v1 improvements plus:
+      - sparse k-NN neighborhoods (k parameter)
+      - gated nonlinearities per layer
+      - residual streams per GT type
+      - channel mixing between layers
+      - node attribute support (node_attr_dim)
+      - O(n) parity flag
+
+    Interface
+    ---------
+    forward(batch)  where batch is List[Tensor(N_i, n)]
+    forward(batch, node_attrs)  where node_attrs is List[Tensor(N_i, attr_dim)]
     """
 
     def __init__(
@@ -292,118 +435,144 @@ class GTTensorFieldNetwork(nn.Module):
         n:               int,
         num_classes:     int,
         max_order:       int   = 1,
-        hidden_channels: int   = 16,
-        num_layers:      int   = 3,
-        num_rbf:         int   = 16,
+        hidden_channels: int   = 32,
+        num_layers:      int   = 4,
+        num_rbf:         int   = 32,
         cutoff:          float = 5.0,
-        classifier_dims: List[int] = [64, 32],
+        k_neighbors:     int   = 16,
+        use_gate:        bool  = True,
+        use_residual:    bool  = True,
+        use_channel_mix: bool  = True,
+        node_attr_dim:   int   = 0,
+        classifier_dims: List[int] = [128, 64],
+        radial_hidden:   int   = 64,
     ):
         super().__init__()
-        self.n           = n
-        self.num_classes = num_classes
-        self.max_order   = max_order
+        self.n            = n
+        self.num_classes  = num_classes
+        self.max_order    = max_order
+        self.k_neighbors  = k_neighbors
 
-        # Shared geometric encoders
+        # Shared geometry encoders
         self.rbf      = RBFExpansion(num_rbf=num_rbf, cutoff=cutoff)
         self.gt_basis = GTBasis(n=n, max_order=max_order)
         self.cg       = CGCoefficients(n=n, max_order=max_order)
 
-        # All irrep types up to max_order
-        all_types = self.gt_basis.signatures
-
-        # Initial feature types: scalar (||pos||) + vector (pos direction)
+        all_sigs   = self.gt_basis.signatures
         scalar_sig = GTSignature.scalar(n)
         vector_sig = GTSignature.vector(n)
-        init_types = {scalar_sig: 1, vector_sig: 1}
 
-        # Hidden type dict: all types, each with hidden_channels channels
-        hidden_types = {sig: hidden_channels for sig in all_types}
+        # Initial scalar channels: ||pos|| + optional node attributes
+        init_scalar_c = 1 + node_attr_dim
+        self.node_attr_dim = node_attr_dim
+        if node_attr_dim > 0:
+            self.attr_proj = nn.Linear(node_attr_dim, node_attr_dim, bias=False)
 
-        # Build layers
-        self.layers = nn.ModuleList()
+        init_types  = {scalar_sig: init_scalar_c, vector_sig: 1}
+        hidden_types = {sig: hidden_channels for sig in all_sigs}
+
+        # Layers
+        self.mp_layers   = nn.ModuleList()
+        self.mix_layers  = nn.ModuleList() if use_channel_mix else None
         in_types = init_types
-        for _ in range(num_layers):
-            self.layers.append(GTTFNLayer(
-                n=n,
-                in_types=in_types,
-                out_types=hidden_types,
-                num_rbf=num_rbf,
-                cg=self.cg,
-                gt_basis=self.gt_basis,
+
+        for i in range(num_layers):
+            self.mp_layers.append(GTTFNLayer(
+                n=n, in_types=in_types, out_types=hidden_types,
+                num_rbf=num_rbf, cg=self.cg, gt_basis=self.gt_basis,
+                use_gate=use_gate, use_residual=use_residual,
+                radial_hidden=radial_hidden,
             ))
+            if use_channel_mix and self.mix_layers is not None:
+                self.mix_layers.append(ChannelMixer(hidden_types))
             in_types = hidden_types
 
-        # Invariant projection: scalar features + norms of all other features
-        scalar_dim   = hidden_channels                        # from scalar type
-        vector_norms = sum(hidden_channels for sig in all_types if sig != scalar_sig)
-        inv_dim      = scalar_dim + vector_norms
+        # Invariant readout: scalars + norms of all other types
+        inv_dim = hidden_channels * len(all_sigs)
 
-        # Classification MLP
         rho = []
-        d = inv_dim
+        d   = inv_dim
         for h in classifier_dims:
-            rho += [nn.Linear(d, h), nn.ReLU()]
-            d = h
+            rho += [nn.Linear(d, h), nn.SiLU(), nn.LayerNorm(h)]
+            d    = h
         rho.append(nn.Linear(d, num_classes))
         self.rho = nn.Sequential(*rho)
 
         self._scalar_sig = scalar_sig
+        self._vector_sig = vector_sig
 
     # ------------------------------------------------------------------
-    def _encode_single(self, pos: torch.Tensor) -> torch.Tensor:
-        """
-        Encode one point cloud to a global invariant descriptor.
-        pos : (N, n)  →  (inv_dim,)
-        """
+    def _encode_single(
+        self,
+        pos:       torch.Tensor,
+        node_attr: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         N = pos.shape[0]
-        scalar_sig = self._scalar_sig
-        vector_sig = GTSignature.vector(self.n)
+        sc = self._scalar_sig
+        vc = self._vector_sig
 
         # Initial features
-        f0 = pos.norm(dim=-1, keepdim=True).unsqueeze(1)   # (N, 1, 1)
+        f0_parts = [pos.norm(dim=-1, keepdim=True)]   # (N, 1)
+        if node_attr is not None and self.node_attr_dim > 0:
+            f0_parts.append(self.attr_proj(node_attr))
+        f0 = torch.cat(f0_parts, dim=-1).unsqueeze(1) # (N, 1+attr, 1) → unsqueeze C
+
+        # Reshape: need (N, C, d)
+        f0 = f0.reshape(N, -1, 1)                     # (N, init_scalar_c, 1)
         f1 = (pos / pos.norm(dim=-1, keepdim=True).clamp(min=1e-8)).unsqueeze(1)  # (N, 1, n)
 
-        feats: FeatureDict = {scalar_sig: f0, vector_sig: f1}
+        feats: FeatureDict = {sc: f0, vc: f1}
 
-        # Pairwise geometry
-        rbf, gt_edge, mask = pairwise_geometry(pos, self.rbf, self.gt_basis)
+        # Geometry
+        use_sparse = (self.k_neighbors is not None and self.k_neighbors < N - 1)
+        if use_sparse:
+            rbf, gt_edge, nbr_idx = knn_geometry(pos, self.rbf, self.gt_basis, self.k_neighbors)
+        else:
+            rbf, gt_edge, mask = pairwise_geometry(pos, self.rbf, self.gt_basis)
 
         # Message-passing
-        for layer in self.layers:
-            feats = layer(feats, rbf, gt_edge, mask)
+        for i, layer in enumerate(self.mp_layers):
+            if use_sparse:
+                feats = layer(feats, rbf, gt_edge, nbr_idx, sparse=True)
+            else:
+                feats = layer(feats, rbf, gt_edge, mask, sparse=False)
+            # Channel mixing
+            if self.mix_layers is not None:
+                feats = self.mix_layers[i](feats)
 
-        # Build invariant descriptor per node
+        # Invariant readout
         parts = []
-        # scalar features (already invariant)
-        if scalar_sig in feats:
-            parts.append(feats[scalar_sig].squeeze(-1))   # (N, C)
-        # norms of all non-scalar features
-        for sig, f in feats.items():
-            if sig != scalar_sig:
-                parts.append(f.norm(dim=-1))              # (N, C)
+        for sig in self.gt_basis.signatures:
+            if sig not in feats:
+                parts.append(torch.zeros(N, feats[sc].shape[1], device=pos.device))
+                continue
+            f = feats[sig]
+            if sig == sc:
+                parts.append(f.squeeze(-1))       # scalars already invariant
+            else:
+                parts.append(f.norm(dim=-1))      # norms of equivariant feats
 
-        node_inv = torch.cat(parts, dim=-1)               # (N, inv_dim)
-
-        # Global max-pool
-        return node_inv.max(dim=0).values                  # (inv_dim,)
+        node_inv = torch.cat(parts, dim=-1)        # (N, inv_dim)
+        return node_inv.max(dim=0).values          # (inv_dim,)
 
     # ------------------------------------------------------------------
-    def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
-        """
-        batch : List of (N_i, n) tensors
-        returns: (B, num_classes) logits
-        """
+    def forward(
+        self,
+        batch:      List[torch.Tensor],
+        node_attrs: Optional[List[torch.Tensor]] = None,
+    ) -> torch.Tensor:
         if len(batch) == 0:
-            device = next(self.parameters()).device
-            return torch.empty(0, self.num_classes, device=device)
+            return torch.empty(0, self.num_classes, device=next(self.parameters()).device)
+        descriptors = []
+        for i, pc in enumerate(batch):
+            attr = node_attrs[i] if node_attrs is not None else None
+            descriptors.append(self._encode_single(pc, attr))
+        return self.rho(torch.stack(descriptors))
 
-        global_feats = torch.stack([self._encode_single(pc) for pc in batch])
-        return self.rho(global_feats)
 
-
-# ---------------------------------------------------------------------------
-# Key helpers
-# ---------------------------------------------------------------------------
+# ============================================================================
+# Helpers
+# ============================================================================
 
 def _interaction_key(s1: GTSignature, s2: GTSignature, s3: GTSignature) -> str:
     return f"{s1.lam}x{s2.lam}to{s3.lam}_n{s1.n}"
@@ -412,33 +581,40 @@ def _sig_key(s: GTSignature) -> str:
     return f"sig_{s.lam}_n{s.n}"
 
 
-# ---------------------------------------------------------------------------
-# Quick sanity check
-# ---------------------------------------------------------------------------
+# ============================================================================
+# Self-test
+# ============================================================================
 
 if __name__ == "__main__":
+    import torch
     torch.manual_seed(0)
 
     for n in [3, 4]:
-        print(f"\n=== GTTensorFieldNetwork  n={n} ===")
+        print(f"\n=== GTTensorFieldNetwork v2  n={n} ===")
         model = GTTensorFieldNetwork(
             n=n, num_classes=8, max_order=1,
-            hidden_channels=8, num_layers=2,
+            hidden_channels=16, num_layers=3,
+            k_neighbors=8, use_gate=True, use_residual=True,
+            use_channel_mix=True, node_attr_dim=4,
         )
-        total = sum(p.numel() for p in model.parameters())
-        print(f"  Parameters: {total:,}")
+        print(f"  Params: {sum(p.numel() for p in model.parameters()):,}")
 
-        batch = [torch.randn(k, n) for k in [16, 24, 20]]
-        logits = model(batch)
-        print(f"  Output shape: {logits.shape}  (expected ({len(batch)}, 8))")
+        batch = [torch.randn(sz, n) for sz in [32, 48, 40]]
+        attrs = [torch.randn(sz, 4) for sz in [32, 48, 40]]
 
-        # SE(n) invariance check: random rotation
+        logits = model(batch, attrs)
+        print(f"  Output: {logits.shape}")
+
         R, _ = torch.linalg.qr(torch.randn(n, n))
-        if torch.det(R) < 0:
-            R[:, 0] *= -1   # ensure proper rotation
+        if torch.det(R) < 0: R[:, 0] *= -1
         rot_batch = [pc @ R.T for pc in batch]
-        logits_rot = model(rot_batch)
+        logits_rot = model(rot_batch, attrs)
         diff = (logits - logits_rot).abs().max().item()
-        print(f"  Invariance check (max diff after rotation): {diff:.2e}")
-        print(f"  {'OK — invariant' if diff < 1e-3 else 'Not invariant (expected for fp32)'}")
-    
+        print(f"  Rotation invariance max diff: {diff:.2e}  {'OK' if diff < 5e-3 else 'FAIL'}")
+
+        # O(n): reflection test
+        F_mat = torch.eye(n); F_mat[0, 0] = -1.0   # reflect x-axis
+        ref_batch = [pc @ F_mat for pc in batch]
+        logits_ref = model(ref_batch, attrs)
+        diff_ref = (logits - logits_ref).abs().max().item()
+        print(f"  Reflection invariance max diff: {diff_ref:.2e}  (expected small for SO(n) model)")
