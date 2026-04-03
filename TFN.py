@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import Adamax
-from torch.cuda.amp import autocast, GradScaler
+from torch import amp
 from torch.utils.checkpoint import checkpoint as grad_checkpoint
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import LabelEncoder
@@ -264,7 +264,7 @@ def train_model_classification(
 ):
     model.to(device)
     # GradScaler: keeps fp16 gradients from underflowing
-    scaler           = GradScaler(enabled=USE_AMP)
+    scaler           = amp.GradScaler(enabled=USE_AMP)
     patience         = 10
     best_val_loss    = float('inf')
     patience_counter = 0
@@ -291,7 +291,7 @@ def train_model_classification(
             # set_to_none frees gradient buffers immediately (saves memory vs zero_grad)
             optimizer.zero_grad(set_to_none=True)
 
-            with autocast(enabled=USE_AMP):        # fp16 halves tensor sizes
+            with amp.autocast(device_type=device.type, enabled=USE_AMP):        # fp16 halves tensor sizes
                 outputs = model(batch_pcs)
                 loss    = criterion(outputs, batch_tgt)
 
@@ -320,7 +320,7 @@ def train_model_classification(
                 batch_pcs = [subsample_and_to_tensor(val_data_np[i], subsample)
                              for i in idx]
                 batch_tgt = val_targets_t[idx]
-                with autocast(enabled=USE_AMP):
+                with amp.autocast(device_type=device.type, enabled=USE_AMP):
                     outputs   = model(batch_pcs)
                     val_loss += criterion(outputs, batch_tgt).item() * len(batch_pcs)
                 val_correct += outputs.argmax(1).eq(batch_tgt).sum().item()
@@ -365,7 +365,7 @@ def evaluate_model(model, data_np, targets,
             idx = np.arange(start, min(start+batch_size, len(data_np)))
             batch_pcs = [subsample_and_to_tensor(data_np[i], subsample)
                          for i in idx]
-            with autocast(enabled=USE_AMP):
+            with amp.autocast(device_type=device.type, enabled=USE_AMP):
                 outputs = model(batch_pcs)
             preds.append(outputs.argmax(1).cpu())
             del batch_pcs, outputs

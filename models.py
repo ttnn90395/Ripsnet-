@@ -304,8 +304,10 @@ class DistanceMatrixRaggedModel(nn.Module):
                 padded = torch.zeros(max_n, max_n, device=device)
                 padded[:m.shape[0], :m.shape[1]] = m
                 m = padded
-            phi_out = self._phi_layers(m.view(1, -1)).squeeze(0)
-            phi_outs.append(phi_out)
+            # m is (N, N); apply phi to each row (N, N -> N, phi_dim) then pool
+            row_phi = self._phi_layers(m)
+            pooled = row_phi.mean(dim=0)
+            phi_outs.append(pooled)
 
         aggregated = torch.stack(phi_outs)
         return self.rho(aggregated)

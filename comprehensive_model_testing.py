@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import Adamax
-from torch.cuda.amp import autocast, GradScaler
+from torch import amp
 from torch.utils.checkpoint import checkpoint as grad_checkpoint
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import LabelEncoder
@@ -176,13 +176,12 @@ def create_model(model_name, num_classes):
 # ---------------------------------------------------------------------------
 def prepare_data_for_model(model_name, data_list):
     """Prepare data in the format expected by each model"""
-    if model_name in ['TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN', 'PointNetTutorial']:
-        # These models expect 3D point clouds
+    if model_name == 'TensorFieldNetwork':
         return to_3d_numpy(data_list)
 
-    elif model_name == 'PointNetTutorial':
-        # This model expects 2D point clouds
-        return [pc[:, :2] for pc in data_list]  # Remove z-coordinate
+    elif model_name in ['GTTensorFieldNetwork', 'HierarchicalGTTFN', 'PointNetTutorial']:
+        # These models expect 2D point clouds
+        return [pc[:, :2] if pc.shape[1] > 2 else pc for pc in data_list]
 
     elif model_name == 'ScalarDistanceDeepSet':
         # This model expects flattened upper triangular distances
@@ -211,7 +210,7 @@ def train_model_classification(
     model_name, epochs=20, batch_size=BATCH_SIZE, subsample=TFN_N_SUBSAMPLE,
 ):
     model.to(device)
-    scaler = GradScaler(enabled=USE_AMP)
+    scaler = amp.GradScaler(enabled=USE_AMP)
     patience = 10
     best_val_loss = float('inf')
     patience_counter = 0
@@ -241,7 +240,7 @@ def train_model_classification(
 
             optimizer.zero_grad(set_to_none=True)
 
-            with autocast(enabled=USE_AMP):
+            with amp.autocast(device_type=device.type, enabled=USE_AMP):
                 outputs = model(batch_pcs)
                 loss = criterion(outputs, batch_tgt)
 
@@ -274,7 +273,7 @@ def train_model_classification(
                     batch_pcs = [torch.tensor(val_data_np[i], dtype=torch.float32, device=device) for i in idx]
 
                 batch_tgt = val_targets_t[idx]
-                with autocast(enabled=USE_AMP):
+                with amp.autocast(device_type=device.type, enabled=USE_AMP):
                     outputs = model(batch_pcs)
                     val_loss += criterion(outputs, batch_tgt).item() * len(batch_pcs)
                 val_correct += outputs.argmax(1).eq(batch_tgt).sum().item()
@@ -325,7 +324,7 @@ def evaluate_model(model, data_np, targets, model_name,
             else:
                 batch_pcs = [torch.tensor(data_np[i], dtype=torch.float32, device=device) for i in idx]
 
-            with autocast(enabled=USE_AMP):
+            with amp.autocast(device_type=device.type, enabled=USE_AMP):
                 outputs = model(batch_pcs)
             preds.append(outputs.argmax(1).cpu())
             del batch_pcs, outputs
