@@ -31,6 +31,8 @@ MODEL_NAMES = [
 
 # Ensure models directory exists
 os.makedirs('models', exist_ok=True)
+# Ensure results directory exists
+os.makedirs('results', exist_ok=True)
 
 dataset_name = sys.argv[1]
 model_name   = sys.argv[2]
