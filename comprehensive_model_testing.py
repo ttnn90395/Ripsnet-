@@ -139,15 +139,21 @@ def create_model(model_name, num_classes):
         return TFNWrapper(base_model)
 
     elif model_name == 'GTTensorFieldNetwork':
-        base_model = GTTensorFieldNetwork(num_classes=num_classes)
+        base_model = GTTensorFieldNetwork(n=2, num_classes=num_classes)  # 2D point clouds
         return TFNWrapper(base_model)
 
     elif model_name == 'HierarchicalGTTFN':
-        base_model = HierarchicalGTTFN(num_classes=num_classes)
+        base_model = HierarchicalGTTFN(n=2, num_classes=num_classes)  # 2D point clouds
         return TFNWrapper(base_model)
 
     elif model_name == 'ScalarDistanceDeepSet':
-        base_model = ScalarDistanceDeepSet(output_dim=128)  # Feature dimension
+        # This model expects flattened upper triangular distances
+        def flatten_upper_triangular(dm):
+            n = dm.shape[0]
+            upper_indices = torch.triu_indices(n, n, offset=1)
+            return dm[upper_indices[0], upper_indices[1]]
+        
+        base_model = ScalarDistanceDeepSet(output_dim=128)
         return ClassificationWrapper(base_model, num_classes, feature_dim=128)
 
     elif model_name == 'PointNetTutorial':
@@ -155,7 +161,7 @@ def create_model(model_name, num_classes):
         return ClassificationWrapper(base_model, num_classes, feature_dim=128)
 
     elif model_name == 'DistanceMatrixRaggedModel':
-        base_model = DistanceMatrixRaggedModel(output_dim=128)  # Feature dimension
+        base_model = DistanceMatrixRaggedModel(output_dim=128, num_points=600)  # Fixed size for our dataset
         return ClassificationWrapper(base_model, num_classes, feature_dim=128)
 
     elif model_name == 'RaggedPersistenceModel':
@@ -174,13 +180,22 @@ def prepare_data_for_model(model_name, data_list):
         # These models expect 3D point clouds
         return to_3d_numpy(data_list)
 
-    elif model_name in ['ScalarDistanceDeepSet', 'DistanceMatrixRaggedModel']:
-        # These models expect distance matrices
-        return [distance_matrix(pc) for pc in data_list]
+    elif model_name == 'PointNetTutorial':
+        # This model expects 2D point clouds
+        return [pc[:, :2] for pc in data_list]  # Remove z-coordinate
+
+    elif model_name == 'ScalarDistanceDeepSet':
+        # This model expects flattened upper triangular distances
+        def flatten_upper_triangular(dm):
+            n = dm.shape[0]
+            upper_indices = torch.triu_indices(n, n, offset=1)
+            return dm[upper_indices[0], upper_indices[1]]
+        
+        return [flatten_upper_triangular(torch.tensor(distance_matrix(pc), dtype=torch.float32)) for pc in data_list]
 
     elif model_name == 'RaggedPersistenceModel':
-        # This model expects persistence diagrams
-        # For simplicity, we'll use distance matrices as input (this might need adjustment)
+        # This model expects persistence diagrams, but we'll use distance matrices for now
+        # In a real scenario, you'd compute actual persistence diagrams
         return [distance_matrix(pc) for pc in data_list]
 
     else:
@@ -402,14 +417,16 @@ def test_all_models():
     print(f"\n{'='*60}")
     print("SUMMARY OF RESULTS")
     print(f"{'='*60}")
-    print("<20")
+    print(f"{'Model':<25} {'Clean Acc':<12} {'Noisy Acc':<12}")
     print("-" * 60)
 
     for model_name, result in results.items():
         if 'error' in result:
-            print("<20")
+            print(f"{model_name:<25} {'ERROR':<12} {'ERROR':<12}")
         else:
-            print("<20")
+            clean_acc = result['clean_accuracy']
+            noisy_acc = result['noisy_accuracy']
+            print(f"{model_name:<25} {clean_acc:<12.4f} {noisy_acc:<12.4f}")
 
     return results
 
