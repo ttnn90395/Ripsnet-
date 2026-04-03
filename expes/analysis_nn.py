@@ -309,13 +309,16 @@ def model_predict(model, x, model_name):
         out = model(torch.zeros((1, 1), device=device))
     else:
         out = model(inp.unsqueeze(0))
-for model_name in MODEL_NAME:
-    checkpoint = torch.load('models/' + model_name + '.pt', map_location=device)
+# loop over requested models and evaluate
+for model_name in models_to_test:
+    model_path = 'models/' + model_name + '.pt'
+    checkpoint = torch.load(model_path, map_location=device)
     if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
         model_state_dict = checkpoint['model_state_dict']
         output_dim = checkpoint.get('output_dim', None)
     else:
         model_state_dict = checkpoint
+        output_dim = None
 
     model_PV = build_analysis_model(model_name, output_dim)
     model_PV.load_state_dict(model_state_dict)
@@ -323,101 +326,81 @@ for model_name in MODEL_NAME:
     model_PV.eval()
 
     starttimeNN = time()
-
     with torch.no_grad():
         PV_NN = []
-        for data_item in tqdm(data_sets_torch, desc="Predicting with NN"):
+        for data_item in tqdm(data_sets_torch, desc=f"Predicting with {model_name}"):
             output = model_predict(model_PV, data_item, model_name)
-            if isinstance(output, torch.Tensor):
-                output_np = output.cpu().numpy()
-            else:
-                output_np = np.asarray(output)
+            output_np = output.cpu().numpy() if isinstance(output, torch.Tensor) else np.asarray(output)
             if output_np.ndim > 1 and output_np.shape[0] == 1:
                 output_np = output_np[0]
             PV_NN.append(output_np)
+
     PV_NN = np.vstack(PV_NN)
     timeNN = time() - starttimeNN
-
-    print('Time taken by the NN (' + model_name + ') = {:.2f} seconds'.format(timeNN))
-
-    # Plot the predicted PVs
+    print(f"Time taken by the NN ({model_name}) = {timeNN:.2f} seconds")
 
     for hidx in range(len(homdim)):
-
         hdim = homdim[hidx]
-
-
         plt.figure()
-        
         for i in range(9):
             plt.subplot(3, 3, i + 1)
             if PV_type == 'PI':
-                plt.imshow(np.flip(np.reshape(PV_NN[len(data_classif_train)+i][(hidx)*(PV_size*PV_size):(hidx+1)*(PV_size*PV_size)], [PV_size, PV_size]), 0), cmap='jet') #, vmin=0, vmax=1)
+                plt.imshow(np.flip(np.reshape(PV_NN[len(data_classif_train)+i][hidx*(PV_size*PV_size):(hidx+1)*(PV_size*PV_size)], [PV_size, PV_size]), 0), cmap='jet')
                 plt.colorbar()
-            elif PV_type == 'PL':
+            else:
                 nls = PV_params[hidx]['num_landscapes']
                 for lidx in range(nls):
-                    plt.plot(PV_NN[len(data_classif_train)+i][(hidx)*(PV_size*nls)+lidx*PV_size:(hidx)*(PV_size*nls)+(lidx+1)*PV_size])
-    plt.suptitle('Test predicted PV in hdim ' + str(hdim))
-    plt.savefig('results/' + dataset_test_name + '_predicted_PVs_h' + str(hdim) + '_on_test.png')
+                    plt.plot(PV_NN[len(data_classif_train)+i][hidx*(PV_size*nls)+lidx*PV_size:(hidx)*(PV_size*nls)+(lidx+1)*PV_size])
+        plt.suptitle(f"Test predicted PV in hdim {hdim} ({model_name})")
+        plt.savefig(f"results/{dataset_test_name}_{model_name}_predicted_PVs_h{hdim}_on_test.png")
 
-    PV_train_NN, PV_test_NN = PV_NN[:len(data_classif_train)], PV_NN[len(data_classif_train):]
+    PV_train_NN = PV_NN[:len(data_classif_train)]
+    PV_test_NN = PV_NN[len(data_classif_train):]
 
-    XR1 = time()
-    model_classif_NN = XGBClassifier(eval_metric='logloss', use_label_encoder=False)
-    model_classif_NN.fit(PV_train_NN, label_classif_train)
-    train_acc = model_classif_NN.score(PV_train_NN, label_classif_train)
-    test_acc  = model_classif_NN.score(PV_test_NN,  label_classif_test)
-    XR2 = time()
+    clf = XGBClassifier(eval_metric='logloss', use_label_encoder=False)
+    clf.fit(PV_train_NN, label_classif_train)
+    train_acc_nn = clf.score(PV_train_NN, label_classif_train)
+    test_acc_nn = clf.score(PV_test_NN, label_classif_test)
+    print(f"RipsNet ({model_name}) XGB train/test acc: {100*train_acc_nn:.2f}% / {100*test_acc_nn:.2f}%")
 
-    print('Train--Test accuracy RipsNet (' + model_name + ') (XGB) of data set ' + str(dataset_test_name) + ': ' + str("{:.2f}".format(100*train_acc)) + ' -- ' + str("{:.2f}".format(100*test_acc)) + ', with parameters [' + ', '.join([str(k) + ':' + str(v) for k,v in PV_params[0].items()] + ['a:' + str(a), 'b:' + str(b)]) + '] and normalization ' + str(normalize))
+# followed by baseline/Gudhi classifiers
 PV_train_gudhi, PV_test_gudhi = np.hstack(PV_gudhi)[:len(data_classif_train)], np.hstack(PV_gudhi)[len(data_classif_train):]
 noise_PV_train_gudhi, noise_PV_test_gudhi = np.hstack(noise_PV_gudhi)[:len(data_classif_train)], np.hstack(noise_PV_gudhi)[len(data_classif_train):]
 
-# We compare the classification results between the true PVs and the predicted PVs. For that, we create two models: model_classif_NN will be trained
-# with the PVs computed by the NN and model_classif_gudhi will be trained with the PVs computed with Gudhi. We then compare their accuracies on new data.
-
-N_sets_train = PV_train_gudhi.shape[0]
-N_sets_test = PV_test_gudhi.shape[0]
-
 le = LabelEncoder().fit(np.concatenate([label_classif_train, label_classif_test]))
 label_classif_train = le.transform(label_classif_train)
-label_classif_test  = le.transform(label_classif_test)
+label_classif_test = le.transform(label_classif_test)
 
 XG1 = time()
 model_classif_gudhi = XGBClassifier(eval_metric='logloss', use_label_encoder=False)
 model_classif_gudhi.fit(PV_train_gudhi, label_classif_train)
 train_acc_gudhi = model_classif_gudhi.score(PV_train_gudhi, label_classif_train)
-test_acc_gudhi =  model_classif_gudhi.score(PV_test_gudhi,  label_classif_test)
+test_acc_gudhi = model_classif_gudhi.score(PV_test_gudhi, label_classif_test)
 XG2 = time()
-print('Train--Test accuracy Gudhi (XGB) of data set ' + str(dataset_test_name) + ': ' + str("{:.2f}".format(100*train_acc_gudhi)) + ' -- ' + str("{:.2f}".format(100*test_acc_gudhi)) + ', with parameters [' + ', '.join([str(k) + ':' + str(v) for k,v in PV_params[0].items()] + ['a:' + str(a), 'b:' + str(b)]) + '] and normalization ' + str(normalize))
+print(f"Gudhi (XGB) train/test: {100*train_acc_gudhi:.2f}% / {100*test_acc_gudhi:.2f}%")
 
 XGN1 = time()
 model_classif_noise = XGBClassifier(eval_metric='logloss', use_label_encoder=False)
 model_classif_noise.fit(noise_PV_train_gudhi, label_classif_train)
-train_acc = model_classif_noise.score(noise_PV_train_gudhi, label_classif_train)
-test_acc  = model_classif_noise.score(noise_PV_test_gudhi,  label_classif_test)
+train_acc_noise = model_classif_noise.score(noise_PV_train_gudhi, label_classif_train)
+test_acc_noise = model_classif_noise.score(noise_PV_test_gudhi, label_classif_test)
 XGN2 = time()
-print('Train--Test accuracy Gudhi-noise (XGB) of data set ' + str(dataset_test_name) + ': ' + str("{:.2f}".format(100*train_acc)) + ' -- ' + str("{:.2f}".format(100*test_acc)) + ', with parameters [' + ', '.join([str(k) + ':' + str(v) for k,v in noise_PV_params[0].items()] + ['a:' + str(a), 'b:' + str(b)]) + '] and normalization ' + str(normalize))
+print(f"Gudhi-noise (XGB) train/test: {100*train_acc_noise:.2f}% / {100*test_acc_noise:.2f}%")
 
 XB11 = time()
-model_baseline = KNeighborsClassifier(metric=DTW)
-model_baseline.fit(ts_classif_train, label_classif_train)
-train_acc = model_baseline.score(ts_classif_train, label_classif_train)
-test_acc = model_baseline.score(ts_classif_test, label_classif_test)
+model_baseline_dtw = KNeighborsClassifier(metric=DTW)
+model_baseline_dtw.fit(ts_classif_train, label_classif_train)
+train_acc_dtw = model_baseline_dtw.score(ts_classif_train, label_classif_train)
+test_acc_dtw = model_baseline_dtw.score(ts_classif_test, label_classif_test)
 XB12 = time()
-print('Train--Test accuracy baseline (DTW + k-NN) of data set ' + str(dataset_test_name) + ': ' + str("{:.2f}".format(100*train_acc)) + ' -- ' + str("{:.2f}".format(100*test_acc)))
+print(f"Baseline DTW k-NN train/test: {100*train_acc_dtw:.2f}% / {100*test_acc_dtw:.2f}%")
 
 XB21 = time()
-model_baseline = KNeighborsClassifier(metric='euclidean')
-model_baseline.fit(ts_classif_train, label_classif_train)
-train_acc = model_baseline.score(ts_classif_train, label_classif_train)
-test_acc = model_baseline.score(ts_classif_test, label_classif_test)
+model_baseline_euc = KNeighborsClassifier(metric='euclidean')
+model_baseline_euc.fit(ts_classif_train, label_classif_train)
+train_acc_euc = model_baseline_euc.score(ts_classif_train, label_classif_train)
+test_acc_euc = model_baseline_euc.score(ts_classif_test, label_classif_test)
 XB22 = time()
-print('Train--Test accuracy baseline (Euc + k-NN) of data set ' + str(dataset_test_name) + ': ' + str("{:.2f}".format(100*train_acc)) + ' -- ' + str("{:.2f}".format(100*test_acc)))
+print(f"Baseline Euclidean k-NN train/test: {100*train_acc_euc:.2f}% / {100*test_acc_euc:.2f}%")
 
-print('Time taken by XGB-Gudhi = {:.2f} seconds'.format(XG2-XG1))
-print('Time taken by XGB-Gudhi-noise = {:.2f} seconds'.format(XGN2-XGN1))
-print('Time taken by XGB-the NN = {:.2f} seconds'.format(XR2-XR1))
-print('Time taken by Baseline 1 = {:.2f} seconds'.format(XB12-XB11))
-print('Time taken by Baseline 2 = {:.2f} seconds'.format(XB22-XB21))
+print('Time taken summary: Gudhi XGB={:.2f}s Gudhi-noise XGB={:.2f}s DTW={:.2f}s Eucl={:.2f}s'.format(XG2-XG1, XGN2-XGN1, XB12-XB11, XB22-XB21))
