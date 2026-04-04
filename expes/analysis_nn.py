@@ -34,13 +34,15 @@ os.makedirs('results', exist_ok=True)
 from models import (
     TensorFieldNetwork, GTTensorFieldNetwork, HierarchicalGTTFN,
     ScalarDistanceDeepSet, PointNetTutorial, ScalarInputMLP, MultiInputModel,
-    DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,
+    DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,   
+    GTTensorFieldNetworkV2,
 )
 
 MODEL_NAMES = [
     'TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN',
     'ScalarDistanceDeepSet', 'PointNetTutorial', 'ScalarInputMLP', 'MultiInputModel',
     'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
+    'GTTensorFieldNetworkV2',
 ]
 
 # -------------------------------------------------------------------------
@@ -163,6 +165,8 @@ def build_analysis_model(name, output_dim, n=None):
         return RaggedPersistenceModel(output_dim=output_dim)
     if name == 'DistanceMatrixRaggedModel':
         return DistanceMatrixRaggedModel(output_dim=output_dim, num_points=600)
+    if name == 'GTTensorFieldNetworkV2':
+        return GTTensorFieldNetworkV2(n=n_dim, num_classes=output_dim)
     raise ValueError(f"Unknown model name: {name}")
 
 # -------------------------------------------------------------------------
@@ -176,7 +180,7 @@ def prepare_single_input(mname, x_tensor):
     """
     arr = x_tensor.cpu().numpy()
 
-    if mname in ['TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN']:
+    if mname in ['TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN', 'GTTensorFieldNetworkV2']:
         if arr.shape[1] == 2:
             arr = np.concatenate([arr, np.zeros((arr.shape[0], 1), dtype=arr.dtype)], axis=1)
         return torch.FloatTensor(arr).to(device)
@@ -219,7 +223,7 @@ def forward_single(model, prepared_x, mname):
         'TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN',
         'PointNetTutorial', 'DistanceMatrixRaggedModel',
         'ScalarDistanceDeepSet', 'DenseRagged', 'PermopRagged',
-        'RaggedPersistenceModel',
+        'RaggedPersistenceModel',   'GTTensorFieldNetworkV2',
     ]:
         return model([prepared_x])         # list-of-one convention
 

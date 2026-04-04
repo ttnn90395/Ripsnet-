@@ -24,9 +24,8 @@ from torch.nn.utils.rnn import pad_sequence
 from typing import List
 
 from TFN import RBFExpansion as TFN_RBFExpansion, TFNLayer, TensorFieldNetwork as TFNTensorFieldNetwork
-from gt_tfn_layer import RBFExpansion as GTTFN_RBFExpansion, GTTFNLayer, GTTensorFieldNetwork, ChannelMixer, EquivariantGate, ResidualProjection
-from gt_improvements import HierarchicalGTTFN, OnEquivariantWrapper
-
+from gt_tfn_layer import RBFExpansion as GTTFN_RBFExpansion, GTTFNLayer, ChannelMixer, EquivariantGate, ResidualProjection
+from tfn_model import TensorFieldNetwork, GTTensorFieldNetwork, GTTensorFieldNetworkV2, HierarchicalGTTFN, OnEquivariantWrapper  
 # Notebook-derived models: reimplemented below (from tutorial_pytorch_ragged.ipynb)
 
 # Only TFN and notebook models are provided per request.
@@ -323,6 +322,9 @@ __all__ = [
     'GTTFN_RBFExpansion', 'GTTFNLayer', 'GTTensorFieldNetwork', 'ChannelMixer', 'EquivariantGate', 'ResidualProjection',
     # gt improvements
     'HierarchicalGTTFN', 'OnEquivariantWrapper',
+    # TFN models
+        'TensorFieldNetwork', 'GTTensorFieldNetwork', 'GTTensorFieldNetworkV2',
+        # 'HierarchicalGTTFN', 'OnEquivariantWrapper', --- IGNORE ---
     # notebook models
     'ScalarDistanceDeepSet', 'PointNetTutorial', 'ScalarInputMLP', 'MultiInputModel',
     'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',

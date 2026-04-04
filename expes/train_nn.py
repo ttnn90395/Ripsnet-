@@ -21,12 +21,14 @@ from models import (
     TensorFieldNetwork, GTTensorFieldNetwork, HierarchicalGTTFN,
     ScalarDistanceDeepSet, PointNetTutorial, ScalarInputMLP, MultiInputModel,
     DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,
+    GTTensorFieldNetworkV2  
 )
 
 MODEL_NAMES = [
     'TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN',
     'ScalarDistanceDeepSet', 'PointNetTutorial', 'ScalarInputMLP', 'MultiInputModel',
     'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
+    'GTTensorFieldNetworkV2'
 ]
 
 # Ensure models directory exists
@@ -89,7 +91,7 @@ PVs_test_torch  = [torch.FloatTensor(PVs_test[hidx]).to(device)  for hidx in ran
 
 def prepare_data_for_model(model_name, data_list):
     """Return a list of tensors shaped correctly for the given model."""
-    if model_name in ['TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN']:
+    if model_name in ['TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN', 'GTTensorFieldNetworkV2']:
         out = []
         for x in data_list:
             arr = x.cpu().numpy() if isinstance(x, torch.Tensor) else np.array(x)
@@ -160,6 +162,8 @@ def build_model_by_name(name, n=None):
         return RaggedPersistenceModel(output_dim=output_dim)
     if name == 'DistanceMatrixRaggedModel':
         return DistanceMatrixRaggedModel(output_dim=output_dim, num_points=600)
+    if name == 'GTTensorFieldNetworkV2':
+        return GTTensorFieldNetworkV2(n=dim if n is None else n, num_classes=output_dim)
     raise ValueError('Unknown model: ' + name)
 
 
@@ -180,7 +184,7 @@ def forward_single(model, x, mname):
         'TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN',
         'PointNetTutorial', 'DistanceMatrixRaggedModel',
         'ScalarDistanceDeepSet', 'DenseRagged', 'PermopRagged',
-        'RaggedPersistenceModel',
+        'RaggedPersistenceModel',   'GTTensorFieldNetworkV2',
     ]:
         return model([x])
     return model(x.unsqueeze(0))
