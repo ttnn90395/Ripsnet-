@@ -34,8 +34,10 @@ from gt_tfn_layer import (
     EquivariantGate,
     ResidualProjection,
     GTTensorFieldNetwork,      # n-dim SO(n) base model
-    HierarchicalGTTFN,
-    OnEquivariantWrapper,
+)
+
+from gt_improvements import (
+    HierarchicalGTTFN, OnEquivariantWrapper,
 )
 
 # ---------------------------------------------------------------------------
