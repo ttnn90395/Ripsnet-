@@ -32,17 +32,17 @@ if ROOT_DIR not in sys.path:
 os.makedirs('results', exist_ok=True)
 
 from models import (
-    TensorFieldNetwork, GTTensorFieldNetwork, HierarchicalGTTFN,
+    TensorFieldNetwork, GTTensorFieldNetwork, GTTensorFieldNetworkV2,
+    HierarchicalGTTFN, PointNet3D,
     ScalarDistanceDeepSet, PointNetTutorial, ScalarInputMLP, MultiInputModel,
-    DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,   
-    GTTensorFieldNetworkV2,
+    DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,
 )
 
 MODEL_NAMES = [
-    'TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN',
+    'TensorFieldNetwork', 'GTTensorFieldNetwork', 'GTTensorFieldNetworkV2',
+    'HierarchicalGTTFN', 'PointNet3D',
     'ScalarDistanceDeepSet', 'PointNetTutorial', 'ScalarInputMLP', 'MultiInputModel',
     'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
-    'GTTensorFieldNetworkV2',
 ]
 
 # -------------------------------------------------------------------------
@@ -147,8 +147,12 @@ def build_analysis_model(name, output_dim, n=None):
         return TensorFieldNetwork(num_classes=output_dim)
     if name == 'GTTensorFieldNetwork':
         return GTTensorFieldNetwork(n=n_dim, num_classes=output_dim)
+    if name == 'GTTensorFieldNetworkV2':
+        return GTTensorFieldNetworkV2(n=n_dim, num_classes=output_dim)
     if name == 'HierarchicalGTTFN':
         return HierarchicalGTTFN(n=n_dim, num_classes=output_dim)
+    if name == 'PointNet3D':
+        return PointNet3D(output_dim=output_dim)
     if name == 'ScalarDistanceDeepSet':
         return ScalarDistanceDeepSet(output_dim=output_dim)
     if name == 'PointNetTutorial':
@@ -165,8 +169,6 @@ def build_analysis_model(name, output_dim, n=None):
         return RaggedPersistenceModel(output_dim=output_dim)
     if name == 'DistanceMatrixRaggedModel':
         return DistanceMatrixRaggedModel(output_dim=output_dim, num_points=600)
-    if name == 'GTTensorFieldNetworkV2':
-        return GTTensorFieldNetworkV2(n=n_dim, num_classes=output_dim)
     raise ValueError(f"Unknown model name: {name}")
 
 # -------------------------------------------------------------------------
@@ -180,10 +182,18 @@ def prepare_single_input(mname, x_tensor):
     """
     arr = x_tensor.cpu().numpy()
 
-    if mname in ['TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN', 'GTTensorFieldNetworkV2']:
+    if mname in ['TensorFieldNetwork', 'GTTensorFieldNetwork',
+                 'GTTensorFieldNetworkV2', 'HierarchicalGTTFN']:
         if arr.shape[1] == 2:
             arr = np.concatenate([arr, np.zeros((arr.shape[0], 1), dtype=arr.dtype)], axis=1)
         return torch.FloatTensor(arr).to(device)
+
+    if mname == 'PointNet3D':
+        # needs 3 columns; pad if necessary
+        if arr.shape[1] < 3:
+            pad = np.zeros((arr.shape[0], 3 - arr.shape[1]), dtype=arr.dtype)
+            arr = np.concatenate([arr, pad], axis=1)
+        return torch.FloatTensor(arr[:, :3]).to(device)
 
     if mname == 'PointNetTutorial':
         return torch.FloatTensor(arr[:, :2]).to(device)
@@ -193,7 +203,6 @@ def prepare_single_input(mname, x_tensor):
         return torch.FloatTensor(mat).to(device)
 
     if mname == 'ScalarInputMLP':
-        # Scalar summary: mean pairwise distance
         mat = np.linalg.norm(arr[:, None, :] - arr[None, :, :], axis=-1)
         scalar = np.array([[mat.mean()]], dtype=np.float32)
         return torch.FloatTensor(scalar).to(device)
@@ -220,10 +229,10 @@ def forward_single(model, prepared_x, mname):
         return model(prepared_x)           # (1, output_dim)
 
     if mname in [
-        'TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN',
-        'PointNetTutorial', 'DistanceMatrixRaggedModel',
-        'ScalarDistanceDeepSet', 'DenseRagged', 'PermopRagged',
-        'RaggedPersistenceModel',   'GTTensorFieldNetworkV2',
+        'TensorFieldNetwork', 'GTTensorFieldNetwork', 'GTTensorFieldNetworkV2',
+        'HierarchicalGTTFN', 'PointNet3D', 'PointNetTutorial',
+        'DistanceMatrixRaggedModel', 'ScalarDistanceDeepSet',
+        'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel',
     ]:
         return model([prepared_x])         # list-of-one convention
 

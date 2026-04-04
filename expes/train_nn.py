@@ -18,17 +18,17 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 from sklearn.model_selection import KFold
 from models import (
-    TensorFieldNetwork, GTTensorFieldNetwork, HierarchicalGTTFN,
+    TensorFieldNetwork, GTTensorFieldNetwork, GTTensorFieldNetworkV2,
+    HierarchicalGTTFN, PointNet3D,
     ScalarDistanceDeepSet, PointNetTutorial, ScalarInputMLP, MultiInputModel,
     DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,
-    GTTensorFieldNetworkV2  
 )
 
 MODEL_NAMES = [
-    'TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN',
+    'TensorFieldNetwork', 'GTTensorFieldNetwork', 'GTTensorFieldNetworkV2',
+    'HierarchicalGTTFN', 'PointNet3D',
     'ScalarDistanceDeepSet', 'PointNetTutorial', 'ScalarInputMLP', 'MultiInputModel',
     'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
-    'GTTensorFieldNetworkV2'
 ]
 
 # Ensure models directory exists
@@ -91,7 +91,9 @@ PVs_test_torch  = [torch.FloatTensor(PVs_test[hidx]).to(device)  for hidx in ran
 
 def prepare_data_for_model(model_name, data_list):
     """Return a list of tensors shaped correctly for the given model."""
-    if model_name in ['TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN', 'GTTensorFieldNetworkV2']:
+    if model_name in ['TensorFieldNetwork', 'GTTensorFieldNetwork',
+                      'GTTensorFieldNetworkV2', 'HierarchicalGTTFN']:
+        # These models accept n-dim point clouds; pad 2-D to 3-D minimum
         out = []
         for x in data_list:
             arr = x.cpu().numpy() if isinstance(x, torch.Tensor) else np.array(x)
@@ -100,11 +102,16 @@ def prepare_data_for_model(model_name, data_list):
             out.append(torch.FloatTensor(arr).to(device))
         return out
 
-    if model_name == 'PointNetTutorial':
+    if model_name in ['PointNetTutorial', 'PointNet3D']:
+        # PointNetTutorial uses 2 cols; PointNet3D uses 3 cols
+        ncols = 3 if model_name == 'PointNet3D' else 2
         out = []
         for x in data_list:
             arr = x.cpu().numpy() if isinstance(x, torch.Tensor) else np.array(x)
-            out.append(torch.FloatTensor(arr[:, :2]).to(device))
+            if arr.shape[1] < ncols:
+                pad = np.zeros((len(arr), ncols - arr.shape[1]), dtype=arr.dtype)
+                arr = np.concatenate([arr, pad], axis=1)
+            out.append(torch.FloatTensor(arr[:, :ncols]).to(device))
         return out
 
     if model_name in ['ScalarDistanceDeepSet', 'DistanceMatrixRaggedModel', 'RaggedPersistenceModel']:
@@ -140,12 +147,17 @@ def prepare_data_for_model(model_name, data_list):
 
 
 def build_model_by_name(name, n=None):
+    _n = dim if n is None else n
     if name == 'TensorFieldNetwork':
         return TensorFieldNetwork(num_classes=output_dim)
     if name == 'GTTensorFieldNetwork':
-        return GTTensorFieldNetwork(n=dim if n is None else n, num_classes=output_dim)
+        return GTTensorFieldNetwork(n=_n, num_classes=output_dim)
+    if name == 'GTTensorFieldNetworkV2':
+        return GTTensorFieldNetworkV2(n=_n, num_classes=output_dim)
     if name == 'HierarchicalGTTFN':
-        return HierarchicalGTTFN(n=dim if n is None else n, num_classes=output_dim)
+        return HierarchicalGTTFN(n=_n, num_classes=output_dim)
+    if name == 'PointNet3D':
+        return PointNet3D(output_dim=output_dim)
     if name == 'ScalarDistanceDeepSet':
         return ScalarDistanceDeepSet(output_dim=output_dim)
     if name == 'PointNetTutorial':
@@ -162,8 +174,6 @@ def build_model_by_name(name, n=None):
         return RaggedPersistenceModel(output_dim=output_dim)
     if name == 'DistanceMatrixRaggedModel':
         return DistanceMatrixRaggedModel(output_dim=output_dim, num_points=600)
-    if name == 'GTTensorFieldNetworkV2':
-        return GTTensorFieldNetworkV2(n=dim if n is None else n, num_classes=output_dim)
     raise ValueError('Unknown model: ' + name)
 
 
@@ -174,17 +184,15 @@ def build_model_by_name(name, n=None):
 def forward_single(model, x, mname):
     """Run model on a single prepared sample x; return output tensor."""
     if mname == 'MultiInputModel':
-        # x is a (point_cloud, scalar) tuple
         pc, scalar = x
         return model([pc], scalar)
     if mname == 'ScalarInputMLP':
-        # x is already a (1,1) scalar tensor
         return model(x)
     if mname in [
-        'TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN',
-        'PointNetTutorial', 'DistanceMatrixRaggedModel',
-        'ScalarDistanceDeepSet', 'DenseRagged', 'PermopRagged',
-        'RaggedPersistenceModel',   'GTTensorFieldNetworkV2',
+        'TensorFieldNetwork', 'GTTensorFieldNetwork', 'GTTensorFieldNetworkV2',
+        'HierarchicalGTTFN', 'PointNet3D', 'PointNetTutorial',
+        'DistanceMatrixRaggedModel', 'ScalarDistanceDeepSet',
+        'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel',
     ]:
         return model([x])
     return model(x.unsqueeze(0))
