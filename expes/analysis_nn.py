@@ -463,7 +463,7 @@ for model_name in models_to_test:
         output_dim  = checkpoint.get('output_dim')
         ckpt_type   = checkpoint.get('model_type', model_name)
         ckpt_dim    = checkpoint.get('dim', dim)
-        ckpt_npts   = checkpoint.get('num_points', None)   # for DistanceMatrixRaggedModel
+        ckpt_npts   = checkpoint.get('num_points', None)
     else:
         model_state = checkpoint
         output_dim  = None
@@ -471,19 +471,23 @@ for model_name in models_to_test:
         ckpt_dim    = dim
         ckpt_npts   = None
 
-    # Detect old TFNTensorFieldNetwork checkpoint (keys: "rbf.centers", "layers.X.W00...")
-    # and remap class_name so we load the original TFN instead of GTTFNv2-backed wrapper.
-    _state_keys = list(model_state.keys())
-    is_old_tfn = any(k.startswith('layers.') and '.W' in k for k in _state_keys) or \
-                 'rbf.centers' in _state_keys
-    if is_old_tfn:
-        ckpt_type = 'TFNTensorFieldNetwork'
+    # ----------------------------------------------------------------
+    # Resolve class_name: trust ckpt_type first (set by train_nn.py).
+    # Only fall back to key-inspection for legacy checkpoints where
+    # model_type was not saved or was saved as 'best_model'.
+    # ----------------------------------------------------------------
+    _state_keys = set(model_state.keys())
 
-    # Resolve the actual class name to instantiate
-    if ckpt_type in MODEL_NAMES:
+    # Legacy TFNTensorFieldNetwork: unique key pattern "layers.X.W00..."
+    _is_old_tfn = any(k.startswith('layers.') and '.W0' in k for k in _state_keys)
+
+    if _is_old_tfn:
+        # Override whatever ckpt_type says — this is the original TFN architecture
+        class_name = 'TFNTensorFieldNetwork'
+    elif ckpt_type in MODEL_NAMES:
         class_name = ckpt_type
     elif ckpt_type == 'TFNTensorFieldNetwork':
-        class_name = 'TFNTensorFieldNetwork'   # handled separately below
+        class_name = 'TFNTensorFieldNetwork'
     elif model_name in MODEL_NAMES:
         class_name = model_name
     else:
@@ -502,20 +506,19 @@ for model_name in models_to_test:
     if output_dim is None:
         output_dim = sum(PVs_train[hidx].shape[1] for hidx in range(len(homdim)))
 
+    print(f'  class_name={class_name}  ckpt_type={ckpt_type}  output_dim={output_dim}  dim={ckpt_dim}')
+
     try:
         if class_name == 'TFNTensorFieldNetwork':
-            # Load the original TFN directly — it has its own key layout
             from models import TFNTensorFieldNetwork
             model_PV = TFNTensorFieldNetwork(num_classes=output_dim)
             model_PV.load_state_dict(model_state)
         elif class_name == 'DistanceMatrixRaggedModel':
-            # Must use the same num_points that was used during training
-            npts = ckpt_npts or (ckpt_dim * (ckpt_dim - 1) // 2)  # fallback estimate
+            npts = ckpt_npts or (ckpt_dim * (ckpt_dim - 1) // 2)
             model_PV = build_analysis_model(class_name, output_dim, n=ckpt_dim,
                                             extra={'num_points': npts})
             model_PV.load_state_dict(model_state)
         elif class_name == 'RaggedPersistenceModel':
-            # Pre-init with in_features=ckpt_dim so weight keys match
             model_PV = RaggedPersistenceModel(output_dim=output_dim,
                                               in_features=ckpt_dim)
             model_PV.load_state_dict(model_state)
