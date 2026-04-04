@@ -37,7 +37,8 @@ from gt_tfn_layer import (
 )
 
 from gt_improvements import (
-    HierarchicalGTTFN, OnEquivariantWrapper,
+    HierarchicalGTTFN,
+    OnEquivariantWrapper,
 )
 
 # ---------------------------------------------------------------------------
@@ -306,7 +307,14 @@ class MultiInputModel(nn.Module):
 
 
 class DenseRagged(nn.Module):
-    """Point-wise linear layer for ragged (variable-size) point clouds."""
+    """
+    Point-wise linear layer for ragged (variable-size) point clouds.
+
+    If `in_features` is given the weight matrix is pre-allocated in __init__
+    so the optimizer sees it immediately.  If None it is created on the first
+    forward call (lazy init) — in that case you must run one forward pass
+    before building the optimizer (done automatically by train_single_model).
+    """
 
     def __init__(self, in_features=None, out_features=30,
                  activation='relu', use_bias=True):
@@ -315,25 +323,32 @@ class DenseRagged(nn.Module):
         self.out_features = out_features
         self.use_bias     = use_bias
         self.activation   = activation
-        self.weight_param = None
-        self.bias_param   = None
 
-    def _init_params(self, in_f: int, device):
-        self.weight_param = nn.Parameter(
-            torch.randn(in_f, self.out_features, device=device) * 0.01)
-        self.register_parameter('weight_param', self.weight_param)
-        if self.use_bias:
-            self.bias_param = nn.Parameter(
-                torch.zeros(self.out_features, device=device))
-            self.register_parameter('bias_param', self.bias_param)
+        if in_features is not None:
+            self.weight_param = nn.Parameter(
+                torch.randn(in_features, out_features) * 0.01)
+            self.bias_param = (nn.Parameter(torch.zeros(out_features))
+                               if use_bias else None)
+        else:
+            self.weight_param = None
+            self.bias_param   = None
+
+    def _ensure_params(self, in_f: int, device):
+        if self.weight_param is None:
+            self.weight_param = nn.Parameter(
+                torch.randn(in_f, self.out_features, device=device) * 0.01)
+            self.register_parameter('weight_param', self.weight_param)
+            if self.use_bias:
+                self.bias_param = nn.Parameter(
+                    torch.zeros(self.out_features, device=device))
+                self.register_parameter('bias_param', self.bias_param)
 
     def forward(self, inputs: List[torch.Tensor]) -> List[torch.Tensor]:
         outputs = []
         for x in inputs:
-            if self.weight_param is None:
-                self._init_params(x.shape[-1], x.device)
+            self._ensure_params(x.shape[-1], x.device)
             y = torch.matmul(x, self.weight_param)
-            if self.use_bias:
+            if self.use_bias and self.bias_param is not None:
                 y = y + self.bias_param
             if self.activation == 'relu':
                 y = F.relu(y)
@@ -346,26 +361,47 @@ class DenseRagged(nn.Module):
 
 
 class PermopRagged(nn.Module):
-    """Permutation-invariant pooling: sum over points → (B, C)."""
+    """
+    Permutation-invariant pooling: sum over points → (B, C).
+    Has no learnable parameters; a dummy buffer is registered so that
+    optimizer construction (which calls model.parameters()) does not fail.
+    """
+
+    def __init__(self):
+        super().__init__()
+        # Dummy parameter so torch.optim doesn't raise "empty parameter list"
+        # when this module is trained standalone.
+        self._dummy = nn.Parameter(torch.zeros(1), requires_grad=False)
 
     def forward(self, inputs: List[torch.Tensor]) -> torch.Tensor:
         return torch.stack([x.sum(dim=0) for x in inputs])
 
 
 class RaggedPersistenceModel(nn.Module):
-    """Three DenseRagged layers → PermopRagged → MLP head."""
+    """
+    Three DenseRagged layers → PermopRagged → MLP head.
 
-    def __init__(self, output_dim):
+    `in_features` is the dimensionality of each input point (e.g. 2 for 2-D
+    point clouds).  Providing it at construction time pre-allocates the weight
+    matrices so the optimizer can be built before any forward pass.
+    """
+
+    # Chain of hidden sizes through the DenseRagged stack
+    _RAGGED_DIMS = [30, 20, 10]
+
+    def __init__(self, output_dim, in_features=2):
         super().__init__()
-        self.ragged_layers = nn.ModuleList([
-            DenseRagged(out_features=30, activation='relu'),
-            DenseRagged(out_features=20, activation='relu'),
-            DenseRagged(out_features=10, activation='relu'),
-        ])
+        dims   = [in_features] + self._RAGGED_DIMS
+        layers = []
+        for i in range(len(self._RAGGED_DIMS)):
+            layers.append(DenseRagged(in_features=dims[i],
+                                      out_features=dims[i + 1],
+                                      activation='relu'))
+        self.ragged_layers = nn.ModuleList(layers)
         self.perm = PermopRagged()
         self.fc = nn.Sequential(
-            nn.Linear(10, 50),  nn.ReLU(),
-            nn.Linear(50, 100), nn.ReLU(),
+            nn.Linear(self._RAGGED_DIMS[-1], 50),  nn.ReLU(),
+            nn.Linear(50, 100),                    nn.ReLU(),
             nn.Linear(100, output_dim),
         )
 
@@ -378,19 +414,27 @@ class RaggedPersistenceModel(nn.Module):
 class DistanceMatrixRaggedModel(nn.Module):
     """
     Row-wise MLP on a distance matrix, then mean-pool and MLP head.
-    `num_points` is used only as an initial hint; the phi network is
-    rebuilt lazily if a different size is encountered.
+
+    `num_points` controls the input width of the phi MLP and is saved in the
+    checkpoint so that the same architecture is reconstructed at load time.
+    Pass num_points=None to defer construction until the first forward call
+    (lazy mode — only used when the actual point count is not yet known).
     """
 
     def __init__(self, output_dim, num_points=None,
                  phi_dim=128, rho_hidden=(256, 128)):
         super().__init__()
+        self.output_dim   = output_dim
         self.num_points   = num_points
         self.phi_dim      = phi_dim
-        self._phi_layers  = None
         self._phi_inp_dim = None
+
         if num_points and num_points > 0:
-            self._build_phi(num_points)
+            self._phi_layers = self._make_phi(num_points)
+            self._phi_inp_dim = num_points
+        else:
+            self._phi_layers = None
+
         layers, prev = [], phi_dim
         for h in rho_hidden:
             layers += [nn.Linear(prev, h), nn.ReLU()]
@@ -398,13 +442,17 @@ class DistanceMatrixRaggedModel(nn.Module):
         layers.append(nn.Linear(prev, output_dim))
         self.rho = nn.Sequential(*layers)
 
-    def _build_phi(self, inp: int):
+    def _make_phi(self, inp: int) -> nn.Sequential:
         hidden = max(64, self.phi_dim)
-        self._phi_layers = nn.Sequential(
+        return nn.Sequential(
             nn.Linear(inp, hidden), nn.ReLU(),
             nn.Linear(hidden, self.phi_dim), nn.ReLU(),
         )
-        self._phi_inp_dim = inp
+
+    def _ensure_phi(self, n: int, device):
+        if self._phi_layers is None or self._phi_inp_dim != n:
+            self._phi_layers  = self._make_phi(n).to(device)
+            self._phi_inp_dim = n
 
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
         if len(batch) == 0:
@@ -412,10 +460,7 @@ class DistanceMatrixRaggedModel(nn.Module):
                                device=next(self.parameters()).device)
         max_n  = max(m.shape[0] for m in batch)
         device = next(self.parameters()).device
-
-        if self._phi_layers is None or self._phi_inp_dim != max_n:
-            self._build_phi(max_n)
-            self._phi_layers = self._phi_layers.to(device)
+        self._ensure_phi(max_n, device)
 
         phi_outs = []
         for m in batch:
@@ -424,8 +469,8 @@ class DistanceMatrixRaggedModel(nn.Module):
                 padded = torch.zeros(max_n, max_n, device=device)
                 padded[:n, :n] = m
                 m = padded
-            row_phi = self._phi_layers(m)          # (max_n, phi_dim)
-            phi_outs.append(row_phi.mean(dim=0))   # (phi_dim,)
+            row_phi = self._phi_layers(m)
+            phi_outs.append(row_phi.mean(dim=0))
 
         return self.rho(torch.stack(phi_outs))
 

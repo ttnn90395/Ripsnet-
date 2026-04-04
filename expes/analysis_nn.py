@@ -141,8 +141,9 @@ PV_size = PV_params[0]['resolution'][0] if PV_type == 'PI' else PV_params[0]['re
 # Build analysis model by class name
 # -------------------------------------------------------------------------
 
-def build_analysis_model(name, output_dim, n=None):
+def build_analysis_model(name, output_dim, n=None, extra=None):
     n_dim = dim if n is None else n
+    extra = extra or {}
     if name == 'TensorFieldNetwork':
         return TensorFieldNetwork(num_classes=output_dim)
     if name == 'GTTensorFieldNetwork':
@@ -162,11 +163,15 @@ def build_analysis_model(name, output_dim, n=None):
     if name == 'MultiInputModel':
         return MultiInputModel(target_output_dim=output_dim, scalar_input_dim=1)
     if name == 'DenseRagged':
-        return DenseRagged(in_features=None, out_features=output_dim)
+        return DenseRagged(in_features=n_dim, out_features=output_dim)
     if name == 'PermopRagged':
         return PermopRagged()
     if name == 'RaggedPersistenceModel':
-        return RaggedPersistenceModel(output_dim=output_dim)
+        return RaggedPersistenceModel(output_dim=output_dim, in_features=n_dim)
+    if name == 'DistanceMatrixRaggedModel':
+        npts = extra.get('num_points', n_dim)
+        return DistanceMatrixRaggedModel(output_dim=output_dim, num_points=npts)
+    raise ValueError(f"Unknown model name: {name}")
     if name == 'DistanceMatrixRaggedModel':
         return DistanceMatrixRaggedModel(output_dim=output_dim, num_points=600)
     raise ValueError(f"Unknown model name: {name}")
@@ -458,19 +463,30 @@ for model_name in models_to_test:
         output_dim  = checkpoint.get('output_dim')
         ckpt_type   = checkpoint.get('model_type', model_name)
         ckpt_dim    = checkpoint.get('dim', dim)
+        ckpt_npts   = checkpoint.get('num_points', None)   # for DistanceMatrixRaggedModel
     else:
         model_state = checkpoint
         output_dim  = None
         ckpt_type   = model_name
         ckpt_dim    = dim
+        ckpt_npts   = None
+
+    # Detect old TFNTensorFieldNetwork checkpoint (keys: "rbf.centers", "layers.X.W00...")
+    # and remap class_name so we load the original TFN instead of GTTFNv2-backed wrapper.
+    _state_keys = list(model_state.keys())
+    is_old_tfn = any(k.startswith('layers.') and '.W' in k for k in _state_keys) or \
+                 'rbf.centers' in _state_keys
+    if is_old_tfn:
+        ckpt_type = 'TFNTensorFieldNetwork'
 
     # Resolve the actual class name to instantiate
     if ckpt_type in MODEL_NAMES:
         class_name = ckpt_type
+    elif ckpt_type == 'TFNTensorFieldNetwork':
+        class_name = 'TFNTensorFieldNetwork'   # handled separately below
     elif model_name in MODEL_NAMES:
         class_name = model_name
     else:
-        # legacy 'best_model' or unknown – try to infer from checkpoint filename
         inferred = None
         for candidate in MODEL_NAMES:
             if candidate.lower() in model_name.lower():
@@ -487,8 +503,26 @@ for model_name in models_to_test:
         output_dim = sum(PVs_train[hidx].shape[1] for hidx in range(len(homdim)))
 
     try:
-        model_PV = build_analysis_model(class_name, output_dim, n=ckpt_dim)
-        model_PV.load_state_dict(model_state)
+        if class_name == 'TFNTensorFieldNetwork':
+            # Load the original TFN directly — it has its own key layout
+            from models import TFNTensorFieldNetwork
+            model_PV = TFNTensorFieldNetwork(num_classes=output_dim)
+            model_PV.load_state_dict(model_state)
+        elif class_name == 'DistanceMatrixRaggedModel':
+            # Must use the same num_points that was used during training
+            npts = ckpt_npts or (ckpt_dim * (ckpt_dim - 1) // 2)  # fallback estimate
+            model_PV = build_analysis_model(class_name, output_dim, n=ckpt_dim,
+                                            extra={'num_points': npts})
+            model_PV.load_state_dict(model_state)
+        elif class_name == 'RaggedPersistenceModel':
+            # Pre-init with in_features=ckpt_dim so weight keys match
+            model_PV = RaggedPersistenceModel(output_dim=output_dim,
+                                              in_features=ckpt_dim)
+            model_PV.load_state_dict(model_state)
+        else:
+            model_PV = build_analysis_model(class_name, output_dim, n=ckpt_dim)
+            model_PV.load_state_dict(model_state)
+
         model_PV = model_PV.to(device)
         model_PV.eval()
     except Exception as e:

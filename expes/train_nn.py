@@ -148,6 +148,8 @@ def prepare_data_for_model(model_name, data_list):
 
 def build_model_by_name(name, n=None):
     _n = dim if n is None else n
+    # actual point count for distance-matrix models: use first training sample
+    _npts = data_train_torch[0].shape[0] if data_train_torch else 128
     if name == 'TensorFieldNetwork':
         return TensorFieldNetwork(num_classes=output_dim)
     if name == 'GTTensorFieldNetwork':
@@ -167,13 +169,16 @@ def build_model_by_name(name, n=None):
     if name == 'MultiInputModel':
         return MultiInputModel(target_output_dim=output_dim, scalar_input_dim=1)
     if name == 'DenseRagged':
-        return DenseRagged(in_features=None, out_features=output_dim)
+        # pre-init with known in_features so optimizer isn't empty
+        return DenseRagged(in_features=_n, out_features=output_dim)
     if name == 'PermopRagged':
         return PermopRagged()
     if name == 'RaggedPersistenceModel':
-        return RaggedPersistenceModel(output_dim=output_dim)
+        # pass in_features so DenseRagged weights are pre-allocated
+        return RaggedPersistenceModel(output_dim=output_dim, in_features=_n)
     if name == 'DistanceMatrixRaggedModel':
-        return DistanceMatrixRaggedModel(output_dim=output_dim, num_points=600)
+        # use actual point count from data, not a magic constant
+        return DistanceMatrixRaggedModel(output_dim=output_dim, num_points=_npts)
     raise ValueError('Unknown model: ' + name)
 
 
@@ -240,8 +245,18 @@ def train_single_model(mname):
     m = build_model_by_name(mname, n=dim).to(device)
     train_data_model = prepare_data_for_model(mname, data_train_torch)
     test_data_model  = prepare_data_for_model(mname, data_test_torch)
-    optimizer    = optimizer_class(m.parameters(), lr=optim_lr)
-    criterion    = nn.MSELoss()
+
+    # Warm-up pass: ensures any lazily-created parameters (DenseRagged) exist
+    # before we hand the model to the optimizer.
+    m.train()
+    with torch.no_grad():
+        _ = forward_single(m, train_data_model[0], mname)
+
+    # Move any buffers created during the warm-up to the right device
+    m = m.to(device)
+
+    optimizer     = optimizer_class(m.parameters(), lr=optim_lr)
+    criterion     = nn.MSELoss()
     targets_train = np.hstack(PVs_train)
     targets_test  = np.hstack(PVs_test)
 
@@ -251,6 +266,11 @@ def train_single_model(mname):
         if (epoch + 1) % max(1, num_epochs // 10) == 0 or epoch == 0:
             print(f'  [{mname}] epoch {epoch+1}/{num_epochs}  train={tr_loss:.4f}  val={val_loss:.4f}')
 
+    # Save num_points for DistanceMatrixRaggedModel so analysis can restore it
+    extra = {}
+    if mname == 'DistanceMatrixRaggedModel':
+        extra['num_points'] = m._phi_inp_dim
+
     ckpt_path = f'models/{mname}.pth'
     torch.save({
         'model_state_dict': m.state_dict(),
@@ -258,6 +278,7 @@ def train_single_model(mname):
         'output_dim':       output_dim,
         'homdim':           homdim,
         'dim':              dim,
+        **extra,
     }, ckpt_path)
     print(f'  Saved → {ckpt_path}')
     return {'train_loss': tr_loss, 'val_loss': val_loss}
