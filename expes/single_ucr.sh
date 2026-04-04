@@ -14,8 +14,8 @@ if [ $DATA = "generate" ]; then
 fi
 
 if [ $TRAINNN = "train" ]; then
-    python train_nn.py $1$2 ripsnet_$1$2 ${20} ${21} ${22} $MODE
+    python train_nn.py $1$2 all ${20} ${21} ${22} $MODE
 fi
 
-python analysis_nn.py ripsnet_$1$2 $1$2 $1$3 $1$4 ${20} ${22} $MODE
-python analysis_nn.py ripsnet_$1$2 $1$2 $1$3 $1$5 ${20} ${22} $MODE
+python analysis_nn.py all $1$2 $1$3 $1$4 ${20} ${22} $MODE
+python analysis_nn.py all $1$2 $1$3 $1$5 ${20} ${22} $MODE

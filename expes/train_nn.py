@@ -46,23 +46,23 @@ print(sys.argv)
 # Load data
 data = pck.load(open('datasets/' + dataset_name + ".pkl", 'rb'))
 data_train = data["data_train"]
-PVs_train = data["PV_train"]
-data_test = data["data_test"]
-PVs_test = data["PV_test"]
-PV_params = data["PV_params"][0]
-homdim = data["hdims"]
+PVs_train  = data["PV_train"]
+data_test  = data["data_test"]
+PVs_test   = data["PV_test"]
+PV_params  = data["PV_params"][0]
+homdim     = data["hdims"]
 
 N_sets_train = len(data_train)
-N_sets_test = len(data_test)
-PV_size = PV_params['resolution'][0] if PV_type == 'PI' else PV_params['resolution'] 
+N_sets_test  = len(data_test)
+PV_size = PV_params['resolution'][0] if PV_type == 'PI' else PV_params['resolution']
 dim = data_train[0].shape[1]
 
 # Convert data to PyTorch tensors
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 data_train_torch = [torch.FloatTensor(data_train[i]).to(device) for i in range(len(data_train))]
-data_test_torch = [torch.FloatTensor(data_test[i]).to(device) for i in range(len(data_test))]
+data_test_torch  = [torch.FloatTensor(data_test[i]).to(device)  for i in range(len(data_test))]
 
-# Normalize the PIs
+# Normalize the PVs
 if normalize:
     for hidx in range(len(homdim)):
         MPV = np.max(PVs_train[hidx])
@@ -71,43 +71,24 @@ if normalize:
 
 output_dim = sum([PVs_train[hidx].shape[1] for hidx in range(len(homdim))])
 
-# Learning rate and optimizer class must be defined before training helpers are used
+# Learning rate and optimizer
 if dataset_name[:5] == 'synth':
-    optim_lr = 5e-4
+    optim_lr       = 5e-4
     optimizer_class = optim.Adamax
 else:
-    optim_lr = 5e-4
+    optim_lr       = 5e-4
     optimizer_class = optim.Adam
-
-# Mapping from model class name to checkpoint prefix (for analysis_nn.py to infer later)
-# Format: checkpoint_name is always (model_prefix)_(dataset_info)
-MODEL_TYPE_PREFIXES = {
-    'RaggedPersistenceModel': 'ripsnet',
-    'TensorFieldNetwork': 'tfn',
-    'GTTensorFieldNetwork': 'gttfn',
-    'HierarchicalGTTFN': 'hierarchical',
-}
 
 # Convert PVs to PyTorch tensors
 PVs_train_torch = [torch.FloatTensor(PVs_train[hidx]).to(device) for hidx in range(len(homdim))]
-PVs_test_torch = [torch.FloatTensor(PVs_test[hidx]).to(device) for hidx in range(len(homdim))]
+PVs_test_torch  = [torch.FloatTensor(PVs_test[hidx]).to(device)  for hidx in range(len(homdim))]
 
-# #######################
-# Generic model helpers
-# #######################
-
-def to_3d_tensor_list(data_list):
-    out = []
-    for x in data_list:
-        arr = x.cpu().numpy() if isinstance(x, torch.Tensor) else np.array(x)
-        if arr.shape[1] == 2:
-            arr = np.concatenate([arr, np.zeros((len(arr), 1), dtype=arr.dtype)], axis=1)
-        out.append(torch.FloatTensor(arr).to(device))
-    return out
-
+# -------------------------------------------------------------------------
+# Data preparation helpers
+# -------------------------------------------------------------------------
 
 def prepare_data_for_model(model_name, data_list):
-    # For TFN models, data may already be n-dimensional; only upgrade 2D vectors to 3D.
+    """Return a list of tensors shaped correctly for the given model."""
     if model_name in ['TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN']:
         out = []
         for x in data_list:
@@ -116,13 +97,14 @@ def prepare_data_for_model(model_name, data_list):
                 arr = np.concatenate([arr, np.zeros((len(arr), 1), dtype=arr.dtype)], axis=1)
             out.append(torch.FloatTensor(arr).to(device))
         return out
+
     if model_name == 'PointNetTutorial':
-        # 2D only
         out = []
         for x in data_list:
             arr = x.cpu().numpy() if isinstance(x, torch.Tensor) else np.array(x)
             out.append(torch.FloatTensor(arr[:, :2]).to(device))
         return out
+
     if model_name in ['ScalarDistanceDeepSet', 'DistanceMatrixRaggedModel', 'RaggedPersistenceModel']:
         out = []
         for x in data_list:
@@ -130,7 +112,28 @@ def prepare_data_for_model(model_name, data_list):
             mat = np.linalg.norm(arr[:, None, :] - arr[None, :, :], axis=-1)
             out.append(torch.FloatTensor(mat).to(device))
         return out
-    # For simple ragged models, use point cloud list directly
+
+    if model_name == 'ScalarInputMLP':
+        # ScalarInputMLP expects a (1,) scalar per sample; use mean pairwise distance
+        out = []
+        for x in data_list:
+            arr = x.cpu().numpy() if isinstance(x, torch.Tensor) else np.array(x)
+            mat = np.linalg.norm(arr[:, None, :] - arr[None, :, :], axis=-1)
+            scalar = np.array([[mat.mean()]], dtype=np.float32)
+            out.append(torch.FloatTensor(scalar).to(device))
+        return out
+
+    if model_name == 'MultiInputModel':
+        # Returns list of (point_cloud_tensor, scalar_tensor) tuples
+        out = []
+        for x in data_list:
+            arr = x.cpu().numpy() if isinstance(x, torch.Tensor) else np.array(x)
+            mat = np.linalg.norm(arr[:, None, :] - arr[None, :, :], axis=-1)
+            scalar = torch.FloatTensor([[mat.mean()]]).to(device)
+            out.append((torch.FloatTensor(arr).to(device), scalar))
+        return out
+
+    # DenseRagged, PermopRagged – pass point cloud directly
     return data_list
 
 
@@ -138,11 +141,9 @@ def build_model_by_name(name, n=None):
     if name == 'TensorFieldNetwork':
         return TensorFieldNetwork(num_classes=output_dim)
     if name == 'GTTensorFieldNetwork':
-        n_dim = dim if n is None else n
-        return GTTensorFieldNetwork(n=n_dim, num_classes=output_dim)
+        return GTTensorFieldNetwork(n=dim if n is None else n, num_classes=output_dim)
     if name == 'HierarchicalGTTFN':
-        n_dim = dim if n is None else n
-        return HierarchicalGTTFN(n=n_dim, num_classes=output_dim)
+        return HierarchicalGTTFN(n=dim if n is None else n, num_classes=output_dim)
     if name == 'ScalarDistanceDeepSet':
         return ScalarDistanceDeepSet(output_dim=output_dim)
     if name == 'PointNetTutorial':
@@ -162,100 +163,115 @@ def build_model_by_name(name, n=None):
     raise ValueError('Unknown model: ' + name)
 
 
-def train_epoch(model, data, targets, optimizer, criterion, model_name):
+# -------------------------------------------------------------------------
+# Per-sample forward pass (handles model-specific input signatures)
+# -------------------------------------------------------------------------
+
+def forward_single(model, x, mname):
+    """Run model on a single prepared sample x; return output tensor."""
+    if mname == 'MultiInputModel':
+        # x is a (point_cloud, scalar) tuple
+        pc, scalar = x
+        return model([pc], scalar)
+    if mname == 'ScalarInputMLP':
+        # x is already a (1,1) scalar tensor
+        return model(x)
+    if mname in [
+        'TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN',
+        'PointNetTutorial', 'DistanceMatrixRaggedModel',
+        'ScalarDistanceDeepSet', 'DenseRagged', 'PermopRagged',
+        'RaggedPersistenceModel',
+    ]:
+        return model([x])
+    return model(x.unsqueeze(0))
+
+
+# -------------------------------------------------------------------------
+# Train / evaluate loops
+# -------------------------------------------------------------------------
+
+def get_target(targets, i):
+    """Return a (1, output_dim) float tensor for sample i."""
+    return torch.FloatTensor(targets[i:i + 1]).to(device)
+
+
+def train_epoch(model, data, targets, optimizer, criterion, mname):
     model.train()
-    total_loss = 0
+    total_loss = 0.0
     for i in range(len(data)):
         optimizer.zero_grad()
-        x = data[i]
-        if model_name in ['TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN', 'PointNetTutorial', 'DistanceMatrixRaggedModel']:
-            inp = [x]
-        else:
-            inp = [x] if isinstance(x, torch.Tensor) and x.ndim > 1 and x.shape[0] > 1 else x
-        output = model(inp) if isinstance(inp, list) else model(inp)
-        target = torch.FloatTensor(targets[i:i+1]).to(device)
-        loss = criterion(output, target)
+        output = forward_single(model, data[i], mname)
+        loss = criterion(output, get_target(targets, i))
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
     return total_loss / len(data)
 
 
-def evaluate(model, data, targets, criterion, model_name):
+def evaluate(model, data, targets, criterion, mname):
     model.eval()
-    total_loss = 0
+    total_loss = 0.0
     with torch.no_grad():
         for i in range(len(data)):
-            x = data[i]
-            if model_name in ['TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN', 'PointNetTutorial', 'DistanceMatrixRaggedModel']:
-                inp = [x]
-            else:
-                inp = [x] if isinstance(x, torch.Tensor) and x.ndim > 1 and x.shape[0] > 1 else x
-            output = model(inp) if isinstance(inp, list) else model(inp)
-            target = torch.FloatTensor(targets[i:i+1]).to(device)
-            loss = criterion(output, target)
+            output = forward_single(model, data[i], mname)
+            loss = criterion(output, get_target(targets, i))
             total_loss += loss.item()
     return total_loss / len(data)
 
 
-def train_all_models():
-    model_names = [
-        'TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN',
-        'ScalarDistanceDeepSet', 'PointNetTutorial', 'ScalarInputMLP', 'MultiInputModel',
-        'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
-    ]
-    results = {}
-    for mname in tqdm(model_names, desc="Training all models"):
-        try:
-            print(f'=== Training {mname} ===')
-            m = build_model_by_name(mname, n=dim).to(device)
-            train_data_model = prepare_data_for_model(mname, data_train_torch)
-            test_data_model = prepare_data_for_model(mname, data_test_torch)
-            optimizer = optimizer_class(m.parameters(), lr=optim_lr)
-            criterion_loc = nn.MSELoss()
-            for epoch in tqdm(range(min(5, num_epochs)), desc=f"Epochs for {mname}"):
-                train_loss = train_epoch(m, train_data_model, np.hstack(PVs_train), optimizer, criterion_loc, mname)
-                val_loss = evaluate(m, test_data_model, np.hstack(PVs_test), criterion_loc, mname)
-                print(f'[{mname}] epoch {epoch+1}/{min(5,num_epochs)} train={train_loss:.4f} val={val_loss:.4f}')
-            results[mname] = {'train_loss': train_loss, 'val_loss': val_loss}
-            checkpoint = {
-                'model_state_dict': m.state_dict(),
-                'model_type': mname,
-                'output_dim': output_dim,
-                'homdim': homdim,
-            }
-            torch.save(checkpoint, f'models/{mname}.pth')
-        except Exception as e:
-            print(f'ERROR {mname}:', e)
-            results[mname] = {'error': str(e)}
-    print('=== ALL MODELS RESULTS ===')
-    for k, v in results.items():
-        print(k, v)
+# -------------------------------------------------------------------------
+# Train a single named model and save checkpoint
+# -------------------------------------------------------------------------
 
+def train_single_model(mname):
+    print(f'\n=== Training {mname} ===')
+    m = build_model_by_name(mname, n=dim).to(device)
+    train_data_model = prepare_data_for_model(mname, data_train_torch)
+    test_data_model  = prepare_data_for_model(mname, data_test_torch)
+    optimizer    = optimizer_class(m.parameters(), lr=optim_lr)
+    criterion    = nn.MSELoss()
+    targets_train = np.hstack(PVs_train)
+    targets_test  = np.hstack(PVs_test)
 
-if model_name == 'all':
-    train_all_models()
-    sys.exit(0)
+    for epoch in tqdm(range(num_epochs), desc=f"Epochs ({mname})"):
+        tr_loss  = train_epoch(m, train_data_model, targets_train, optimizer, criterion, mname)
+        val_loss = evaluate(m, test_data_model, targets_test, criterion, mname)
+        if (epoch + 1) % max(1, num_epochs // 10) == 0 or epoch == 0:
+            print(f'  [{mname}] epoch {epoch+1}/{num_epochs}  train={tr_loss:.4f}  val={val_loss:.4f}')
 
-if model_name in MODEL_NAMES:
-    m = build_model_by_name(model_name, n=dim).to(device)
-    train_data_model = prepare_data_for_model(model_name, data_train_torch)
-    test_data_model = prepare_data_for_model(model_name, data_test_torch)
-    optimizer = optimizer_class(m.parameters(), lr=optim_lr)
-    criterion_loc = nn.MSELoss()
-
-    for epoch in tqdm(range(min(5, num_epochs)), desc=f"Training {model_name}"):
-        train_loss = train_epoch(m, train_data_model, np.hstack(PVs_train), optimizer, criterion_loc, model_name)
-        val_loss = evaluate(m, test_data_model, np.hstack(PVs_test), criterion_loc, model_name)
-        print(f'[{model_name}] epoch {epoch+1}/{min(5,num_epochs)} train={train_loss:.4f} val={val_loss:.4f}')
-
+    ckpt_path = f'models/{mname}.pth'
     torch.save({
         'model_state_dict': m.state_dict(),
-        'model_type': model_name,
-        'output_dim': output_dim,
-        'homdim': homdim,
-    }, f'models/{model_name}.pth')
-    print(f'Saved model {model_name} at models/{model_name}.pth')
-    sys.exit(0)
+        'model_type':       mname,
+        'output_dim':       output_dim,
+        'homdim':           homdim,
+        'dim':              dim,
+    }, ckpt_path)
+    print(f'  Saved → {ckpt_path}')
+    return {'train_loss': tr_loss, 'val_loss': val_loss}
 
-raise SystemExit("Finished model training/comparison branch in train_nn.py; legacy section skipped")
+
+# -------------------------------------------------------------------------
+# Entry point
+# -------------------------------------------------------------------------
+
+if model_name == 'all':
+    results = {}
+    for mname in MODEL_NAMES:
+        try:
+            results[mname] = train_single_model(mname)
+        except Exception as e:
+            print(f'ERROR training {mname}: {e}')
+            results[mname] = {'error': str(e)}
+    print('\n=== ALL MODELS RESULTS ===')
+    for k, v in results.items():
+        print(f'  {k}: {v}')
+
+elif model_name in MODEL_NAMES:
+    train_single_model(model_name)
+
+else:
+    raise ValueError(
+        f"Unknown model_name '{model_name}'. "
+        f"Use one of {MODEL_NAMES} or 'all'."
+    )
