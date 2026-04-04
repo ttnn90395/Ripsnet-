@@ -24,7 +24,7 @@ if expes == 'ucr':
         else:
             size_noise = 30
 
-        command_line = "./expe_ucr.sh " + str(F[idx_data,1]) + " _train_TDE311LS_5" + identifier + " _train_TDE311LS_6" + identifier + " _test_TDE311LS_clean_3" + identifier + " _test_TDE311LS_noise_3" + identifier + "    3 1 1    01    0 "   + str(int(F[idx_data,2]/2)) + "     0 500    50    " + str(int(F[idx_data,2]/2)) + " " + str(F[idx_data,2]) + "    0 500    " + str(int(size_noise)) + " 0 500    PL 5 - - " + mode + " " + data + " " + train_nn
+        command_line = "./expe_ucr.sh " + str(F[idx_data,1]) + " _train_TDE311LS_5" + identifier + " _train_TDE311LS_6" + identifier + " _test_TDE311LS_clean_3" + identifier + " _test_TDE311LS_noise_3" + identifier + "    3 1 1    01    0 "   + str(int(F[idx_data,2]/2)) + "     0 500    50    " + str(int(F[idx_data,2]/2)) + " " + str(F[idx_data,2]) + "    0 500    " + str(int(size_noise)) + " 0 10    PL 5 - - " + mode + " " + data + " " + train_nn
         os.system(command_line)
 
 elif expes == 'synth':
