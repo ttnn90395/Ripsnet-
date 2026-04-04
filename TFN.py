@@ -373,7 +373,7 @@ def evaluate_model(model, data_np, targets,
                 torch.cuda.empty_cache()
     return accuracy_score(targets, torch.cat(preds).numpy())
 
-
+"""
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -413,4 +413,4 @@ if device.type == "cuda":
 
 clean_acc = evaluate_model(model_tfn, clean_data_test, clean_label_classif_test)
 noisy_acc = evaluate_model(model_tfn, noisy_data_test, noisy_label_classif_test)
-print(f"\nTFN accuracy — clean: {clean_acc:.4f} | noisy: {noisy_acc:.4f}")
+print(f"\nTFN accuracy — clean: {clean_acc:.4f} | noisy: {noisy_acc:.4f}")"""
