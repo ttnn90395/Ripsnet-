@@ -1,31 +1,37 @@
 """Central model registry for the repository.
 
 Import structure (no circular imports):
-  TFN.py            → TFNLayer, TFN_RBFExpansion, TFNTensorFieldNetwork
-  gt_tfn_layer.py   → GTTFNLayer, GTTFN_RBFExpansion, GTTensorFieldNetwork,
-                       ChannelMixer, EquivariantGate, ResidualProjection,
-                       HierarchicalGTTFN, OnEquivariantWrapper
-  THIS file         → re-exports all of the above + notebook models
-                       + GTTensorFieldNetworkV2, PointNet3D
+  TFN.py             → TFNLayer, TFN_RBFExpansion, TFNTensorFieldNetwork
+  gt_tfn_layer.py    → GTTFNLayer, GTTFN_RBFExpansion, GTTensorFieldNetwork,
+                        ChannelMixer, EquivariantGate, ResidualProjection
+  gt_improvements.py → HierarchicalGTTFN, OnEquivariantWrapper
+  THIS file          → GTTensorFieldNetworkV2, TensorFieldNetwork, PointNet3D,
+                        and all notebook/ragged models.
 
-  tfn_model.py imports FROM this file (one-way), so it must NOT be imported here.
-  GTTensorFieldNetworkV2 and PointNet3D are defined directly below to avoid the
-  circular dependency while still being available to the rest of the codebase.
+  tfn_model.py imports FROM this file (one-way): no circular deps.
+
+Device fix
+----------
+GTBasis and CGCoefficients (gt_basis.py) store tensors as plain attributes
+rather than register_buffer(), so nn.Module.to(device) silently skips them.
+GTTensorFieldNetworkV2 overrides .to() to call _move_basis_tensors(), which
+walks every layer and moves those tensors. This is the primary fix; deep_to()
+in train_nn.py / analysis_nn.py is a backup.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
-from typing import List
+from typing import List, Optional
 
 # ---------------------------------------------------------------------------
-# Low-level building blocks (no circular deps)
+# Low-level building blocks
 # ---------------------------------------------------------------------------
 from TFN import (
     RBFExpansion as TFN_RBFExpansion,
     TFNLayer,
-    TensorFieldNetwork as TFNTensorFieldNetwork,   # original SO(3) TFN
+    TensorFieldNetwork as TFNTensorFieldNetwork,
 )
 from gt_tfn_layer import (
     RBFExpansion as GTTFN_RBFExpansion,
@@ -33,49 +39,84 @@ from gt_tfn_layer import (
     ChannelMixer,
     EquivariantGate,
     ResidualProjection,
-    GTTensorFieldNetwork,      # n-dim SO(n) base model
+    GTTensorFieldNetwork,
 )
-
 from gt_improvements import (
     HierarchicalGTTFN,
     OnEquivariantWrapper,
 )
 
+
 # ---------------------------------------------------------------------------
-# GTTensorFieldNetworkV2  (defined here, not in tfn_model.py, to avoid the
-#                          circular import that plagued the old layout)
+# Device helper: move every tensor in an arbitrary object to device.
+# Needed because GTBasis / CGCoefficients use plain Python attributes.
+# ---------------------------------------------------------------------------
+
+def _move_obj_tensors(obj, device):
+    """Move all torch.Tensor attributes of obj to device (one level deep)."""
+    if obj is None:
+        return
+    for attr_name in list(vars(obj)):
+        val = getattr(obj, attr_name)
+        if isinstance(val, torch.Tensor):
+            setattr(obj, attr_name, val.to(device))
+        elif isinstance(val, dict):
+            for k, v in list(val.items()):
+                if isinstance(v, torch.Tensor):
+                    val[k] = v.to(device)
+        elif isinstance(val, list):
+            for i, v in enumerate(val):
+                if isinstance(v, torch.Tensor):
+                    val[i] = v.to(device)
+
+
+def _move_basis_tensors(module: nn.Module, device):
+    """
+    Walk all sub-modules and move GTBasis / CGCoefficients tensor attributes.
+    Targets any sub-module that has a 'gt_basis' or 'cg' attribute.
+    """
+    for submod in module.modules():
+        for attr in ('gt_basis', 'cg'):
+            obj = getattr(submod, attr, None)
+            if obj is not None:
+                _move_obj_tensors(obj, device)
+                # Also recurse one level into the object's own attributes
+                for inner_attr in list(vars(obj)):
+                    inner = getattr(obj, inner_attr)
+                    if hasattr(inner, '__dict__'):
+                        _move_obj_tensors(inner, device)
+
+
+# ---------------------------------------------------------------------------
+# GTTensorFieldNetworkV2  — recommended model, all improvements ON
 # ---------------------------------------------------------------------------
 
 class GTTensorFieldNetworkV2(GTTensorFieldNetwork):
     """
     Recommended GT-TFN with all improvements ON by default.
+    Overrides .to() / .cuda() / .cpu() to also move GTBasis / CG tensors
+    that are stored as plain attributes in gt_basis.py objects.
 
-    Inherits GTTensorFieldNetwork (gt_tfn_layer.py) and exposes all
-    hyper-parameters at the top level for easy configuration.
-
-    Example
-    -------
-    model = GTTensorFieldNetworkV2(n=3, num_classes=40)
-    logits = model(batch)                          # List[Tensor(N_i, 3)]
-    logits = model(batch, node_attrs=attrs)        # with node features
+    forward(batch: List[Tensor(N_i, n)]) → Tensor(B, num_classes)
+    forward(batch, node_attrs=attrs)     → same, with per-node features
     """
 
     def __init__(
         self,
         n:               int,
         num_classes:     int,
-        max_order:       int        = 1,
-        hidden_channels: int        = 32,
-        num_layers:      int        = 4,
-        num_rbf:         int        = 32,
-        cutoff:          float      = 5.0,
-        k_neighbors:     int        = 16,
-        use_gate:        bool       = True,
-        use_residual:    bool       = True,
-        use_channel_mix: bool       = True,
-        node_attr_dim:   int        = 0,
-        classifier_dims: List[int]  = [128, 64],
-        radial_hidden:   int        = 64,
+        max_order:       int       = 1,
+        hidden_channels: int       = 32,
+        num_layers:      int       = 4,
+        num_rbf:         int       = 32,
+        cutoff:          float     = 5.0,
+        k_neighbors:     int       = 16,
+        use_gate:        bool      = True,
+        use_residual:    bool      = True,
+        use_channel_mix: bool      = True,
+        node_attr_dim:   int       = 0,
+        classifier_dims: List[int] = [128, 64],
+        radial_hidden:   int       = 64,
     ):
         super().__init__(
             n=n, num_classes=num_classes,
@@ -93,11 +134,49 @@ class GTTensorFieldNetworkV2(GTTensorFieldNetwork):
             radial_hidden=radial_hidden,
         )
 
+    # ------------------------------------------------------------------
+    # Override .to() so GTBasis/CG tensors follow the module to device.
+    # ------------------------------------------------------------------
+
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
+        # Infer the target device from args/kwargs (mirrors nn.Module.to logic)
+        device = None
+        if args:
+            first = args[0]
+            if isinstance(first, (str, torch.device)):
+                device = torch.device(first)
+            elif isinstance(first, torch.dtype):
+                pass  # dtype-only call, no device change
+        if 'device' in kwargs:
+            device = torch.device(kwargs['device'])
+        if device is not None:
+            _move_basis_tensors(self, device)
+        return self
+
+    def cuda(self, device=None):
+        super().cuda(device)
+        _move_basis_tensors(self, torch.device('cuda', device or 0))
+        return self
+
+    def cpu(self):
+        super().cpu()
+        _move_basis_tensors(self, torch.device('cpu'))
+        return self
+
+    # ------------------------------------------------------------------
+    # Also move basis tensors at the start of each forward call so that
+    # any code path that skips .to() still works correctly.
+    # ------------------------------------------------------------------
+
+    def forward(self, batch, node_attrs=None):
+        if batch:
+            _move_basis_tensors(self, batch[0].device)
+        return super().forward(batch, node_attrs)
+
 
 # ---------------------------------------------------------------------------
-# TensorFieldNetwork  — SE(3) model backed by GTTFNv2
-#   NOTE: this shadows TFNTensorFieldNetwork intentionally.
-#   Use TFNTensorFieldNetwork explicitly if you need the original TFN.
+# TensorFieldNetwork  (SE(3), backed by GTTFNv2)
 # ---------------------------------------------------------------------------
 
 class TensorFieldNetwork(nn.Module):
@@ -110,13 +189,13 @@ class TensorFieldNetwork(nn.Module):
     def __init__(
         self,
         num_classes:     int,
-        max_order:       int        = 1,
-        hidden_channels: int        = 32,
-        num_layers:      int        = 4,
-        num_rbf:         int        = 32,
-        cutoff:          float      = 5.0,
-        k_neighbors:     int        = 16,
-        classifier_dims: List[int]  = [128, 64],
+        max_order:       int       = 1,
+        hidden_channels: int       = 32,
+        num_layers:      int       = 4,
+        num_rbf:         int       = 32,
+        cutoff:          float     = 5.0,
+        k_neighbors:     int       = 16,
+        classifier_dims: List[int] = [128, 64],
     ):
         super().__init__()
         self._inner = GTTensorFieldNetworkV2(
@@ -133,6 +212,21 @@ class TensorFieldNetwork(nn.Module):
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
         return self._inner(batch)
 
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
+        self._inner.to(*args, **kwargs)
+        return self
+
+    def cuda(self, device=None):
+        super().cuda(device)
+        self._inner.cuda(device)
+        return self
+
+    def cpu(self):
+        super().cpu()
+        self._inner.cpu()
+        return self
+
     @property
     def rho(self):    return self._inner.rho
     @property
@@ -142,12 +236,12 @@ class TensorFieldNetwork(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# PointNet3D  (3-D Deep-Sets baseline; no rotational equivariance)
+# PointNet3D  (3-D Deep-Sets baseline)
 # ---------------------------------------------------------------------------
 
 class PointNet3D(nn.Module):
     """
-    Deep-Sets / PointNet baseline — permutation-invariant, NOT equivariant.
+    Permutation-invariant Deep-Sets baseline — NOT rotation-equivariant.
     forward(batch: List[Tensor(N_i, 3)]) → Tensor(B, output_dim)
     """
 
@@ -181,7 +275,7 @@ class PointNet3D(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Notebook-derived models
+# Notebook-derived / ragged models
 # ---------------------------------------------------------------------------
 
 class ScalarDistanceDeepSet(nn.Module):
@@ -207,7 +301,7 @@ class ScalarDistanceDeepSet(nn.Module):
         all_features = []
         for dm in batch:
             if dm.ndim == 2 and dm.shape[0] > 0:
-                idx = torch.triu_indices(dm.shape[0], dm.shape[1], offset=1)
+                idx     = torch.triu_indices(dm.shape[0], dm.shape[1], offset=1)
                 scalars = dm[idx[0], idx[1]]
             elif dm.ndim == 1 and dm.shape[0] > 0:
                 scalars = dm
@@ -219,7 +313,7 @@ class ScalarDistanceDeepSet(nn.Module):
 
 
 class PointNetTutorial(nn.Module):
-    """2-D PointNet; input tensors must have at least 2 columns."""
+    """2-D PointNet; keeps only the first 2 coordinate columns."""
 
     def __init__(self, output_dim, phi_dims=(64, 128, 256), rho_dims=(256, 128)):
         super().__init__()
@@ -240,7 +334,6 @@ class PointNetTutorial(nn.Module):
         if len(batch) == 0:
             return torch.empty(0, self.rho_layers[-1].out_features,
                                device=next(self.parameters()).device)
-        # keep only first 2 columns
         batch2 = [x[:, :2] for x in batch]
         padded = pad_sequence(batch2, batch_first=True, padding_value=0.0)
         mask   = torch.zeros(padded.shape[:2], dtype=torch.bool, device=padded.device)
@@ -253,7 +346,7 @@ class PointNetTutorial(nn.Module):
 
 
 class ScalarInputMLP(nn.Module):
-    """Expects a (B, 1) scalar tensor (mean pairwise distance)."""
+    """Expects a (B, 1) scalar tensor (e.g. mean pairwise distance)."""
 
     def __init__(self, output_dim, hidden_dims=(256, 512, 1024)):
         super().__init__()
@@ -271,7 +364,6 @@ class ScalarInputMLP(nn.Module):
             x = x.unsqueeze(0).unsqueeze(1)
         elif x.ndim == 1:
             x = x.unsqueeze(1)
-        # x is (B, 1) here
         return self.mlp(x)
 
 
@@ -308,12 +400,9 @@ class MultiInputModel(nn.Module):
 
 class DenseRagged(nn.Module):
     """
-    Point-wise linear layer for ragged (variable-size) point clouds.
-
-    If `in_features` is given the weight matrix is pre-allocated in __init__
-    so the optimizer sees it immediately.  If None it is created on the first
-    forward call (lazy init) — in that case you must run one forward pass
-    before building the optimizer (done automatically by train_single_model).
+    Point-wise linear layer for ragged point clouds.
+    Pre-allocates weights when in_features is given so the optimizer
+    sees parameters immediately without needing a warm-up pass.
     """
 
     def __init__(self, in_features=None, out_features=30,
@@ -361,16 +450,10 @@ class DenseRagged(nn.Module):
 
 
 class PermopRagged(nn.Module):
-    """
-    Permutation-invariant pooling: sum over points → (B, C).
-    Has no learnable parameters; a dummy buffer is registered so that
-    optimizer construction (which calls model.parameters()) does not fail.
-    """
+    """Sum-pool over points: List[(N_i, C)] → (B, C). No learnable params."""
 
     def __init__(self):
         super().__init__()
-        # Dummy parameter so torch.optim doesn't raise "empty parameter list"
-        # when this module is trained standalone.
         self._dummy = nn.Parameter(torch.zeros(1), requires_grad=False)
 
     def forward(self, inputs: List[torch.Tensor]) -> torch.Tensor:
@@ -378,15 +461,8 @@ class PermopRagged(nn.Module):
 
 
 class RaggedPersistenceModel(nn.Module):
-    """
-    Three DenseRagged layers → PermopRagged → MLP head.
+    """Three DenseRagged layers → PermopRagged → MLP head."""
 
-    `in_features` is the dimensionality of each input point (e.g. 2 for 2-D
-    point clouds).  Providing it at construction time pre-allocates the weight
-    matrices so the optimizer can be built before any forward pass.
-    """
-
-    # Chain of hidden sizes through the DenseRagged stack
     _RAGGED_DIMS = [30, 20, 10]
 
     def __init__(self, output_dim, in_features=2):
@@ -412,14 +488,7 @@ class RaggedPersistenceModel(nn.Module):
 
 
 class DistanceMatrixRaggedModel(nn.Module):
-    """
-    Row-wise MLP on a distance matrix, then mean-pool and MLP head.
-
-    `num_points` controls the input width of the phi MLP and is saved in the
-    checkpoint so that the same architecture is reconstructed at load time.
-    Pass num_points=None to defer construction until the first forward call
-    (lazy mode — only used when the actual point count is not yet known).
-    """
+    """Row-wise MLP on distance matrix → mean-pool → MLP head."""
 
     def __init__(self, output_dim, num_points=None,
                  phi_dim=128, rho_hidden=(256, 128)):
@@ -486,11 +555,11 @@ __all__ = [
     'GTTFN_RBFExpansion', 'GTTFNLayer',
     'ChannelMixer', 'EquivariantGate', 'ResidualProjection',
     # Main equivariant models
-    'TensorFieldNetwork',          # SE(3), backed by GTTFNv2
-    'GTTensorFieldNetwork',        # SO(n) base
-    'GTTensorFieldNetworkV2',      # SO(n) with all improvements
-    'HierarchicalGTTFN',
-    'OnEquivariantWrapper',
+    'TensorFieldNetwork',       # SE(3), backed by GTTFNv2
+    'GTTensorFieldNetwork',     # SO(n) base
+    'GTTensorFieldNetworkV2',   # SO(n) with all improvements + device fix
+    'HierarchicalGTTFN',        # from gt_improvements.py
+    'OnEquivariantWrapper',     # from gt_improvements.py
     'PointNet3D',
     # Notebook / ragged models
     'ScalarDistanceDeepSet',
