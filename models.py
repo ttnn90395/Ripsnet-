@@ -461,19 +461,38 @@ class PermopRagged(nn.Module):
 
 
 class RaggedPersistenceModel(nn.Module):
-    """Three DenseRagged layers → PermopRagged → MLP head."""
+    """
+    Three DenseRagged layers → PermopRagged → MLP head.
 
-    _RAGGED_DIMS = [30, 20, 10]
+    Input: List of tensors, each (N_i, F) where F is the input feature width.
+    For distance-matrix inputs F = N_i (the matrix row width), which varies
+    per sample — so the first DenseRagged layer MUST be lazy (in_features=None)
+    to initialise its weight from the first sample it sees.
 
-    def __init__(self, output_dim, in_features=2):
+    Layers 2 and 3 have fixed widths (30→20, 20→10) and are pre-allocated.
+
+    in_features is kept as a constructor argument for checkpoint compatibility
+    (analysis_nn.py passes it when reloading), but it is only used for layers
+    2 and 3, never for the first layer.
+    """
+
+    _RAGGED_DIMS = [30, 20, 10]   # output widths of the three DenseRagged layers
+
+    def __init__(self, output_dim, in_features=None):
         super().__init__()
-        dims   = [in_features] + self._RAGGED_DIMS
-        layers = []
-        for i in range(len(self._RAGGED_DIMS)):
-            layers.append(DenseRagged(in_features=dims[i],
-                                      out_features=dims[i + 1],
-                                      activation='relu'))
-        self.ragged_layers = nn.ModuleList(layers)
+        self.ragged_layers = nn.ModuleList([
+            # Layer 0: lazy — width depends on actual input (point-cloud dim or N)
+            DenseRagged(in_features=None,
+                        out_features=self._RAGGED_DIMS[0],
+                        activation='relu'),
+            # Layers 1, 2: fixed widths, pre-allocated
+            DenseRagged(in_features=self._RAGGED_DIMS[0],
+                        out_features=self._RAGGED_DIMS[1],
+                        activation='relu'),
+            DenseRagged(in_features=self._RAGGED_DIMS[1],
+                        out_features=self._RAGGED_DIMS[2],
+                        activation='relu'),
+        ])
         self.perm = PermopRagged()
         self.fc = nn.Sequential(
             nn.Linear(self._RAGGED_DIMS[-1], 50),  nn.ReLU(),

@@ -167,7 +167,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None):
     if name == 'PermopRagged':
         return PermopRagged()
     if name == 'RaggedPersistenceModel':
-        return RaggedPersistenceModel(output_dim=output_dim, in_features=n_dim)
+        return RaggedPersistenceModel(output_dim=output_dim)
     if name == 'DistanceMatrixRaggedModel':
         npts = extra.get('num_points', n_dim)
         return DistanceMatrixRaggedModel(output_dim=output_dim, num_points=npts)
@@ -519,8 +519,16 @@ for model_name in models_to_test:
                                             extra={'num_points': npts})
             model_PV.load_state_dict(model_state)
         elif class_name == 'RaggedPersistenceModel':
-            model_PV = RaggedPersistenceModel(output_dim=output_dim,
-                                              in_features=ckpt_dim)
+            model_PV = RaggedPersistenceModel(output_dim=output_dim)
+            # Layer 0 of DenseRagged is lazy: run one dummy forward pass so
+            # weight_param is registered before load_state_dict tries to fill it.
+            _dummy_n = list(model_state.keys())
+            # infer layer-0 weight shape from checkpoint
+            _w0_key = 'ragged_layers.0.weight_param'
+            if _w0_key in model_state:
+                _w0_shape = model_state[_w0_key].shape  # (in_f, 30)
+                _dummy_in = torch.zeros(1, _w0_shape[0])
+                model_PV.ragged_layers[0](_dummy_in.unsqueeze(0) if False else [_dummy_in])
             model_PV.load_state_dict(model_state)
         else:
             model_PV = build_analysis_model(class_name, output_dim, n=ckpt_dim)

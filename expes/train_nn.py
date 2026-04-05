@@ -61,7 +61,6 @@ dim = data_train[0].shape[1]
 
 # Convert data to PyTorch tensors
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Using device: {device}") # Added print statement
 data_train_torch = [torch.FloatTensor(data_train[i]).to(device) for i in range(len(data_train))]
 data_test_torch  = [torch.FloatTensor(data_test[i]).to(device)  for i in range(len(data_test))]
 
@@ -176,7 +175,7 @@ def build_model_by_name(name, n=None):
         return PermopRagged()
     if name == 'RaggedPersistenceModel':
         # pass in_features so DenseRagged weights are pre-allocated
-        return RaggedPersistenceModel(output_dim=output_dim, in_features=_n)
+        return RaggedPersistenceModel(output_dim=output_dim)
     if name == 'DistanceMatrixRaggedModel':
         # use actual point count from data, not a magic constant
         return DistanceMatrixRaggedModel(output_dim=output_dim, num_points=_npts)
@@ -254,8 +253,6 @@ def train_single_model(mname):
         _ = forward_single(m, train_data_model[0], mname)
 
     # Move any buffers created during the warm-up to the right device
-    # This line is technically redundant if previous .to(device) calls are effective,
-    # but harmless and ensures all parts are on the correct device.
     m = m.to(device)
 
     optimizer     = optimizer_class(m.parameters(), lr=optim_lr)
@@ -272,9 +269,7 @@ def train_single_model(mname):
     # Save num_points for DistanceMatrixRaggedModel so analysis can restore it
     extra = {}
     if mname == 'DistanceMatrixRaggedModel':
-        # The _phi_inp_dim attribute was not defined; use num_points set during initialization if it exists.
-        # Assuming _npts from build_model_by_name is the intended num_points.
-        extra['num_points'] = m.num_points if hasattr(m, 'num_points') else _npts
+        extra['num_points'] = m._phi_inp_dim
 
     ckpt_path = f'models/{mname}.pth'
     torch.save({
@@ -285,7 +280,7 @@ def train_single_model(mname):
         'dim':              dim,
         **extra,
     }, ckpt_path)
-    print(f'  Saved \u2192 {ckpt_path}')
+    print(f'  Saved → {ckpt_path}')
     return {'train_loss': tr_loss, 'val_loss': val_loss}
 
 
