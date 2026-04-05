@@ -85,9 +85,12 @@ def find_checkpoint(mname):
 
 
 if requested_model == 'all':
+    # Evaluate both raw and GS variants for every model
     models_to_test = MODEL_NAMES[:]
+    models_to_test_gs = [m + '_GS' for m in MODEL_NAMES]
 elif requested_model in MODEL_NAMES:
-    models_to_test = [requested_model]
+    models_to_test    = [requested_model]
+    models_to_test_gs = [requested_model + '_GS']
 elif os.path.isfile(requested_model):
     models_to_test = [os.path.splitext(os.path.basename(requested_model))[0]]
 else:
@@ -111,7 +114,12 @@ else:
         )
     models_to_test = found
 
-print('models_to_test:', models_to_test)
+# If models_to_test_gs was not set above (fuzzy path), build it now
+if 'models_to_test_gs' not in dir():
+    models_to_test_gs = [m + '_GS' for m in models_to_test]
+
+print('models_to_test (raw):', models_to_test)
+print('models_to_test (GS) :', models_to_test_gs)
 
 # -------------------------------------------------------------------------
 # Load dataset metadata and point clouds
@@ -172,19 +180,33 @@ def build_analysis_model(name, output_dim, n=None, extra=None):
         npts = extra.get('num_points', n_dim)
         return DistanceMatrixRaggedModel(output_dim=output_dim, num_points=npts)
     raise ValueError(f"Unknown model name: {name}")
-    if name == 'DistanceMatrixRaggedModel':
-        return DistanceMatrixRaggedModel(output_dim=output_dim, num_points=600)
-    raise ValueError(f"Unknown model name: {name}")
+
+# -------------------------------------------------------------------------
+# Gaussian smoothing
+# -------------------------------------------------------------------------
+
+GS_SIGMA = 0.5  # default bandwidth; matches train_nn.py
+
+def gaussian_smooth_tensor(x: torch.Tensor, sigma: float = GS_SIGMA) -> torch.Tensor:
+    """Gaussian-weighted average of each point over all points. (N, d) → (N, d)."""
+    diff  = x.unsqueeze(0) - x.unsqueeze(1)               # (N, N, d)
+    dist2 = (diff ** 2).sum(dim=-1)                        # (N, N)
+    W     = torch.exp(-dist2 / (2 * sigma ** 2))
+    W     = W / W.sum(dim=-1, keepdim=True)
+    return W @ x                                           # (N, d)
 
 # -------------------------------------------------------------------------
 # Prepare a single point-cloud tensor for inference
 # -------------------------------------------------------------------------
 
-def prepare_single_input(mname, x_tensor):
+def prepare_single_input(mname, x_tensor, use_gs=False):
     """
     x_tensor : (N_pts, dim) FloatTensor on device
+    use_gs   : if True, apply Gaussian smoothing before any transformation
     Returns the input expected by forward_single().
     """
+    if use_gs:
+        x_tensor = gaussian_smooth_tensor(x_tensor, sigma=GS_SIGMA)
     arr = x_tensor.cpu().numpy()
 
     if mname in ['TensorFieldNetwork', 'GTTensorFieldNetwork',
@@ -434,16 +456,24 @@ y_train = le.transform(label_classif_train)
 y_test  = le.transform(label_classif_test)
 
 # -------------------------------------------------------------------------
-# Evaluate each model
+# Evaluate each model (raw and GS variants)
 # -------------------------------------------------------------------------
 
 data_sets_torch = [torch.FloatTensor(data_sets[i]).to(device) for i in range(N_sets)]
 
 all_model_results = {}
 
-for model_name in models_to_test:
+
+def load_and_eval(model_name, use_gs=False):
+    """
+    Load checkpoint for model_name, run inference (with or without GS),
+    classify with XGBoost, and store result in all_model_results.
+    """
+    label = model_name  # checkpoint filename = model_name (already includes _GS if needed)
+    tag   = ' [GS]' if use_gs else ''
+
     print(f'\n{"="*60}')
-    print(f'Evaluating model: {model_name}')
+    print(f'Evaluating: {model_name}{tag}')
     print(f'{"="*60}')
 
     # --- load checkpoint ---
@@ -451,62 +481,63 @@ for model_name in models_to_test:
         ckpt_path = model_name
     else:
         try:
-            ckpt_path = find_checkpoint(model_name)
+            ckpt_path = find_checkpoint(label)
         except FileNotFoundError as e:
             print(f'  SKIP: {e}')
-            all_model_results[model_name] = {'error': str(e)}
-            continue
+            all_model_results[label] = {'error': str(e), 'use_gs': use_gs}
+            return
 
     checkpoint = torch.load(ckpt_path, map_location=device)
     if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-        model_state = checkpoint['model_state_dict']
-        output_dim  = checkpoint.get('output_dim')
-        ckpt_type   = checkpoint.get('model_type', model_name)
-        ckpt_dim    = checkpoint.get('dim', dim)
-        ckpt_npts   = checkpoint.get('num_points', None)
+        model_state  = checkpoint['model_state_dict']
+        output_dim   = checkpoint.get('output_dim')
+        ckpt_type    = checkpoint.get('model_type', model_name)
+        ckpt_dim     = checkpoint.get('dim', dim)
+        ckpt_npts    = checkpoint.get('num_points', None)
+        ckpt_use_gs  = checkpoint.get('use_gs', use_gs)
+        ckpt_sigma   = checkpoint.get('gs_sigma', GS_SIGMA)
     else:
-        model_state = checkpoint
-        output_dim  = None
-        ckpt_type   = model_name
-        ckpt_dim    = dim
-        ckpt_npts   = None
+        model_state  = checkpoint
+        output_dim   = None
+        ckpt_type    = model_name
+        ckpt_dim     = dim
+        ckpt_npts    = None
+        ckpt_use_gs  = use_gs
+        ckpt_sigma   = GS_SIGMA
 
-    # ----------------------------------------------------------------
-    # Resolve class_name: trust ckpt_type first (set by train_nn.py).
-    # Only fall back to key-inspection for legacy checkpoints where
-    # model_type was not saved or was saved as 'best_model'.
-    # ----------------------------------------------------------------
+    # Resolve class_name from ckpt_type; fall back to key inspection only for
+    # legacy checkpoints (old TFN: keys like "layers.0.W00...")
     _state_keys = set(model_state.keys())
-
-    # Legacy TFNTensorFieldNetwork: unique key pattern "layers.X.W00..."
     _is_old_tfn = any(k.startswith('layers.') and '.W0' in k for k in _state_keys)
 
+    # Strip _GS suffix from ckpt_type to get the base class name
+    base_ckpt_type = ckpt_type.replace('_GS', '')
+
     if _is_old_tfn:
-        # Override whatever ckpt_type says — this is the original TFN architecture
         class_name = 'TFNTensorFieldNetwork'
-    elif ckpt_type in MODEL_NAMES:
-        class_name = ckpt_type
-    elif ckpt_type == 'TFNTensorFieldNetwork':
+    elif base_ckpt_type in MODEL_NAMES:
+        class_name = base_ckpt_type
+    elif base_ckpt_type == 'TFNTensorFieldNetwork':
         class_name = 'TFNTensorFieldNetwork'
-    elif model_name in MODEL_NAMES:
-        class_name = model_name
     else:
+        # Fuzzy: strip _GS from model_name then search
+        base_model_name = model_name.replace('_GS', '')
         inferred = None
         for candidate in MODEL_NAMES:
-            if candidate.lower() in model_name.lower():
+            if candidate.lower() in base_model_name.lower():
                 inferred = candidate
                 break
         if inferred is None:
-            print(f'  SKIP: cannot infer model class for "{model_name}" (ckpt_type="{ckpt_type}")')
-            all_model_results[model_name] = {'error': 'cannot infer model class'}
-            continue
+            print(f'  SKIP: cannot infer class for "{model_name}" (ckpt_type="{ckpt_type}")')
+            all_model_results[label] = {'error': 'cannot infer model class', 'use_gs': use_gs}
+            return
         class_name = inferred
         print(f'  Inferred class: {class_name}')
 
     if output_dim is None:
         output_dim = sum(PVs_train[hidx].shape[1] for hidx in range(len(homdim)))
 
-    print(f'  class_name={class_name}  ckpt_type={ckpt_type}  output_dim={output_dim}  dim={ckpt_dim}')
+    print(f'  class={class_name}  ckpt_type={ckpt_type}  out={output_dim}  dim={ckpt_dim}  GS={ckpt_use_gs}')
 
     try:
         if class_name == 'TFNTensorFieldNetwork':
@@ -520,15 +551,11 @@ for model_name in models_to_test:
             model_PV.load_state_dict(model_state)
         elif class_name == 'RaggedPersistenceModel':
             model_PV = RaggedPersistenceModel(output_dim=output_dim)
-            # Layer 0 of DenseRagged is lazy: run one dummy forward pass so
-            # weight_param is registered before load_state_dict tries to fill it.
-            _dummy_n = list(model_state.keys())
-            # infer layer-0 weight shape from checkpoint
             _w0_key = 'ragged_layers.0.weight_param'
             if _w0_key in model_state:
-                _w0_shape = model_state[_w0_key].shape  # (in_f, 30)
+                _w0_shape = model_state[_w0_key].shape
                 _dummy_in = torch.zeros(1, _w0_shape[0])
-                model_PV.ragged_layers[0](_dummy_in.unsqueeze(0) if False else [_dummy_in])
+                model_PV.ragged_layers[0]([_dummy_in])
             model_PV.load_state_dict(model_state)
         else:
             model_PV = build_analysis_model(class_name, output_dim, n=ckpt_dim)
@@ -538,28 +565,31 @@ for model_name in models_to_test:
         model_PV.eval()
     except Exception as e:
         print(f'  SKIP: failed to load model – {e}')
-        all_model_results[model_name] = {'error': str(e)}
-        continue
+        all_model_results[label] = {'error': str(e), 'use_gs': use_gs}
+        return
 
-    # --- inference ---
+    # --- inference (apply GS from checkpoint metadata) ---
+    effective_gs    = ckpt_use_gs
+    effective_sigma = ckpt_sigma
     starttimeNN = time()
-    PV_NN_list = []
+    PV_NN_list  = []
     with torch.no_grad():
-        for x_tensor in tqdm(data_sets_torch, desc=f"Predicting ({model_name})"):
+        for x_tensor in tqdm(data_sets_torch, desc=f"Predicting ({label})"):
             try:
-                prepared = prepare_single_input(class_name, x_tensor)
+                prepared = prepare_single_input(class_name, x_tensor,
+                                                use_gs=effective_gs)
                 out = forward_single(model_PV, prepared, class_name)
                 out_np = out.cpu().numpy() if isinstance(out, torch.Tensor) else np.asarray(out)
                 if out_np.ndim > 1 and out_np.shape[0] == 1:
                     out_np = out_np[0]
                 PV_NN_list.append(out_np)
             except Exception as e:
-                print(f'  WARNING: inference failed on sample – {e}')
+                print(f'  WARNING: inference failed – {e}')
                 PV_NN_list.append(np.zeros(output_dim, dtype=np.float32))
 
-    PV_NN    = np.vstack(PV_NN_list)
-    timeNN   = time() - starttimeNN
-    print(f"  NN inference time: {timeNN:.2f}s  (Gudhi clean: {timeG:.2f}s, noise: {timeGn:.2f}s)")
+    PV_NN  = np.vstack(PV_NN_list)
+    timeNN = time() - starttimeNN
+    print(f"  NN time: {timeNN:.2f}s  (Gudhi: {timeG:.2f}s  noise: {timeGn:.2f}s)")
 
     # --- plot predicted PVs ---
     for hidx in range(len(homdim)):
@@ -577,28 +607,38 @@ for model_name in models_to_test:
                 for lidx in range(nls):
                     start = hidx * PV_size * nls + lidx * PV_size
                     plt.plot(row[start:start + PV_size])
-        plt.suptitle(f"Test predicted PV hdim {hdim} ({model_name})")
-        plt.savefig(f"results/{dataset_test_name}_{model_name}_predicted_PVs_h{hdim}_on_test.png")
+        gs_tag = '_GS' if effective_gs else ''
+        plt.suptitle(f"Test predicted PV hdim {hdim} ({label})")
+        plt.savefig(
+            f"results/{dataset_test_name}_{label}_predicted_PVs_h{hdim}_on_test.png")
         plt.close()
 
-    # --- XGBoost classification on predicted PVs ---
+    # --- XGBoost classification ---
     PV_train_NN = PV_NN[:len(data_classif_train)]
     PV_test_NN  = PV_NN[len(data_classif_train):]
-
     try:
         clf = XGBClassifier(eval_metric='logloss', use_label_encoder=False)
         clf.fit(PV_train_NN, y_train)
-        train_acc_nn = clf.score(PV_train_NN, y_train)
-        test_acc_nn  = clf.score(PV_test_NN,  y_test)
-        print(f"  [{model_name}] XGB  train={100*train_acc_nn:.2f}%  test={100*test_acc_nn:.2f}%")
-        all_model_results[model_name] = {
-            'xgb_train_acc': train_acc_nn,
-            'xgb_test_acc':  test_acc_nn,
+        tr_acc = clf.score(PV_train_NN, y_train)
+        te_acc = clf.score(PV_test_NN,  y_test)
+        print(f"  [{label}] XGB  train={100*tr_acc:.2f}%  test={100*te_acc:.2f}%")
+        all_model_results[label] = {
+            'xgb_train_acc': tr_acc,
+            'xgb_test_acc':  te_acc,
             'time_nn':       timeNN,
+            'use_gs':        effective_gs,
         }
     except Exception as e:
-        print(f'  WARNING: XGB classification failed – {e}')
-        all_model_results[model_name] = {'error': str(e)}
+        print(f'  WARNING: XGB failed – {e}')
+        all_model_results[label] = {'error': str(e), 'use_gs': effective_gs}
+
+
+# Run evaluation: for each base model, evaluate raw then GS checkpoint
+for base_name in models_to_test:
+    load_and_eval(base_name, use_gs=False)
+
+for gs_name in models_to_test_gs:
+    load_and_eval(gs_name, use_gs=True)
 
 # -------------------------------------------------------------------------
 # Baseline classifiers (Gudhi clean, Gudhi noise, DTW, Euclidean)
@@ -642,21 +682,32 @@ XB22 = time()
 print(f"Euclidean k-NN    train={100*train_acc_euc:.2f}%  test={100*test_acc_euc:.2f}%  t={XB22-XB21:.2f}s")
 
 # -------------------------------------------------------------------------
-# Final summary
+# Final summary — raw vs GS side by side
 # -------------------------------------------------------------------------
 
-print('\n' + '='*60)
+print('\n' + '='*75)
 print('FINAL SUMMARY')
-print('='*60)
-print(f"{'Model':<35} {'Train%':>7} {'Test%':>7} {'NN time':>9}")
-print('-'*60)
-for mname, res in all_model_results.items():
-    if 'error' in res:
-        print(f"  {mname:<33} ERROR: {res['error']}")
-    else:
-        print(f"  {mname:<33} {100*res['xgb_train_acc']:>6.2f}% {100*res['xgb_test_acc']:>6.2f}%  {res['time_nn']:>7.2f}s")
-print('-'*60)
-print(f"  {'Gudhi (clean)':<33} {100*train_acc_gudhi:>6.2f}% {100*test_acc_gudhi:>6.2f}%  {XG2-XG1:>7.2f}s")
-print(f"  {'Gudhi (noise)':<33} {100*train_acc_noise:>6.2f}% {100*test_acc_noise:>6.2f}%  {XGN2-XGN1:>7.2f}s")
-print(f"  {'DTW k-NN':<33} {100*train_acc_dtw:>6.2f}% {100*test_acc_dtw:>6.2f}%  {XB12-XB11:>7.2f}s")
-print(f"  {'Euclidean k-NN':<33} {100*train_acc_euc:>6.2f}% {100*test_acc_euc:>6.2f}%  {XB22-XB21:>7.2f}s")
+print('='*75)
+print(f"  {'Model':<30} {'GS':>3} {'Train%':>7} {'Test%':>7} {'Time(s)':>8}")
+print('-'*75)
+
+for base_name in models_to_test:
+    gs_name = base_name + '_GS'
+    for label in [base_name, gs_name]:
+        res = all_model_results.get(label)
+        if res is None:
+            continue
+        gs_flag = 'yes' if res.get('use_gs') else 'no'
+        if 'error' in res:
+            print(f"  {label:<30} {gs_flag:>3}  ERROR: {res['error']}")
+        else:
+            print(f"  {label:<30} {gs_flag:>3}"
+                  f" {100*res['xgb_train_acc']:>6.2f}%"
+                  f" {100*res['xgb_test_acc']:>6.2f}%"
+                  f" {res['time_nn']:>8.2f}s")
+
+print('-'*75)
+print(f"  {'Gudhi (clean)':<30} {'---':>3} {100*train_acc_gudhi:>6.2f}% {100*test_acc_gudhi:>6.2f}%  {XG2-XG1:>7.2f}s")
+print(f"  {'Gudhi (noise)':<30} {'---':>3} {100*train_acc_noise:>6.2f}% {100*test_acc_noise:>6.2f}%  {XGN2-XGN1:>7.2f}s")
+print(f"  {'DTW k-NN':<30} {'---':>3} {100*train_acc_dtw:>6.2f}% {100*test_acc_dtw:>6.2f}%  {XB12-XB11:>7.2f}s")
+print(f"  {'Euclidean k-NN':<30} {'---':>3} {100*train_acc_euc:>6.2f}% {100*test_acc_euc:>6.2f}%  {XB22-XB21:>7.2f}s")
