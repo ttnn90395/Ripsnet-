@@ -10,13 +10,31 @@ Import structure (no circular imports):
 
   tfn_model.py imports FROM this file (one-way): no circular deps.
 
+Activation upgrade
+------------------
+All models use GELU instead of ReLU by default.  GELU has smoother gradients,
+no dead-neuron problem, and consistently outperforms ReLU in both transformer-
+style and point-cloud architectures.  Every model that previously hard-coded
+nn.ReLU() now accepts an `activation` argument (default 'gelu') and uses
+_act() to build the chosen activation module.  Supported values:
+  'gelu'   nn.GELU()        — default, recommended
+  'relu'   nn.ReLU()        — legacy, useful for ablations
+  'silu'   nn.SiLU()        — smooth, good in equivariant nets
+  'mish'   nn.Mish()        — very smooth, slightly slower
+  'elu'    nn.ELU()         — negative saturation, useful for small nets
+
+Normalisation upgrade
+---------------------
+All phi/rho MLPs now include BatchNorm1d after each linear+activation pair.
+For the ragged / per-point models (DenseRagged, RaggedPersistenceModel) we
+use LayerNorm instead because the batch dimension is the number of POINTS
+not the number of samples, making BatchNorm semantically wrong there.
+
 Device fix
 ----------
 GTBasis and CGCoefficients (gt_basis.py) store tensors as plain attributes
 rather than register_buffer(), so nn.Module.to(device) silently skips them.
-GTTensorFieldNetworkV2 overrides .to() to call _move_basis_tensors(), which
-walks every layer and moves those tensors. This is the primary fix; deep_to()
-in train_nn.py / analysis_nn.py is a backup.
+GTTensorFieldNetworkV2 overrides .to() to call _move_basis_tensors().
 """
 
 import torch
@@ -48,12 +66,61 @@ from gt_improvements import (
 
 
 # ---------------------------------------------------------------------------
+# Activation factory
+# ---------------------------------------------------------------------------
+
+def _act(name: str = 'gelu') -> nn.Module:
+    """Return an activation module by name.  Default is GELU."""
+    name = name.lower()
+    if name == 'gelu':  return nn.GELU()
+    if name == 'relu':  return nn.ReLU()
+    if name == 'silu':  return nn.SiLU()
+    if name == 'mish':  return nn.Mish()
+    if name == 'elu':   return nn.ELU()
+    raise ValueError(f"Unknown activation '{name}'. "
+                     f"Choose from: gelu, relu, silu, mish, elu")
+
+
+# ---------------------------------------------------------------------------
+# MLP builder helpers
+# ---------------------------------------------------------------------------
+
+def _build_mlp(dims: List[int],
+               activation: str = 'gelu',
+               norm: str = 'bn',
+               final_activation: Optional[str] = None) -> nn.Sequential:
+    """
+    Build a fully-connected MLP with optional normalisation.
+
+    dims             : [in, h1, h2, ..., out]
+    activation       : activation after each hidden layer
+    norm             : 'bn'  BatchNorm1d after each hidden layer (default)
+                       'ln'  LayerNorm after each hidden layer
+                       'none' no normalisation
+    final_activation : optional activation after the last linear layer
+                       (e.g. 'sigmoid' for bounded outputs)
+    """
+    layers = []
+    for i in range(len(dims) - 1):
+        layers.append(nn.Linear(dims[i], dims[i + 1]))
+        is_last = (i == len(dims) - 2)
+        if is_last:
+            if final_activation is not None:
+                layers.append(_act(final_activation))
+        else:
+            layers.append(_act(activation))
+            if norm == 'bn':
+                layers.append(nn.BatchNorm1d(dims[i + 1]))
+            elif norm == 'ln':
+                layers.append(nn.LayerNorm(dims[i + 1]))
+    return nn.Sequential(*layers)
+
+
+# ---------------------------------------------------------------------------
 # Device helper: move every tensor in an arbitrary object to device.
-# Needed because GTBasis / CGCoefficients use plain Python attributes.
 # ---------------------------------------------------------------------------
 
 def _move_obj_tensors(obj, device):
-    """Move all torch.Tensor attributes of obj to device (one level deep)."""
     if obj is None:
         return
     for attr_name in list(vars(obj)):
@@ -71,16 +138,11 @@ def _move_obj_tensors(obj, device):
 
 
 def _move_basis_tensors(module: nn.Module, device):
-    """
-    Walk all sub-modules and move GTBasis / CGCoefficients tensor attributes.
-    Targets any sub-module that has a 'gt_basis' or 'cg' attribute.
-    """
     for submod in module.modules():
         for attr in ('gt_basis', 'cg'):
             obj = getattr(submod, attr, None)
             if obj is not None:
                 _move_obj_tensors(obj, device)
-                # Also recurse one level into the object's own attributes
                 for inner_attr in list(vars(obj)):
                     inner = getattr(obj, inner_attr)
                     if hasattr(inner, '__dict__'):
@@ -88,17 +150,13 @@ def _move_basis_tensors(module: nn.Module, device):
 
 
 # ---------------------------------------------------------------------------
-# GTTensorFieldNetworkV2  — recommended model, all improvements ON
+# GTTensorFieldNetworkV2
 # ---------------------------------------------------------------------------
 
 class GTTensorFieldNetworkV2(GTTensorFieldNetwork):
     """
     Recommended GT-TFN with all improvements ON by default.
-    Overrides .to() / .cuda() / .cpu() to also move GTBasis / CG tensors
-    that are stored as plain attributes in gt_basis.py objects.
-
-    forward(batch: List[Tensor(N_i, n)]) → Tensor(B, num_classes)
-    forward(batch, node_attrs=attrs)     → same, with per-node features
+    Device-fix overrides ensure GTBasis/CG tensors move with the model.
     """
 
     def __init__(
@@ -134,20 +192,13 @@ class GTTensorFieldNetworkV2(GTTensorFieldNetwork):
             radial_hidden=radial_hidden,
         )
 
-    # ------------------------------------------------------------------
-    # Override .to() so GTBasis/CG tensors follow the module to device.
-    # ------------------------------------------------------------------
-
     def to(self, *args, **kwargs):
         super().to(*args, **kwargs)
-        # Infer the target device from args/kwargs (mirrors nn.Module.to logic)
         device = None
         if args:
             first = args[0]
             if isinstance(first, (str, torch.device)):
                 device = torch.device(first)
-            elif isinstance(first, torch.dtype):
-                pass  # dtype-only call, no device change
         if 'device' in kwargs:
             device = torch.device(kwargs['device'])
         if device is not None:
@@ -164,11 +215,6 @@ class GTTensorFieldNetworkV2(GTTensorFieldNetwork):
         _move_basis_tensors(self, torch.device('cpu'))
         return self
 
-    # ------------------------------------------------------------------
-    # Also move basis tensors at the start of each forward call so that
-    # any code path that skips .to() still works correctly.
-    # ------------------------------------------------------------------
-
     def forward(self, batch, node_attrs=None):
         if batch:
             _move_basis_tensors(self, batch[0].device)
@@ -180,11 +226,7 @@ class GTTensorFieldNetworkV2(GTTensorFieldNetwork):
 # ---------------------------------------------------------------------------
 
 class TensorFieldNetwork(nn.Module):
-    """
-    SE(3)-equivariant point cloud model.
-    Same external interface as the original TFN; internally uses GTTFNv2.
-    forward(batch: List[Tensor(N_i, 3)]) → Tensor(B, num_classes)
-    """
+    """SE(3)-equivariant wrapper around GTTFNv2."""
 
     def __init__(
         self,
@@ -236,39 +278,37 @@ class TensorFieldNetwork(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# PointNet3D  (3-D Deep-Sets baseline)
+# PointNet3D  — 3-D Deep-Sets baseline
 # ---------------------------------------------------------------------------
 
 class PointNet3D(nn.Module):
     """
-    Permutation-invariant Deep-Sets baseline — NOT rotation-equivariant.
+    Permutation-invariant Deep-Sets baseline (NOT rotation-equivariant).
+    Uses GELU + BatchNorm in both phi and rho MLPs.
     forward(batch: List[Tensor(N_i, 3)]) → Tensor(B, output_dim)
     """
 
-    def __init__(self, output_dim, phi_dims=(64, 128, 256), rho_dims=(256, 128)):
+    def __init__(self, output_dim,
+                 phi_dims=(64, 128, 256), rho_dims=(256, 128),
+                 activation: str = 'gelu'):
         super().__init__()
-        phi_layers, in_f = [], 3
-        for d in phi_dims:
-            phi_layers += [nn.Linear(in_f, d), nn.ReLU()]
-            in_f = d
-        self.phi_layers = nn.Sequential(*phi_layers)
-
-        rho_layers, in_f = [], phi_dims[-1]
-        for d in rho_dims:
-            rho_layers += [nn.Linear(in_f, d), nn.ReLU()]
-            in_f = d
-        rho_layers.append(nn.Linear(in_f, output_dim))
-        self.rho_layers = nn.Sequential(*rho_layers)
+        self.phi_layers = _build_mlp([3] + list(phi_dims),
+                                     activation=activation, norm='bn')
+        self.rho_layers = _build_mlp([phi_dims[-1]] + list(rho_dims) + [output_dim],
+                                     activation=activation, norm='bn',
+                                     final_activation=None)
 
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
         if len(batch) == 0:
-            return torch.empty(0, self.rho_layers[-1].out_features,
+            return torch.empty(0, _last_out(self.rho_layers),
                                device=next(self.parameters()).device)
         padded = pad_sequence(batch, batch_first=True, padding_value=0.0)
-        mask   = torch.zeros(padded.shape[:2], dtype=torch.bool, device=padded.device)
+        mask   = torch.zeros(padded.shape[:2], dtype=torch.bool,
+                             device=padded.device)
         for i, pc in enumerate(batch):
             mask[i, :len(pc)] = True
-        phi = self.phi_layers(padded.reshape(-1, 3)).reshape(*padded.shape[:2], -1)
+        B, N, _ = padded.shape
+        phi = self.phi_layers(padded.reshape(B * N, 3)).reshape(B, N, -1)
         phi = phi.masked_fill(~mask.unsqueeze(-1), torch.finfo(phi.dtype).min)
         agg, _ = phi.max(dim=1)
         return self.rho_layers(agg)
@@ -278,25 +318,34 @@ class PointNet3D(nn.Module):
 # Notebook-derived / ragged models
 # ---------------------------------------------------------------------------
 
-class ScalarDistanceDeepSet(nn.Module):
-    def __init__(self, output_dim, phi_dims=(64, 128), rho_dims=(256, 128)):
-        super().__init__()
-        phi_layers, in_f = [], 1
-        for d in phi_dims:
-            phi_layers += [nn.Linear(in_f, d), nn.ReLU()]
-            in_f = d
-        self.phi_layers = nn.Sequential(*phi_layers)
+def _last_out(seq: nn.Sequential) -> int:
+    """Return the out_features of the last Linear in a Sequential."""
+    for m in reversed(list(seq.modules())):
+        if isinstance(m, nn.Linear):
+            return m.out_features
+    raise RuntimeError("No Linear layer found in Sequential")
 
-        rho_layers, in_f = [], phi_dims[-1]
-        for d in rho_dims:
-            rho_layers += [nn.Linear(in_f, d), nn.ReLU()]
-            in_f = d
-        rho_layers.append(nn.Linear(in_f, output_dim))
-        self.rho_layers = nn.Sequential(*rho_layers)
+
+class ScalarDistanceDeepSet(nn.Module):
+    """
+    Deep-Sets on pairwise distances.
+    Input: distance matrix (N, N) per sample.
+    Uses GELU + BatchNorm in phi and rho MLPs.
+    """
+
+    def __init__(self, output_dim,
+                 phi_dims=(64, 128), rho_dims=(256, 128),
+                 activation: str = 'gelu'):
+        super().__init__()
+        self.phi_layers = _build_mlp([1] + list(phi_dims),
+                                     activation=activation, norm='bn')
+        self.rho_layers = _build_mlp([phi_dims[-1]] + list(rho_dims) + [output_dim],
+                                     activation=activation, norm='bn',
+                                     final_activation=None)
 
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
         if len(batch) == 0:
-            return torch.empty(0, self.rho_layers[-1].out_features,
+            return torch.empty(0, _last_out(self.rho_layers),
                                device=next(self.parameters()).device)
         all_features = []
         for dm in batch:
@@ -313,49 +362,51 @@ class ScalarDistanceDeepSet(nn.Module):
 
 
 class PointNetTutorial(nn.Module):
-    """2-D PointNet; keeps only the first 2 coordinate columns."""
+    """
+    2-D PointNet (tutorial version).
+    Uses GELU + BatchNorm in both phi and rho MLPs.
+    """
 
-    def __init__(self, output_dim, phi_dims=(64, 128, 256), rho_dims=(256, 128)):
+    def __init__(self, output_dim,
+                 phi_dims=(64, 128, 256), rho_dims=(256, 128),
+                 activation: str = 'gelu'):
         super().__init__()
-        phi_layers, in_f = [], 2
-        for d in phi_dims:
-            phi_layers += [nn.Linear(in_f, d), nn.ReLU()]
-            in_f = d
-        self.phi_layers = nn.Sequential(*phi_layers)
-
-        rho_layers, in_f = [], phi_dims[-1]
-        for d in rho_dims:
-            rho_layers += [nn.Linear(in_f, d), nn.ReLU()]
-            in_f = d
-        rho_layers.append(nn.Linear(in_f, output_dim))
-        self.rho_layers = nn.Sequential(*rho_layers)
+        self.phi_layers = _build_mlp([2] + list(phi_dims),
+                                     activation=activation, norm='bn')
+        self.rho_layers = _build_mlp([phi_dims[-1]] + list(rho_dims) + [output_dim],
+                                     activation=activation, norm='bn',
+                                     final_activation=None)
 
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
         if len(batch) == 0:
-            return torch.empty(0, self.rho_layers[-1].out_features,
+            return torch.empty(0, _last_out(self.rho_layers),
                                device=next(self.parameters()).device)
         batch2 = [x[:, :2] for x in batch]
         padded = pad_sequence(batch2, batch_first=True, padding_value=0.0)
-        mask   = torch.zeros(padded.shape[:2], dtype=torch.bool, device=padded.device)
+        mask   = torch.zeros(padded.shape[:2], dtype=torch.bool,
+                             device=padded.device)
         for i, pc in enumerate(batch2):
             mask[i, :len(pc)] = True
-        phi = self.phi_layers(padded.reshape(-1, 2)).reshape(*padded.shape[:2], -1)
+        B, N, _ = padded.shape
+        phi = self.phi_layers(padded.reshape(B * N, 2)).reshape(B, N, -1)
         phi = phi.masked_fill(~mask.unsqueeze(-1), torch.finfo(phi.dtype).min)
         agg, _ = phi.max(dim=1)
         return self.rho_layers(agg)
 
 
 class ScalarInputMLP(nn.Module):
-    """Expects a (B, 1) scalar tensor (e.g. mean pairwise distance)."""
+    """
+    Scalar-input MLP (mean pairwise distance → PV).
+    Uses GELU + BatchNorm; Sigmoid on the final output.
+    """
 
-    def __init__(self, output_dim, hidden_dims=(256, 512, 1024)):
+    def __init__(self, output_dim,
+                 hidden_dims=(256, 512, 1024),
+                 activation: str = 'gelu'):
         super().__init__()
-        layers, in_f = [], 1
-        for d in hidden_dims:
-            layers += [nn.Linear(in_f, d), nn.ReLU()]
-            in_f = d
-        layers += [nn.Linear(in_f, output_dim), nn.Sigmoid()]
-        self.mlp = nn.Sequential(*layers)
+        self.mlp = _build_mlp([1] + list(hidden_dims) + [output_dim],
+                               activation=activation, norm='bn',
+                               final_activation='sigmoid')
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if isinstance(x, list):
@@ -368,25 +419,30 @@ class ScalarInputMLP(nn.Module):
 
 
 class MultiInputModel(nn.Module):
-    """Combines a PointNetTutorial branch with a scalar MLP branch."""
+    """
+    PointNetTutorial branch + scalar MLP branch, fused via an MLP head.
+    Uses GELU + BatchNorm throughout; Sigmoid on the final output.
+    """
 
     def __init__(self, target_output_dim, scalar_input_dim,
-                 pointnet_intermediate_dim=128, scalar_mlp_intermediate_dim=128):
+                 pointnet_intermediate_dim: int = 128,
+                 scalar_mlp_intermediate_dim: int = 128,
+                 activation: str = 'gelu'):
         super().__init__()
         self.pointnet_branch = PointNetTutorial(
             output_dim=pointnet_intermediate_dim,
             phi_dims=(64, 128, 256), rho_dims=(256, 128),
+            activation=activation,
         )
-        self.scalar_branch = nn.Sequential(
-            nn.Linear(scalar_input_dim, 512), nn.ReLU(),
-            nn.Linear(512, 256),             nn.ReLU(),
-            nn.Linear(256, scalar_mlp_intermediate_dim), nn.ReLU(),
+        self.scalar_branch = _build_mlp(
+            [scalar_input_dim, 512, 256, scalar_mlp_intermediate_dim],
+            activation=activation, norm='bn',
         )
         combined = pointnet_intermediate_dim + scalar_mlp_intermediate_dim
-        self.final_mlp = nn.Sequential(
-            nn.Linear(combined, 256), nn.ReLU(),
-            nn.Linear(256, 128),     nn.ReLU(),
-            nn.Linear(128, target_output_dim), nn.Sigmoid(),
+        self.final_mlp = _build_mlp(
+            [combined, 256, 128, target_output_dim],
+            activation=activation, norm='bn',
+            final_activation='sigmoid',
         )
 
     def forward(self, point_clouds: List[torch.Tensor],
@@ -400,27 +456,34 @@ class MultiInputModel(nn.Module):
 
 class DenseRagged(nn.Module):
     """
-    Point-wise linear layer for ragged point clouds.
-    Pre-allocates weights when in_features is given so the optimizer
-    sees parameters immediately without needing a warm-up pass.
+    Point-wise linear + optional activation for ragged point clouds.
+    Uses LayerNorm (not BatchNorm) because the 'batch' dimension here is
+    the number of points per cloud, not the number of samples.
+    Pre-allocates weights when in_features is given.
     """
 
     def __init__(self, in_features=None, out_features=30,
-                 activation='relu', use_bias=True):
+                 activation: str = 'gelu', use_bias: bool = True,
+                 use_norm: bool = True):
         super().__init__()
-        self.in_features  = in_features
-        self.out_features = out_features
-        self.use_bias     = use_bias
-        self.activation   = activation
+        self.in_features      = in_features
+        self.out_features     = out_features
+        self.use_bias         = use_bias
+        self.activation_name  = activation   # store name for lazy re-creation
+        self.use_norm         = use_norm
+        # Store activation as a registered module so it moves with the model
+        self.act_fn           = _act(activation)
 
         if in_features is not None:
             self.weight_param = nn.Parameter(
                 torch.randn(in_features, out_features) * 0.01)
             self.bias_param = (nn.Parameter(torch.zeros(out_features))
                                if use_bias else None)
+            self.norm = nn.LayerNorm(out_features) if use_norm else None
         else:
             self.weight_param = None
             self.bias_param   = None
+            self.norm         = None
 
     def _ensure_params(self, in_f: int, device):
         if self.weight_param is None:
@@ -431,6 +494,8 @@ class DenseRagged(nn.Module):
                 self.bias_param = nn.Parameter(
                     torch.zeros(self.out_features, device=device))
                 self.register_parameter('bias_param', self.bias_param)
+            if self.use_norm:
+                self.norm = nn.LayerNorm(self.out_features).to(device)
 
     def forward(self, inputs: List[torch.Tensor]) -> List[torch.Tensor]:
         outputs = []
@@ -439,18 +504,15 @@ class DenseRagged(nn.Module):
             y = torch.matmul(x, self.weight_param)
             if self.use_bias and self.bias_param is not None:
                 y = y + self.bias_param
-            if self.activation == 'relu':
-                y = F.relu(y)
-            elif self.activation == 'sigmoid':
-                y = torch.sigmoid(y)
-            elif self.activation == 'tanh':
-                y = torch.tanh(y)
+            if self.norm is not None:
+                y = self.norm(y)
+            y = self.act_fn(y)
             outputs.append(y)
         return outputs
 
 
 class PermopRagged(nn.Module):
-    """Sum-pool over points: List[(N_i, C)] → (B, C). No learnable params."""
+    """Sum-pool over points: List[(N_i, C)] → (B, C)."""
 
     def __init__(self):
         super().__init__()
@@ -462,42 +524,34 @@ class PermopRagged(nn.Module):
 
 class RaggedPersistenceModel(nn.Module):
     """
-    Three DenseRagged layers → PermopRagged → MLP head.
-
-    Input: List of tensors, each (N_i, F) where F is the input feature width.
-    For distance-matrix inputs F = N_i (the matrix row width), which varies
-    per sample — so the first DenseRagged layer MUST be lazy (in_features=None)
-    to initialise its weight from the first sample it sees.
-
-    Layers 2 and 3 have fixed widths (30→20, 20→10) and are pre-allocated.
-
-    in_features is kept as a constructor argument for checkpoint compatibility
-    (analysis_nn.py passes it when reloading), but it is only used for layers
-    2 and 3, never for the first layer.
+    Three DenseRagged layers (GELU + LayerNorm) → PermopRagged → MLP head.
+    Layer 0 is lazy (in_features=None) because input width varies with N.
+    Layers 1 and 2 are pre-allocated (30→20, 20→10).
+    MLP head uses GELU + LayerNorm.
     """
 
-    _RAGGED_DIMS = [30, 20, 10]   # output widths of the three DenseRagged layers
+    _RAGGED_DIMS = [30, 20, 10]
 
-    def __init__(self, output_dim, in_features=None):
+    def __init__(self, output_dim, in_features=None,
+                 activation: str = 'gelu'):
         super().__init__()
         self.ragged_layers = nn.ModuleList([
-            # Layer 0: lazy — width depends on actual input (point-cloud dim or N)
             DenseRagged(in_features=None,
                         out_features=self._RAGGED_DIMS[0],
-                        activation='relu'),
-            # Layers 1, 2: fixed widths, pre-allocated
+                        activation=activation, use_norm=True),
             DenseRagged(in_features=self._RAGGED_DIMS[0],
                         out_features=self._RAGGED_DIMS[1],
-                        activation='relu'),
+                        activation=activation, use_norm=True),
             DenseRagged(in_features=self._RAGGED_DIMS[1],
                         out_features=self._RAGGED_DIMS[2],
-                        activation='relu'),
+                        activation=activation, use_norm=True),
         ])
         self.perm = PermopRagged()
-        self.fc = nn.Sequential(
-            nn.Linear(self._RAGGED_DIMS[-1], 50),  nn.ReLU(),
-            nn.Linear(50, 100),                    nn.ReLU(),
-            nn.Linear(100, output_dim),
+        # MLP head: LayerNorm (not BatchNorm) because batch size may be 1
+        self.fc = _build_mlp(
+            [self._RAGGED_DIMS[-1], 50, 100, output_dim],
+            activation=activation, norm='ln',
+            final_activation=None,
         )
 
     def forward(self, x: List[torch.Tensor]) -> torch.Tensor:
@@ -507,14 +561,19 @@ class RaggedPersistenceModel(nn.Module):
 
 
 class DistanceMatrixRaggedModel(nn.Module):
-    """Row-wise MLP on distance matrix → mean-pool → MLP head."""
+    """
+    Row-wise MLP on distance matrix → mean-pool → MLP head.
+    Uses GELU + BatchNorm in both phi and rho MLPs.
+    """
 
     def __init__(self, output_dim, num_points=None,
-                 phi_dim=128, rho_hidden=(256, 128)):
+                 phi_dim: int = 128, rho_hidden=(256, 128),
+                 activation: str = 'gelu'):
         super().__init__()
         self.output_dim   = output_dim
         self.num_points   = num_points
         self.phi_dim      = phi_dim
+        self.activation   = activation
         self._phi_inp_dim = None
 
         if num_points and num_points > 0:
@@ -523,19 +582,14 @@ class DistanceMatrixRaggedModel(nn.Module):
         else:
             self._phi_layers = None
 
-        layers, prev = [], phi_dim
-        for h in rho_hidden:
-            layers += [nn.Linear(prev, h), nn.ReLU()]
-            prev = h
-        layers.append(nn.Linear(prev, output_dim))
-        self.rho = nn.Sequential(*layers)
+        self.rho = _build_mlp([phi_dim] + list(rho_hidden) + [output_dim],
+                               activation=activation, norm='bn',
+                               final_activation=None)
 
     def _make_phi(self, inp: int) -> nn.Sequential:
         hidden = max(64, self.phi_dim)
-        return nn.Sequential(
-            nn.Linear(inp, hidden), nn.ReLU(),
-            nn.Linear(hidden, self.phi_dim), nn.ReLU(),
-        )
+        return _build_mlp([inp, hidden, self.phi_dim],
+                           activation=self.activation, norm='bn')
 
     def _ensure_phi(self, n: int, device):
         if self._phi_layers is None or self._phi_inp_dim != n:
@@ -544,7 +598,7 @@ class DistanceMatrixRaggedModel(nn.Module):
 
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
         if len(batch) == 0:
-            return torch.empty(0, self.rho[-1].out_features,
+            return torch.empty(0, _last_out(self.rho),
                                device=next(self.parameters()).device)
         max_n  = max(m.shape[0] for m in batch)
         device = next(self.parameters()).device
@@ -574,11 +628,11 @@ __all__ = [
     'GTTFN_RBFExpansion', 'GTTFNLayer',
     'ChannelMixer', 'EquivariantGate', 'ResidualProjection',
     # Main equivariant models
-    'TensorFieldNetwork',       # SE(3), backed by GTTFNv2
-    'GTTensorFieldNetwork',     # SO(n) base
-    'GTTensorFieldNetworkV2',   # SO(n) with all improvements + device fix
-    'HierarchicalGTTFN',        # from gt_improvements.py
-    'OnEquivariantWrapper',     # from gt_improvements.py
+    'TensorFieldNetwork',
+    'GTTensorFieldNetwork',
+    'GTTensorFieldNetworkV2',
+    'HierarchicalGTTFN',
+    'OnEquivariantWrapper',
     'PointNet3D',
     # Notebook / ragged models
     'ScalarDistanceDeepSet',
@@ -589,4 +643,7 @@ __all__ = [
     'PermopRagged',
     'RaggedPersistenceModel',
     'DistanceMatrixRaggedModel',
+    # Helpers (useful for external code)
+    '_act',
+    '_build_mlp',
 ]
