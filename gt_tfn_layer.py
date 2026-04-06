@@ -272,6 +272,7 @@ class GTTFNLayer(nn.Module):
         use_gate:     bool = True,
         use_residual: bool = True,
         radial_hidden: int = 64,
+        precomputed_geom = None,
     ):
         super().__init__()
         self.n         = n
@@ -506,6 +507,7 @@ class GTTensorFieldNetwork(nn.Module):
         self,
         pos:       torch.Tensor,
         node_attr: Optional[torch.Tensor] = None,
+        precomputed_geom = None
     ) -> torch.Tensor:
         N = pos.shape[0]
         sc = self._scalar_sig
@@ -523,12 +525,16 @@ class GTTensorFieldNetwork(nn.Module):
 
         feats: FeatureDict = {sc: f0, vc: f1}
 
-        # Geometry
-        use_sparse = (self.k_neighbors is not None and self.k_neighbors < N - 1)
-        if use_sparse:
-            rbf, gt_edge, nbr_idx = knn_geometry(pos, self.rbf, self.gt_basis, self.k_neighbors)
+        if precomputed_geom is not None:
+            rbf, gt_edge, nbr_idx = precomputed_geom
+            use_sparse = True
         else:
-            rbf, gt_edge, mask = pairwise_geometry(pos, self.rbf, self.gt_basis)
+            # Geometry
+            use_sparse = (self.k_neighbors is not None and self.k_neighbors < N - 1)
+            if use_sparse:
+                rbf, gt_edge, nbr_idx = knn_geometry(pos, self.rbf, self.gt_basis, self.k_neighbors)
+            else:
+                rbf, gt_edge, mask = pairwise_geometry(pos, self.rbf, self.gt_basis)
 
         # Message-passing
         for i, layer in enumerate(self.mp_layers):

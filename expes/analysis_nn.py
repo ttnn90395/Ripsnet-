@@ -24,7 +24,6 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import pairwise_distances
 from xgboost import XGBClassifier
 
-# Ensure top repo is in path for models.py import from expes/
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
@@ -45,10 +44,15 @@ MODEL_NAMES = [
     'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
 ]
 
+TFN_MODELS = {
+    'TensorFieldNetwork', 'GTTensorFieldNetwork',
+    'GTTensorFieldNetworkV2', 'HierarchicalGTTFN',
+}
+
 # -------------------------------------------------------------------------
 # CLI args
 # -------------------------------------------------------------------------
-requested_model    = sys.argv[1]   # model name, 'all', or path
+requested_model    = sys.argv[1]
 dataset_PV_params  = sys.argv[2]
 dataset_train_name = sys.argv[3]
 dataset_test_name  = sys.argv[4]
@@ -57,15 +61,13 @@ PV_type            = sys.argv[6]
 mode               = sys.argv[7]
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
 print(sys.argv)
 
 # -------------------------------------------------------------------------
-# Resolve which models to test and where their checkpoints live
+# Resolve which models to test
 # -------------------------------------------------------------------------
 
 def find_checkpoint(mname):
-    """Return path to checkpoint for mname, or raise FileNotFoundError."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     candidate_dirs = [
         'models',
@@ -79,29 +81,24 @@ def find_checkpoint(mname):
             if os.path.isfile(p):
                 return p
     raise FileNotFoundError(
-        f"No checkpoint found for model '{mname}'. "
-        f"Searched: {candidate_dirs}"
-    )
+        f"No checkpoint found for model '{mname}'. Searched: {candidate_dirs}")
 
 
 if requested_model == 'all':
-    # Evaluate both raw and GS variants for every model
-    models_to_test = MODEL_NAMES[:]
+    models_to_test    = MODEL_NAMES[:]
     models_to_test_gs = [m + '_GS' for m in MODEL_NAMES]
 elif requested_model in MODEL_NAMES:
     models_to_test    = [requested_model]
     models_to_test_gs = [requested_model + '_GS']
 elif os.path.isfile(requested_model):
-    models_to_test = [os.path.splitext(os.path.basename(requested_model))[0]]
+    models_to_test    = [os.path.splitext(os.path.basename(requested_model))[0]]
+    models_to_test_gs = []
 else:
-    # fuzzy search in candidate dirs
     from glob import glob
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    candidate_dirs = [
-        'models',
-        os.path.join(script_dir, 'models'),
-        os.path.join(script_dir, '..', 'models'),
-    ]
+    candidate_dirs = ['models',
+                      os.path.join(script_dir, 'models'),
+                      os.path.join(script_dir, '..', 'models')]
     found = []
     for d in candidate_dirs:
         for c in glob(os.path.join(d, f'*{requested_model}*')):
@@ -110,11 +107,10 @@ else:
     if not found:
         raise ValueError(
             f"Unknown model '{requested_model}'. "
-            f"Valid names: {MODEL_NAMES} or 'all', or a direct checkpoint path."
-        )
-    models_to_test = found
+            f"Valid: {MODEL_NAMES} or 'all' or a direct path.")
+    models_to_test    = found
+    models_to_test_gs = []
 
-# If models_to_test_gs was not set above (fuzzy path), build it now
 if 'models_to_test_gs' not in dir():
     models_to_test_gs = [m + '_GS' for m in models_to_test]
 
@@ -182,41 +178,80 @@ def build_analysis_model(name, output_dim, n=None, extra=None):
     raise ValueError(f"Unknown model name: {name}")
 
 # -------------------------------------------------------------------------
-# Gaussian smoothing
+# Gaussian smoothing  (Fix 4: batched vectorised kernel)
 # -------------------------------------------------------------------------
 
-GS_SIGMA = 0.5  # default bandwidth; matches train_nn.py
+GS_SIGMA = 0.5
 
-def gaussian_smooth_tensor(x: torch.Tensor, sigma: float = GS_SIGMA) -> torch.Tensor:
-    """Gaussian-weighted average of each point over all points. (N, d) → (N, d)."""
-    diff  = x.unsqueeze(0) - x.unsqueeze(1)               # (N, N, d)
-    dist2 = (diff ** 2).sum(dim=-1)                        # (N, N)
-    W     = torch.exp(-dist2 / (2 * sigma ** 2))
-    W     = W / W.sum(dim=-1, keepdim=True)
-    return W @ x                                           # (N, d)
+def gaussian_smooth_batch(data_list: list, sigma: float = GS_SIGMA) -> list:
+    """Vectorised GS: processes all point clouds as a single (B, N, d) tensor
+    when shapes are uniform; falls back to per-sample loop otherwise."""
+    if not data_list:
+        return data_list
+    if all(x.shape == data_list[0].shape for x in data_list):
+        X     = torch.stack(data_list)
+        diff  = X.unsqueeze(2) - X.unsqueeze(1)
+        dist2 = (diff ** 2).sum(-1)
+        W     = torch.exp(-dist2 / (2 * sigma ** 2))
+        W     = W / W.sum(-1, keepdim=True)
+        return list((W @ X).unbind(0))
+    out = []
+    for x in data_list:
+        diff  = x.unsqueeze(0) - x.unsqueeze(1)
+        dist2 = (diff ** 2).sum(-1)
+        W     = torch.exp(-dist2 / (2 * sigma ** 2))
+        W     = W / W.sum(-1, keepdim=True)
+        out.append(W @ x)
+    return out
+
+# -------------------------------------------------------------------------
+# Geometry precomputation  (Fix 1: cache k-NN + GT basis for TFN models)
+# -------------------------------------------------------------------------
+
+def precompute_geometry(model_pv, class_name, data_list):
+    """
+    Pre-compute (rbf, gt_edge, nbr_idx) for every point cloud in data_list.
+    Returns a list of tuples, or None if the model is not a TFN-family model.
+    """
+    if class_name not in TFN_MODELS:
+        return None
+    try:
+        from gt_tfn_layer import knn_geometry
+        inner    = getattr(model_pv, '_inner', model_pv)
+        rbf_enc  = inner.rbf
+        gt_basis = inner.gt_basis
+        k        = inner.k_neighbors
+    except AttributeError:
+        return None
+
+    cache = []
+    with torch.no_grad():
+        for pc in tqdm(data_list, desc=f"Precomputing geometry ({class_name})",
+                       leave=False):
+            cache.append(knn_geometry(pc, rbf_enc, gt_basis, k))
+    return cache
 
 # -------------------------------------------------------------------------
 # Prepare a single point-cloud tensor for inference
 # -------------------------------------------------------------------------
 
-def prepare_single_input(mname, x_tensor, use_gs=False):
-    """
-    x_tensor : (N_pts, dim) FloatTensor on device
-    use_gs   : if True, apply Gaussian smoothing before any transformation
-    Returns the input expected by forward_single().
-    """
+def prepare_single_input(mname, x_tensor, use_gs=False, sigma=GS_SIGMA):
+    """Applies optional GS then returns the model-specific input format."""
     if use_gs:
-        x_tensor = gaussian_smooth_tensor(x_tensor, sigma=GS_SIGMA)
+        diff  = x_tensor.unsqueeze(0) - x_tensor.unsqueeze(1)
+        dist2 = (diff ** 2).sum(-1)
+        W     = torch.exp(-dist2 / (2 * sigma ** 2))
+        W     = W / W.sum(-1, keepdim=True)
+        x_tensor = W @ x_tensor
+
     arr = x_tensor.cpu().numpy()
 
-    if mname in ['TensorFieldNetwork', 'GTTensorFieldNetwork',
-                 'GTTensorFieldNetworkV2', 'HierarchicalGTTFN']:
+    if mname in TFN_MODELS:
         if arr.shape[1] == 2:
             arr = np.concatenate([arr, np.zeros((arr.shape[0], 1), dtype=arr.dtype)], axis=1)
         return torch.FloatTensor(arr).to(device)
 
     if mname == 'PointNet3D':
-        # needs 3 columns; pad if necessary
         if arr.shape[1] < 3:
             pad = np.zeros((arr.shape[0], 3 - arr.shape[1]), dtype=arr.dtype)
             arr = np.concatenate([arr, pad], axis=1)
@@ -230,30 +265,34 @@ def prepare_single_input(mname, x_tensor, use_gs=False):
         return torch.FloatTensor(mat).to(device)
 
     if mname == 'ScalarInputMLP':
-        mat = np.linalg.norm(arr[:, None, :] - arr[None, :, :], axis=-1)
-        scalar = np.array([[mat.mean()]], dtype=np.float32)
-        return torch.FloatTensor(scalar).to(device)
+        mat    = np.linalg.norm(arr[:, None, :] - arr[None, :, :], axis=-1)
+        return torch.FloatTensor([[mat.mean()]]).to(device)
 
     if mname == 'MultiInputModel':
-        mat = np.linalg.norm(arr[:, None, :] - arr[None, :, :], axis=-1)
+        mat    = np.linalg.norm(arr[:, None, :] - arr[None, :, :], axis=-1)
         scalar = torch.FloatTensor([[mat.mean()]]).to(device)
         return (torch.FloatTensor(arr).to(device), scalar)
 
-    # DenseRagged, PermopRagged – raw point cloud
     return x_tensor
 
 
-def forward_single(model, prepared_x, mname):
+def forward_single(model, prepared_x, mname, geom=None):
     """
-    Run model on a single prepared sample and return output tensor.
-    This is the ONLY place that calls model(); always returns a tensor.
+    Run model on one prepared sample.  When geom=(rbf, gt_edge, nbr_idx) is
+    provided for a TFN model, the cached geometry is used directly (Fix 1).
     """
     if mname == 'MultiInputModel':
         pc, scalar = prepared_x
         return model([pc], scalar)
-
     if mname == 'ScalarInputMLP':
-        return model(prepared_x)           # (1, output_dim)
+        return model(prepared_x)
+
+    # TFN fast path: bypass k-NN recomputation using cached geometry
+    if geom is not None and mname in TFN_MODELS:
+        rbf, gt_edge, nbr_idx = geom
+        inner = getattr(model, '_inner', model)
+        desc  = inner._encode_single(prepared_x, precomputed_geom=(rbf, gt_edge, nbr_idx))
+        return inner.rho(desc.unsqueeze(0))
 
     if mname in [
         'TensorFieldNetwork', 'GTTensorFieldNetwork', 'GTTensorFieldNetworkV2',
@@ -261,9 +300,8 @@ def forward_single(model, prepared_x, mname):
         'DistanceMatrixRaggedModel', 'ScalarDistanceDeepSet',
         'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel',
     ]:
-        return model([prepared_x])         # list-of-one convention
-
-    return model(prepared_x.unsqueeze(0))  # fallback
+        return model([prepared_x])
+    return model(prepared_x.unsqueeze(0))
 
 # -------------------------------------------------------------------------
 # DTW metric for baseline
@@ -319,9 +357,7 @@ for hidx in tqdm(range(len(homdim)), desc="Processing Gudhi PVs"):
           else Landscape(**PV_params[hidx]))
     PV_gudhi_hidx = PV.fit_transform(
         DiagramSelector(use=True).fit_transform(
-            [PD_gudhi[i][hidx] for i in range(N_sets)]
-        )
-    )
+            [PD_gudhi[i][hidx] for i in range(N_sets)]))
     if normalize:
         PV_gudhi_hidx /= np.max(PV_gudhi_hidx[:len(data_classif_train)])
     PV_gudhi.append(PV_gudhi_hidx)
@@ -354,36 +390,28 @@ starttimeG2 = time()
 noise_PV_params = []
 for hidx in tqdm(range(len(homdim)), desc="Processing noise PV params"):
     noise_pds_train = DiagramSelector(use=True).fit_transform(
-        [noise_PD_gudhi[i][hidx] for i in range(len(data_classif_train))]
-    )
+        [noise_PD_gudhi[i][hidx] for i in range(len(data_classif_train))])
     noise_vpdtr = np.vstack(noise_pds_train)
     if PV_type == 'PI':
         pers = pairwise_distances(
             np.hstack([noise_vpdtr[:, 0:1],
-                       noise_vpdtr[:, 1:2] - noise_vpdtr[:, 0:1]])[:200]
-        ).flatten()
+                       noise_vpdtr[:, 1:2] - noise_vpdtr[:, 0:1]])[:200]).flatten()
         pers = pers[np.argwhere(pers > 1e-5).ravel()]
         sigma = np.quantile(pers, .2)
-        im_bnds = [
-            np.quantile(noise_vpdtr[:, 0], 0.),
-            np.quantile(noise_vpdtr[:, 0], 1.),
-            np.quantile(noise_vpdtr[:, 1] - noise_vpdtr[:, 0], 0.),
-            np.quantile(noise_vpdtr[:, 1] - noise_vpdtr[:, 0], 1.),
-        ]
-        noise_PV_params.append(
-            {'bandwidth': sigma, 'weight': [1, 1],
-             'resolution': [PV_size, PV_size], 'im_range': im_bnds}
-        )
+        im_bnds = [np.quantile(noise_vpdtr[:, 0], 0.),
+                   np.quantile(noise_vpdtr[:, 0], 1.),
+                   np.quantile(noise_vpdtr[:, 1] - noise_vpdtr[:, 0], 0.),
+                   np.quantile(noise_vpdtr[:, 1] - noise_vpdtr[:, 0], 1.)]
+        noise_PV_params.append({'bandwidth': sigma, 'weight': [1, 1],
+                                 'resolution': [PV_size, PV_size], 'im_range': im_bnds})
     else:
         noise_pds_all = DiagramSelector(use=True).fit_transform(
-            [noise_PD_gudhi[i][hidx] for i in range(N_sets)]
-        )
+            [noise_PD_gudhi[i][hidx] for i in range(N_sets)])
         noise_vpd_all = np.vstack(noise_pds_all)
         sp_bnds = [np.quantile(noise_vpd_all[:, 0], 0.),
                    np.quantile(noise_vpd_all[:, 1], 1.)]
-        noise_PV_params.append(
-            {'num_landscapes': 5, 'resolution': PV_size, 'sample_range': sp_bnds}
-        )
+        noise_PV_params.append({'num_landscapes': 5, 'resolution': PV_size,
+                                 'sample_range': sp_bnds})
 
 starttimeG3 = time()
 noise_PV_gudhi = []
@@ -395,9 +423,7 @@ for hidx in tqdm(range(len(homdim)), desc="Computing noise PVs"):
           else Landscape(**noise_PV_params[hidx]))
     PV_gudhi_hidx = PV.fit_transform(
         DiagramSelector(use=True).fit_transform(
-            [PD_gudhi[i][hidx] for i in range(N_sets)]
-        )
-    )
+            [PD_gudhi[i][hidx] for i in range(N_sets)]))
     if normalize:
         PV_gudhi_hidx /= np.max(PV_gudhi_hidx[:len(data_classif_train)])
     noise_PV_gudhi.append(PV_gudhi_hidx)
@@ -415,9 +441,9 @@ for hidx in range(len(homdim)):
     for i in range(9):
         plt.subplot(3, 3, i + 1)
         if PV_type == 'PI':
-            plt.imshow(
-                np.flip(np.reshape(PV_gudhi[hidx][len(data_classif_train) + i],
-                                   [PV_size, PV_size]), 0), cmap='jet')
+            plt.imshow(np.flip(np.reshape(
+                PV_gudhi[hidx][len(data_classif_train) + i],
+                [PV_size, PV_size]), 0), cmap='jet')
             plt.colorbar()
         else:
             nls = PV_params[hidx]['num_landscapes']
@@ -434,9 +460,9 @@ for hidx in range(len(homdim)):
     for i in range(9):
         plt.subplot(3, 3, i + 1)
         if PV_type == 'PI':
-            plt.imshow(
-                np.flip(np.reshape(noise_PV_gudhi[hidx][len(data_classif_train) + i],
-                                   [PV_size, PV_size]), 0), cmap='jet')
+            plt.imshow(np.flip(np.reshape(
+                noise_PV_gudhi[hidx][len(data_classif_train) + i],
+                [PV_size, PV_size]), 0), cmap='jet')
             plt.colorbar()
         else:
             nls = noise_PV_params[hidx]['num_landscapes']
@@ -448,10 +474,10 @@ for hidx in range(len(homdim)):
     plt.close()
 
 # -------------------------------------------------------------------------
-# Encode labels (shared across all model evaluations)
+# Encode labels
 # -------------------------------------------------------------------------
 
-le = LabelEncoder().fit(np.concatenate([label_classif_train, label_classif_test]))
+le      = LabelEncoder().fit(np.concatenate([label_classif_train, label_classif_test]))
 y_train = le.transform(label_classif_train)
 y_test  = le.transform(label_classif_test)
 
@@ -460,20 +486,21 @@ y_test  = le.transform(label_classif_test)
 # -------------------------------------------------------------------------
 
 data_sets_torch = [torch.FloatTensor(data_sets[i]).to(device) for i in range(N_sets)]
-
 all_model_results = {}
 
 
 def load_and_eval(model_name, use_gs=False):
     """
-    Load checkpoint for model_name, run inference (with or without GS),
-    classify with XGBoost, and store result in all_model_results.
+    Load checkpoint, run optimised inference, classify with XGBoost.
+    All four speed fixes are applied:
+      Fix 1 – geometry precomputed once before the inference loop
+      Fix 2 – basis tensors moved to device (via GTTFNv2.to() override)
+      Fix 3 – torch.compile applied after load
+      Fix 4 – vectorised batched GS
     """
-    label = model_name  # checkpoint filename = model_name (already includes _GS if needed)
-    tag   = ' [GS]' if use_gs else ''
-
+    label = model_name
     print(f'\n{"="*60}')
-    print(f'Evaluating: {model_name}{tag}')
+    print(f'Evaluating: {label}')
     print(f'{"="*60}')
 
     # --- load checkpoint ---
@@ -489,28 +516,25 @@ def load_and_eval(model_name, use_gs=False):
 
     checkpoint = torch.load(ckpt_path, map_location=device)
     if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-        model_state  = checkpoint['model_state_dict']
-        output_dim   = checkpoint.get('output_dim')
-        ckpt_type    = checkpoint.get('model_type', model_name)
-        ckpt_dim     = checkpoint.get('dim', dim)
-        ckpt_npts    = checkpoint.get('num_points', None)
-        ckpt_use_gs  = checkpoint.get('use_gs', use_gs)
-        ckpt_sigma   = checkpoint.get('gs_sigma', GS_SIGMA)
+        model_state = checkpoint['model_state_dict']
+        output_dim  = checkpoint.get('output_dim')
+        ckpt_type   = checkpoint.get('model_type', model_name)
+        ckpt_dim    = checkpoint.get('dim', dim)
+        ckpt_npts   = checkpoint.get('num_points', None)
+        ckpt_use_gs = checkpoint.get('use_gs', use_gs)
+        ckpt_sigma  = checkpoint.get('gs_sigma', GS_SIGMA)
     else:
-        model_state  = checkpoint
-        output_dim   = None
-        ckpt_type    = model_name
-        ckpt_dim     = dim
-        ckpt_npts    = None
-        ckpt_use_gs  = use_gs
-        ckpt_sigma   = GS_SIGMA
+        model_state = checkpoint
+        output_dim  = None
+        ckpt_type   = model_name
+        ckpt_dim    = dim
+        ckpt_npts   = None
+        ckpt_use_gs = use_gs
+        ckpt_sigma  = GS_SIGMA
 
-    # Resolve class_name from ckpt_type; fall back to key inspection only for
-    # legacy checkpoints (old TFN: keys like "layers.0.W00...")
-    _state_keys = set(model_state.keys())
-    _is_old_tfn = any(k.startswith('layers.') and '.W0' in k for k in _state_keys)
-
-    # Strip _GS suffix from ckpt_type to get the base class name
+    # Resolve class name (trust ckpt_type; detect legacy TFN by key pattern)
+    _state_keys    = set(model_state.keys())
+    _is_old_tfn    = any(k.startswith('layers.') and '.W0' in k for k in _state_keys)
     base_ckpt_type = ckpt_type.replace('_GS', '')
 
     if _is_old_tfn:
@@ -520,16 +544,13 @@ def load_and_eval(model_name, use_gs=False):
     elif base_ckpt_type == 'TFNTensorFieldNetwork':
         class_name = 'TFNTensorFieldNetwork'
     else:
-        # Fuzzy: strip _GS from model_name then search
         base_model_name = model_name.replace('_GS', '')
-        inferred = None
-        for candidate in MODEL_NAMES:
-            if candidate.lower() in base_model_name.lower():
-                inferred = candidate
-                break
+        inferred = next((c for c in MODEL_NAMES
+                         if c.lower() in base_model_name.lower()), None)
         if inferred is None:
-            print(f'  SKIP: cannot infer class for "{model_name}" (ckpt_type="{ckpt_type}")')
-            all_model_results[label] = {'error': 'cannot infer model class', 'use_gs': use_gs}
+            print(f'  SKIP: cannot infer class for "{model_name}"')
+            all_model_results[label] = {'error': 'cannot infer model class',
+                                        'use_gs': use_gs}
             return
         class_name = inferred
         print(f'  Inferred class: {class_name}')
@@ -537,8 +558,10 @@ def load_and_eval(model_name, use_gs=False):
     if output_dim is None:
         output_dim = sum(PVs_train[hidx].shape[1] for hidx in range(len(homdim)))
 
-    print(f'  class={class_name}  ckpt_type={ckpt_type}  out={output_dim}  dim={ckpt_dim}  GS={ckpt_use_gs}')
+    print(f'  class={class_name}  ckpt_type={ckpt_type}'
+          f'  out={output_dim}  dim={ckpt_dim}  GS={ckpt_use_gs}')
 
+    # --- instantiate and load weights ---
     try:
         if class_name == 'TFNTensorFieldNetwork':
             from models import TFNTensorFieldNetwork
@@ -554,13 +577,13 @@ def load_and_eval(model_name, use_gs=False):
             _w0_key = 'ragged_layers.0.weight_param'
             if _w0_key in model_state:
                 _w0_shape = model_state[_w0_key].shape
-                _dummy_in = torch.zeros(1, _w0_shape[0])
-                model_PV.ragged_layers[0]([_dummy_in])
+                model_PV.ragged_layers[0]([torch.zeros(1, _w0_shape[0])])
             model_PV.load_state_dict(model_state)
         else:
             model_PV = build_analysis_model(class_name, output_dim, n=ckpt_dim)
             model_PV.load_state_dict(model_state)
 
+        # Fix 2: move ALL tensors (including plain-attribute CG/GT tensors) to device
         model_PV = model_PV.to(device)
         model_PV.eval()
     except Exception as e:
@@ -568,28 +591,64 @@ def load_and_eval(model_name, use_gs=False):
         all_model_results[label] = {'error': str(e), 'use_gs': use_gs}
         return
 
-    # --- inference (apply GS from checkpoint metadata) ---
+    # Fix 3: torch.compile for faster kernel execution (PyTorch >= 2.0, CUDA)
+    compiled_model = model_PV
+    if hasattr(torch, 'compile') and device.type == 'cuda':
+        try:
+            compiled_model = torch.compile(model_PV, mode='reduce-overhead')
+            print(f'  torch.compile enabled')
+        except Exception as e:
+            print(f'  torch.compile skipped: {e}')
+
+    # Fix 1: precompute k-NN + GT-basis geometry for TFN models (once, not per sample)
     effective_gs    = ckpt_use_gs
     effective_sigma = ckpt_sigma
+
+    # Apply GS to the full dataset before precomputing geometry (GS first, then geometry)
+    if effective_gs:
+        inference_data = gaussian_smooth_batch(data_sets_torch, sigma=effective_sigma)
+        # Pad 2D→3D after smoothing for TFN models
+        if class_name in TFN_MODELS:
+            inference_data = [
+                (torch.cat([x, x.new_zeros(x.shape[0], 1)], dim=1)
+                 if x.shape[1] == 2 else x)
+                for x in inference_data
+            ]
+    else:
+        inference_data = data_sets_torch
+
+    geom_cache = precompute_geometry(model_PV, class_name, inference_data)
+
+    # --- inference loop ---
     starttimeNN = time()
     PV_NN_list  = []
     with torch.no_grad():
-        for x_tensor in tqdm(data_sets_torch, desc=f"Predicting ({label})"):
+        for idx, x_tensor in enumerate(
+                tqdm(inference_data, desc=f"Predicting ({label})")):
             try:
-                prepared = prepare_single_input(class_name, x_tensor,
-                                                use_gs=effective_gs)
-                out = forward_single(model_PV, prepared, class_name)
-                out_np = out.cpu().numpy() if isinstance(out, torch.Tensor) else np.asarray(out)
+                # For TFN models inference_data is already padded; for others
+                # prepare_single_input handles the format (GS already applied above)
+                if class_name in TFN_MODELS:
+                    prepared = x_tensor   # already padded
+                else:
+                    # GS was applied at batch level; pass use_gs=False here
+                    prepared = prepare_single_input(class_name, x_tensor,
+                                                    use_gs=False)
+                geom = geom_cache[idx] if geom_cache is not None else None
+                out  = forward_single(compiled_model, prepared, class_name, geom=geom)
+                out_np = out.cpu().numpy() if isinstance(out, torch.Tensor) \
+                         else np.asarray(out)
                 if out_np.ndim > 1 and out_np.shape[0] == 1:
                     out_np = out_np[0]
                 PV_NN_list.append(out_np)
             except Exception as e:
-                print(f'  WARNING: inference failed – {e}')
+                print(f'  WARNING: inference failed on sample {idx} – {e}')
                 PV_NN_list.append(np.zeros(output_dim, dtype=np.float32))
 
     PV_NN  = np.vstack(PV_NN_list)
     timeNN = time() - starttimeNN
-    print(f"  NN time: {timeNN:.2f}s  (Gudhi: {timeG:.2f}s  noise: {timeGn:.2f}s)")
+    print(f"  NN time: {timeNN:.2f}s  "
+          f"(Gudhi clean: {timeG:.2f}s  noise: {timeGn:.2f}s)")
 
     # --- plot predicted PVs ---
     for hidx in range(len(homdim)):
@@ -607,10 +666,9 @@ def load_and_eval(model_name, use_gs=False):
                 for lidx in range(nls):
                     start = hidx * PV_size * nls + lidx * PV_size
                     plt.plot(row[start:start + PV_size])
-        gs_tag = '_GS' if effective_gs else ''
         plt.suptitle(f"Test predicted PV hdim {hdim} ({label})")
-        plt.savefig(
-            f"results/{dataset_test_name}_{label}_predicted_PVs_h{hdim}_on_test.png")
+        plt.savefig(f"results/{dataset_test_name}_{label}"
+                    f"_predicted_PVs_h{hdim}_on_test.png")
         plt.close()
 
     # --- XGBoost classification ---
@@ -633,7 +691,7 @@ def load_and_eval(model_name, use_gs=False):
         all_model_results[label] = {'error': str(e), 'use_gs': effective_gs}
 
 
-# Run evaluation: for each base model, evaluate raw then GS checkpoint
+# Run evaluation: raw then GS for each model
 for base_name in models_to_test:
     load_and_eval(base_name, use_gs=False)
 
@@ -655,7 +713,8 @@ model_classif_gudhi.fit(PV_train_gudhi, y_train)
 train_acc_gudhi = model_classif_gudhi.score(PV_train_gudhi, y_train)
 test_acc_gudhi  = model_classif_gudhi.score(PV_test_gudhi,  y_test)
 XG2 = time()
-print(f"\nGudhi (XGB)       train={100*train_acc_gudhi:.2f}%  test={100*test_acc_gudhi:.2f}%  t={XG2-XG1:.2f}s")
+print(f"\nGudhi (XGB)       train={100*train_acc_gudhi:.2f}%  "
+      f"test={100*test_acc_gudhi:.2f}%  t={XG2-XG1:.2f}s")
 
 XGN1 = time()
 model_classif_noise = XGBClassifier(eval_metric='logloss', use_label_encoder=False)
@@ -663,7 +722,8 @@ model_classif_noise.fit(noise_PV_train_gudhi, y_train)
 train_acc_noise = model_classif_noise.score(noise_PV_train_gudhi, y_train)
 test_acc_noise  = model_classif_noise.score(noise_PV_test_gudhi,  y_test)
 XGN2 = time()
-print(f"Gudhi-noise (XGB) train={100*train_acc_noise:.2f}%  test={100*test_acc_noise:.2f}%  t={XGN2-XGN1:.2f}s")
+print(f"Gudhi-noise (XGB) train={100*train_acc_noise:.2f}%  "
+      f"test={100*test_acc_noise:.2f}%  t={XGN2-XGN1:.2f}s")
 
 XB11 = time()
 model_baseline_dtw = KNeighborsClassifier(metric=DTW)
@@ -671,7 +731,8 @@ model_baseline_dtw.fit(ts_classif_train, y_train)
 train_acc_dtw = model_baseline_dtw.score(ts_classif_train, y_train)
 test_acc_dtw  = model_baseline_dtw.score(ts_classif_test,  y_test)
 XB12 = time()
-print(f"DTW k-NN          train={100*train_acc_dtw:.2f}%  test={100*test_acc_dtw:.2f}%  t={XB12-XB11:.2f}s")
+print(f"DTW k-NN          train={100*train_acc_dtw:.2f}%  "
+      f"test={100*test_acc_dtw:.2f}%  t={XB12-XB11:.2f}s")
 
 XB21 = time()
 model_baseline_euc = KNeighborsClassifier(metric='euclidean')
@@ -679,7 +740,8 @@ model_baseline_euc.fit(ts_classif_train, y_train)
 train_acc_euc = model_baseline_euc.score(ts_classif_train, y_train)
 test_acc_euc  = model_baseline_euc.score(ts_classif_test,  y_test)
 XB22 = time()
-print(f"Euclidean k-NN    train={100*train_acc_euc:.2f}%  test={100*test_acc_euc:.2f}%  t={XB22-XB21:.2f}s")
+print(f"Euclidean k-NN    train={100*train_acc_euc:.2f}%  "
+      f"test={100*test_acc_euc:.2f}%  t={XB22-XB21:.2f}s")
 
 # -------------------------------------------------------------------------
 # Final summary — raw vs GS side by side
@@ -707,7 +769,11 @@ for base_name in models_to_test:
                   f" {res['time_nn']:>8.2f}s")
 
 print('-'*75)
-print(f"  {'Gudhi (clean)':<30} {'---':>3} {100*train_acc_gudhi:>6.2f}% {100*test_acc_gudhi:>6.2f}%  {XG2-XG1:>7.2f}s")
-print(f"  {'Gudhi (noise)':<30} {'---':>3} {100*train_acc_noise:>6.2f}% {100*test_acc_noise:>6.2f}%  {XGN2-XGN1:>7.2f}s")
-print(f"  {'DTW k-NN':<30} {'---':>3} {100*train_acc_dtw:>6.2f}% {100*test_acc_dtw:>6.2f}%  {XB12-XB11:>7.2f}s")
-print(f"  {'Euclidean k-NN':<30} {'---':>3} {100*train_acc_euc:>6.2f}% {100*test_acc_euc:>6.2f}%  {XB22-XB21:>7.2f}s")
+print(f"  {'Gudhi (clean)':<30} {'---':>3} {100*train_acc_gudhi:>6.2f}%"
+      f" {100*test_acc_gudhi:>6.2f}%  {XG2-XG1:>7.2f}s")
+print(f"  {'Gudhi (noise)':<30} {'---':>3} {100*train_acc_noise:>6.2f}%"
+      f" {100*test_acc_noise:>6.2f}%  {XGN2-XGN1:>7.2f}s")
+print(f"  {'DTW k-NN':<30} {'---':>3} {100*train_acc_dtw:>6.2f}%"
+      f" {100*test_acc_dtw:>6.2f}%  {XB12-XB11:>7.2f}s")
+print(f"  {'Euclidean k-NN':<30} {'---':>3} {100*train_acc_euc:>6.2f}%"
+      f" {100*test_acc_euc:>6.2f}%  {XB22-XB21:>7.2f}s")

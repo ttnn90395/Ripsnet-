@@ -30,6 +30,12 @@ MODEL_NAMES = [
     'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
 ]
 
+# TFN-family models that use knn_geometry internally
+TFN_MODELS = {
+    'TensorFieldNetwork', 'GTTensorFieldNetwork',
+    'GTTensorFieldNetworkV2', 'HierarchicalGTTFN',
+}
+
 os.makedirs('models', exist_ok=True)
 os.makedirs('results', exist_ok=True)
 
@@ -79,34 +85,40 @@ PVs_train_torch = [torch.FloatTensor(PVs_train[hidx]).to(device) for hidx in ran
 PVs_test_torch  = [torch.FloatTensor(PVs_test[hidx]).to(device)  for hidx in range(len(homdim))]
 
 # -------------------------------------------------------------------------
-# Gaussian smoothing
+# Gaussian smoothing  (Fix 4: batched vectorised kernel)
 # -------------------------------------------------------------------------
 
-def gaussian_smooth_pointcloud(pc: torch.Tensor, sigma: float = 0.5) -> torch.Tensor:
+GS_SIGMA = 0.5
+
+def gaussian_smooth_batch(data_list: list, sigma: float = GS_SIGMA) -> list:
     """
-    Replace each point with a weighted average of all points, where weights
-    are Gaussian in pairwise distance.  This smooths the point cloud without
-    changing its size or ambient dimension.
-
-    pc    : (N, d) float tensor
-    sigma : bandwidth (in the same units as the point coordinates)
-    returns: (N, d) smoothed point cloud
+    Vectorised Gaussian smoothing.  When all point clouds have the same shape
+    (true for UCR data) the whole batch is processed as a single (B, N, d)
+    tensor — no Python loop at inference time.  Falls back to per-sample
+    processing for ragged batches.
     """
-    # Pairwise squared distances  (N, N)
-    diff  = pc.unsqueeze(0) - pc.unsqueeze(1)          # (N, N, d)
-    dist2 = (diff ** 2).sum(dim=-1)                    # (N, N)
-    W     = torch.exp(-dist2 / (2 * sigma ** 2))       # (N, N)
-    W     = W / W.sum(dim=-1, keepdim=True)            # row-normalise
-    return W @ pc                                       # (N, d)
-
-
-def gaussian_smooth_batch(data_list: list, sigma: float = 0.5) -> list:
-    """Apply gaussian_smooth_pointcloud to every tensor in data_list."""
-    return [gaussian_smooth_pointcloud(x, sigma=sigma) for x in data_list]
+    if not data_list:
+        return data_list
+    if all(x.shape == data_list[0].shape for x in data_list):
+        X     = torch.stack(data_list)                     # (B, N, d)
+        diff  = X.unsqueeze(2) - X.unsqueeze(1)           # (B, N, N, d)
+        dist2 = (diff ** 2).sum(-1)                        # (B, N, N)
+        W     = torch.exp(-dist2 / (2 * sigma ** 2))
+        W     = W / W.sum(-1, keepdim=True)
+        return list((W @ X).unbind(0))
+    # Ragged fallback
+    out = []
+    for x in data_list:
+        diff  = x.unsqueeze(0) - x.unsqueeze(1)
+        dist2 = (diff ** 2).sum(-1)
+        W     = torch.exp(-dist2 / (2 * sigma ** 2))
+        W     = W / W.sum(-1, keepdim=True)
+        out.append(W @ x)
+    return out
 
 
 # -------------------------------------------------------------------------
-# Device utility
+# Device utility  (Fix 2 backup: move plain-attribute tensors to device)
 # -------------------------------------------------------------------------
 
 def deep_to(module: nn.Module, target_device) -> nn.Module:
@@ -125,30 +137,66 @@ def deep_to(module: nn.Module, target_device) -> nn.Module:
                         attr_val[i] = v.to(target_device)
     return module
 
+
+# -------------------------------------------------------------------------
+# Geometry precomputation  (Fix 1: compute k-NN + GT basis once per dataset)
+# -------------------------------------------------------------------------
+
+def precompute_geometry(model, data_list, mname):
+    """
+    For TFN-family models, precompute the k-NN graph and GT-basis edge
+    features for every point cloud in data_list.  Returns a list of
+    (rbf, gt_edge, nbr_idx) tuples that can be passed directly to
+    _encode_single, bypassing the expensive per-call recomputation.
+
+    For non-TFN models returns None (caller uses the normal path).
+    """
+    if mname not in TFN_MODELS:
+        return None
+
+    try:
+        from gt_tfn_layer import knn_geometry
+        # Access the inner GTTFNv2 for TensorFieldNetwork wrapper
+        inner = getattr(model, '_inner', model)
+        rbf_enc  = inner.rbf
+        gt_basis = inner.gt_basis
+        k        = inner.k_neighbors
+    except AttributeError:
+        return None
+
+    cache = []
+    with torch.no_grad():
+        for pc in tqdm(data_list, desc="Precomputing geometry", leave=False):
+            rbf, gt_edge, nbr_idx = knn_geometry(pc, rbf_enc, gt_basis, k)
+            cache.append((rbf, gt_edge, nbr_idx))
+    return cache
+
+
 # -------------------------------------------------------------------------
 # Data preparation helpers
 # -------------------------------------------------------------------------
 
-def prepare_data_for_model(mname, data_list, use_gs=False, gs_sigma=0.5):
+def _pad_to_3d(data_list):
+    """Pad 2-D point clouds to 3-D for TFN models."""
+    out = []
+    for x in data_list:
+        arr = x.cpu().numpy() if isinstance(x, torch.Tensor) else np.array(x)
+        if arr.shape[1] == 2:
+            arr = np.concatenate([arr, np.zeros((len(arr), 1), dtype=arr.dtype)], axis=1)
+        out.append(torch.FloatTensor(arr).to(device))
+    return out
+
+
+def prepare_data_for_model(mname, data_list, use_gs=False, gs_sigma=GS_SIGMA):
     """
     Return a list of tensors shaped correctly for the given model.
-    If use_gs=True, Gaussian smoothing is applied to the raw point clouds
-    before any model-specific transformation.
+    Gaussian smoothing (Fix 4) is applied first when use_gs=True.
     """
-    # Gaussian smoothing operates on raw point-cloud tensors (not on distance
-    # matrices or scalar summaries), so it must come first.
     if use_gs:
         data_list = gaussian_smooth_batch(data_list, sigma=gs_sigma)
 
-    if mname in ['TensorFieldNetwork', 'GTTensorFieldNetwork',
-                 'GTTensorFieldNetworkV2', 'HierarchicalGTTFN']:
-        out = []
-        for x in data_list:
-            arr = x.cpu().numpy() if isinstance(x, torch.Tensor) else np.array(x)
-            if arr.shape[1] == 2:
-                arr = np.concatenate([arr, np.zeros((len(arr), 1), dtype=arr.dtype)], axis=1)
-            out.append(torch.FloatTensor(arr).to(device))
-        return out
+    if mname in TFN_MODELS:
+        return _pad_to_3d(data_list)
 
     if mname in ['PointNetTutorial', 'PointNet3D']:
         ncols = 3 if mname == 'PointNet3D' else 2
@@ -174,8 +222,7 @@ def prepare_data_for_model(mname, data_list, use_gs=False, gs_sigma=0.5):
         for x in data_list:
             arr = x.cpu().numpy() if isinstance(x, torch.Tensor) else np.array(x)
             mat = np.linalg.norm(arr[:, None, :] - arr[None, :, :], axis=-1)
-            scalar = np.array([[mat.mean()]], dtype=np.float32)
-            out.append(torch.FloatTensor(scalar).to(device))
+            out.append(torch.FloatTensor([[mat.mean()]]).to(device))
         return out
 
     if mname == 'MultiInputModel':
@@ -226,12 +273,28 @@ def build_model_by_name(name, n=None):
 # Per-sample forward pass
 # -------------------------------------------------------------------------
 
-def forward_single(model, x, mname):
+def forward_single(model, x, mname, geom=None):
+    """
+    Run model on a single prepared sample x; return output tensor.
+
+    geom : optional (rbf, gt_edge, nbr_idx) tuple precomputed by
+           precompute_geometry().  When provided the TFN inner model's
+           _encode_single is called directly with the cached geometry,
+           skipping the expensive k-NN recomputation (Fix 1).
+    """
     if mname == 'MultiInputModel':
         pc, scalar = x
         return model([pc], scalar)
     if mname == 'ScalarInputMLP':
         return model(x)
+
+    # TFN fast path: use precomputed geometry
+    if geom is not None and mname in TFN_MODELS:
+        rbf, gt_edge, nbr_idx = geom
+        inner = getattr(model, '_inner', model)
+        desc  = inner._encode_single(x, precomputed_geom=(rbf, gt_edge, nbr_idx))
+        return inner.rho(desc.unsqueeze(0))
+
     if mname in [
         'TensorFieldNetwork', 'GTTensorFieldNetwork', 'GTTensorFieldNetworkV2',
         'HierarchicalGTTFN', 'PointNet3D', 'PointNetTutorial',
@@ -250,12 +313,13 @@ def get_target(targets, i):
     return torch.FloatTensor(targets[i:i + 1]).to(device)
 
 
-def train_epoch(model, data, targets, optimizer, criterion, mname):
+def train_epoch(model, data, targets, optimizer, criterion, mname, geom_cache=None):
     model.train()
     total_loss = 0.0
     for i in range(len(data)):
         optimizer.zero_grad()
-        output = forward_single(model, data[i], mname)
+        geom = geom_cache[i] if geom_cache is not None else None
+        output = forward_single(model, data[i], mname, geom=geom)
         loss = criterion(output, get_target(targets, i))
         loss.backward()
         optimizer.step()
@@ -263,37 +327,53 @@ def train_epoch(model, data, targets, optimizer, criterion, mname):
     return total_loss / len(data)
 
 
-def evaluate(model, data, targets, criterion, mname):
+def evaluate(model, data, targets, criterion, mname, geom_cache=None):
     model.eval()
     total_loss = 0.0
     with torch.no_grad():
         for i in range(len(data)):
-            output = forward_single(model, data[i], mname)
+            geom = geom_cache[i] if geom_cache is not None else None
+            output = forward_single(model, data[i], mname, geom=geom)
             loss = criterion(output, get_target(targets, i))
             total_loss += loss.item()
     return total_loss / len(data)
 
 
 # -------------------------------------------------------------------------
-# Train one model variant (raw or GS)
+# Train one model variant (raw or GS) with all speed fixes applied
 # -------------------------------------------------------------------------
 
-def train_single_model(mname, use_gs=False, gs_sigma=0.5):
-    tag      = '_GS' if use_gs else ''
-    label    = f'{mname}{tag}'
-    print(f'\n=== Training {label} (gaussian_smooth={use_gs}) ===')
+def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
+    tag   = '_GS' if use_gs else ''
+    label = f'{mname}{tag}'
+    print(f'\n=== Training {label} (gs={use_gs}) ===')
 
+    # Build and move to device (Fix 2: deep_to moves plain-attribute tensors)
     m = deep_to(build_model_by_name(mname, n=dim), device)
-    train_data_model = prepare_data_for_model(mname, data_train_torch,
-                                              use_gs=use_gs, gs_sigma=gs_sigma)
-    test_data_model  = prepare_data_for_model(mname, data_test_torch,
-                                              use_gs=use_gs, gs_sigma=gs_sigma)
 
-    # Warm-up pass so lazily-created params exist before optimizer
+    # Prepare data (Fix 4: batched GS)
+    train_data = prepare_data_for_model(mname, data_train_torch,
+                                        use_gs=use_gs, gs_sigma=gs_sigma)
+    test_data  = prepare_data_for_model(mname, data_test_torch,
+                                        use_gs=use_gs, gs_sigma=gs_sigma)
+
+    # Warm-up: trigger lazy param init before building optimizer
     m.train()
     with torch.no_grad():
-        _ = forward_single(m, train_data_model[0], mname)
+        forward_single(m, train_data[0], mname)
     m = deep_to(m, device)
+
+    # Fix 1: precompute geometry for TFN models
+    geom_train = precompute_geometry(m, train_data, mname)
+    geom_test  = precompute_geometry(m, test_data,  mname)
+
+    # Fix 3: torch.compile (PyTorch >= 2.0, CUDA)
+    if hasattr(torch, 'compile') and device.type == 'cuda':
+        try:
+            m = torch.compile(m, mode='reduce-overhead')
+            print(f'  torch.compile enabled for {label}')
+        except Exception as e:
+            print(f'  torch.compile skipped: {e}')
 
     optimizer     = optimizer_class(m.parameters(), lr=optim_lr)
     criterion     = nn.MSELoss()
@@ -301,9 +381,10 @@ def train_single_model(mname, use_gs=False, gs_sigma=0.5):
     targets_test  = np.hstack(PVs_test)
 
     for epoch in tqdm(range(num_epochs), desc=f"Epochs ({label})"):
-        tr_loss  = train_epoch(m, train_data_model, targets_train,
-                               optimizer, criterion, mname)
-        val_loss = evaluate(m, test_data_model, targets_test, criterion, mname)
+        tr_loss  = train_epoch(m, train_data, targets_train,
+                               optimizer, criterion, mname, geom_train)
+        val_loss = evaluate(m, test_data, targets_test,
+                            criterion, mname, geom_test)
         if (epoch + 1) % max(1, num_epochs // 10) == 0 or epoch == 0:
             print(f'  [{label}] epoch {epoch+1}/{num_epochs}'
                   f'  train={tr_loss:.4f}  val={val_loss:.4f}')
@@ -313,8 +394,10 @@ def train_single_model(mname, use_gs=False, gs_sigma=0.5):
         extra['num_points'] = m._phi_inp_dim
 
     ckpt_path = f'models/{label}.pth'
+    # Unwrap compiled model for saving
+    state_dict = (m._orig_mod if hasattr(m, '_orig_mod') else m).state_dict()
     torch.save({
-        'model_state_dict': m.state_dict(),
+        'model_state_dict': state_dict,
         'model_type':       mname,
         'output_dim':       output_dim,
         'homdim':           homdim,
@@ -331,16 +414,12 @@ def train_single_model(mname, use_gs=False, gs_sigma=0.5):
 # Entry point
 # -------------------------------------------------------------------------
 
-GS_SIGMA = 0.5  # can be overridden by env var if needed
-
 def run_both(mname):
-    """Train raw + GS variants of a single model, return both result dicts."""
     res = {}
     for use_gs in [False, True]:
         tag = '_GS' if use_gs else ''
         try:
-            res[mname + tag] = train_single_model(mname, use_gs=use_gs,
-                                                   gs_sigma=GS_SIGMA)
+            res[mname + tag] = train_single_model(mname, use_gs=use_gs)
         except Exception as e:
             print(f'ERROR training {mname}{tag}: {e}')
             res[mname + tag] = {'error': str(e)}
