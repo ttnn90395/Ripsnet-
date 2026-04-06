@@ -404,6 +404,9 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
         'dim':              dim,
         'use_gs':           use_gs,
         'gs_sigma':         gs_sigma,
+        # Architecture metadata — needed to reconstruct exact model at load time
+        'activation':       'gelu',   # default used by build_model_by_name
+        'norm':             'bn',     # default used by build_model_by_name
         **extra,
     }, ckpt_path)
     print(f'  Saved → {ckpt_path}')

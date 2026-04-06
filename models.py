@@ -70,15 +70,33 @@ from gt_improvements import (
 # ---------------------------------------------------------------------------
 
 def _act(name: str = 'gelu') -> nn.Module:
-    """Return an activation module by name.  Default is GELU."""
+    """
+    Return an activation module by name.  Default is GELU.
+
+    Hidden-layer activations (smooth, no dead neurons):
+      'gelu'    nn.GELU()     — default, recommended
+      'relu'    nn.ReLU()     — legacy; useful for exact checkpoint compat
+      'silu'    nn.SiLU()     — smooth, strong in equivariant nets
+      'mish'    nn.Mish()     — very smooth, slightly slower
+      'elu'     nn.ELU()      — negative saturation, small nets
+
+    Output activations (for final layer):
+      'sigmoid' nn.Sigmoid()  — bounded [0,1], persistence vectors
+      'tanh'    nn.Tanh()     — bounded [-1,1]
+      'softmax' nn.Softmax()  — probability simplex (rarely needed here)
+    """
     name = name.lower()
-    if name == 'gelu':  return nn.GELU()
-    if name == 'relu':  return nn.ReLU()
-    if name == 'silu':  return nn.SiLU()
-    if name == 'mish':  return nn.Mish()
-    if name == 'elu':   return nn.ELU()
+    if name == 'gelu':    return nn.GELU()
+    if name == 'relu':    return nn.ReLU()
+    if name == 'silu':    return nn.SiLU()
+    if name == 'mish':    return nn.Mish()
+    if name == 'elu':     return nn.ELU()
+    if name == 'sigmoid': return nn.Sigmoid()
+    if name == 'tanh':    return nn.Tanh()
+    if name == 'softmax': return nn.Softmax(dim=-1)
     raise ValueError(f"Unknown activation '{name}'. "
-                     f"Choose from: gelu, relu, silu, mish, elu")
+                     f"Choose from: gelu, relu, silu, mish, elu, "
+                     f"sigmoid, tanh, softmax")
 
 
 # ---------------------------------------------------------------------------
@@ -284,18 +302,18 @@ class TensorFieldNetwork(nn.Module):
 class PointNet3D(nn.Module):
     """
     Permutation-invariant Deep-Sets baseline (NOT rotation-equivariant).
-    Uses GELU + BatchNorm in both phi and rho MLPs.
+    Uses GELU + BatchNorm in both phi and rho MLPs by default.
     forward(batch: List[Tensor(N_i, 3)]) → Tensor(B, output_dim)
     """
 
     def __init__(self, output_dim,
                  phi_dims=(64, 128, 256), rho_dims=(256, 128),
-                 activation: str = 'gelu'):
+                 activation: str = 'gelu', norm: str = 'bn'):
         super().__init__()
         self.phi_layers = _build_mlp([3] + list(phi_dims),
-                                     activation=activation, norm='bn')
+                                     activation=activation, norm=norm)
         self.rho_layers = _build_mlp([phi_dims[-1]] + list(rho_dims) + [output_dim],
-                                     activation=activation, norm='bn',
+                                     activation=activation, norm=norm,
                                      final_activation=None)
 
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
@@ -335,12 +353,12 @@ class ScalarDistanceDeepSet(nn.Module):
 
     def __init__(self, output_dim,
                  phi_dims=(64, 128), rho_dims=(256, 128),
-                 activation: str = 'gelu'):
+                 activation: str = 'gelu', norm: str = 'bn'):
         super().__init__()
         self.phi_layers = _build_mlp([1] + list(phi_dims),
-                                     activation=activation, norm='bn')
+                                     activation=activation, norm=norm)
         self.rho_layers = _build_mlp([phi_dims[-1]] + list(rho_dims) + [output_dim],
-                                     activation=activation, norm='bn',
+                                     activation=activation, norm=norm,
                                      final_activation=None)
 
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
@@ -369,12 +387,12 @@ class PointNetTutorial(nn.Module):
 
     def __init__(self, output_dim,
                  phi_dims=(64, 128, 256), rho_dims=(256, 128),
-                 activation: str = 'gelu'):
+                 activation: str = 'gelu', norm: str = 'bn'):
         super().__init__()
         self.phi_layers = _build_mlp([2] + list(phi_dims),
-                                     activation=activation, norm='bn')
+                                     activation=activation, norm=norm)
         self.rho_layers = _build_mlp([phi_dims[-1]] + list(rho_dims) + [output_dim],
-                                     activation=activation, norm='bn',
+                                     activation=activation, norm=norm,
                                      final_activation=None)
 
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
@@ -402,10 +420,10 @@ class ScalarInputMLP(nn.Module):
 
     def __init__(self, output_dim,
                  hidden_dims=(256, 512, 1024),
-                 activation: str = 'gelu'):
+                 activation: str = 'gelu', norm: str = 'bn'):
         super().__init__()
         self.mlp = _build_mlp([1] + list(hidden_dims) + [output_dim],
-                               activation=activation, norm='bn',
+                               activation=activation, norm=norm,
                                final_activation='sigmoid')
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -427,21 +445,21 @@ class MultiInputModel(nn.Module):
     def __init__(self, target_output_dim, scalar_input_dim,
                  pointnet_intermediate_dim: int = 128,
                  scalar_mlp_intermediate_dim: int = 128,
-                 activation: str = 'gelu'):
+                 activation: str = 'gelu', norm: str = 'bn'):
         super().__init__()
         self.pointnet_branch = PointNetTutorial(
             output_dim=pointnet_intermediate_dim,
             phi_dims=(64, 128, 256), rho_dims=(256, 128),
-            activation=activation,
+            activation=activation, norm=norm,
         )
         self.scalar_branch = _build_mlp(
             [scalar_input_dim, 512, 256, scalar_mlp_intermediate_dim],
-            activation=activation, norm='bn',
+            activation=activation, norm=norm,
         )
         combined = pointnet_intermediate_dim + scalar_mlp_intermediate_dim
         self.final_mlp = _build_mlp(
             [combined, 256, 128, target_output_dim],
-            activation=activation, norm='bn',
+            activation=activation, norm=norm,
             final_activation='sigmoid',
         )
 
@@ -568,12 +586,13 @@ class DistanceMatrixRaggedModel(nn.Module):
 
     def __init__(self, output_dim, num_points=None,
                  phi_dim: int = 128, rho_hidden=(256, 128),
-                 activation: str = 'gelu'):
+                 activation: str = 'gelu', norm: str = 'bn'):
         super().__init__()
         self.output_dim   = output_dim
         self.num_points   = num_points
         self.phi_dim      = phi_dim
         self.activation   = activation
+        self.norm         = norm
         self._phi_inp_dim = None
 
         if num_points and num_points > 0:
@@ -583,13 +602,13 @@ class DistanceMatrixRaggedModel(nn.Module):
             self._phi_layers = None
 
         self.rho = _build_mlp([phi_dim] + list(rho_hidden) + [output_dim],
-                               activation=activation, norm='bn',
+                               activation=activation, norm=norm,
                                final_activation=None)
 
     def _make_phi(self, inp: int) -> nn.Sequential:
         hidden = max(64, self.phi_dim)
         return _build_mlp([inp, hidden, self.phi_dim],
-                           activation=self.activation, norm='bn')
+                           activation=self.activation, norm=self.norm)
 
     def _ensure_phi(self, n: int, device):
         if self._phi_layers is None or self._phi_inp_dim != n:

@@ -145,9 +145,17 @@ PV_size = PV_params[0]['resolution'][0] if PV_type == 'PI' else PV_params[0]['re
 # Build analysis model by class name
 # -------------------------------------------------------------------------
 
-def build_analysis_model(name, output_dim, n=None, extra=None):
+def build_analysis_model(name, output_dim, n=None, extra=None,
+                         activation='gelu', norm='bn'):
+    """
+    Instantiate a model with the exact architecture used at training time.
+    `activation` and `norm` are read from the checkpoint metadata so that
+    old checkpoints (relu, no norm) load correctly into matching architectures.
+    """
     n_dim = dim if n is None else n
     extra = extra or {}
+
+    # TFN-family models: activation/norm are internal to gt_tfn_layer.py
     if name == 'TensorFieldNetwork':
         return TensorFieldNetwork(num_classes=output_dim)
     if name == 'GTTensorFieldNetwork':
@@ -156,25 +164,38 @@ def build_analysis_model(name, output_dim, n=None, extra=None):
         return GTTensorFieldNetworkV2(n=n_dim, num_classes=output_dim)
     if name == 'HierarchicalGTTFN':
         return HierarchicalGTTFN(n=n_dim, num_classes=output_dim)
+
+    # All other models accept activation and norm
     if name == 'PointNet3D':
-        return PointNet3D(output_dim=output_dim)
+        return PointNet3D(output_dim=output_dim,
+                          activation=activation)
     if name == 'ScalarDistanceDeepSet':
-        return ScalarDistanceDeepSet(output_dim=output_dim)
+        return ScalarDistanceDeepSet(output_dim=output_dim,
+                                     activation=activation)
     if name == 'PointNetTutorial':
-        return PointNetTutorial(output_dim=output_dim)
+        return PointNetTutorial(output_dim=output_dim,
+                                activation=activation)
     if name == 'ScalarInputMLP':
-        return ScalarInputMLP(output_dim=output_dim)
+        return ScalarInputMLP(output_dim=output_dim,
+                              activation=activation)
     if name == 'MultiInputModel':
-        return MultiInputModel(target_output_dim=output_dim, scalar_input_dim=1)
+        return MultiInputModel(target_output_dim=output_dim,
+                               scalar_input_dim=1,
+                               activation=activation)
     if name == 'DenseRagged':
-        return DenseRagged(in_features=n_dim, out_features=output_dim)
+        return DenseRagged(in_features=n_dim, out_features=output_dim,
+                           activation=activation,
+                           use_norm=(norm != 'none'))
     if name == 'PermopRagged':
         return PermopRagged()
     if name == 'RaggedPersistenceModel':
-        return RaggedPersistenceModel(output_dim=output_dim)
+        return RaggedPersistenceModel(output_dim=output_dim,
+                                      activation=activation)
     if name == 'DistanceMatrixRaggedModel':
         npts = extra.get('num_points', n_dim)
-        return DistanceMatrixRaggedModel(output_dim=output_dim, num_points=npts)
+        return DistanceMatrixRaggedModel(output_dim=output_dim,
+                                         num_points=npts,
+                                         activation=activation)
     raise ValueError(f"Unknown model name: {name}")
 
 # -------------------------------------------------------------------------
@@ -516,21 +537,42 @@ def load_and_eval(model_name, use_gs=False):
 
     checkpoint = torch.load(ckpt_path, map_location=device)
     if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-        model_state = checkpoint['model_state_dict']
-        output_dim  = checkpoint.get('output_dim')
-        ckpt_type   = checkpoint.get('model_type', model_name)
-        ckpt_dim    = checkpoint.get('dim', dim)
-        ckpt_npts   = checkpoint.get('num_points', None)
-        ckpt_use_gs = checkpoint.get('use_gs', use_gs)
-        ckpt_sigma  = checkpoint.get('gs_sigma', GS_SIGMA)
+        model_state  = checkpoint['model_state_dict']
+        output_dim   = checkpoint.get('output_dim')
+        ckpt_type    = checkpoint.get('model_type', model_name)
+        ckpt_dim     = checkpoint.get('dim', dim)
+        ckpt_npts    = checkpoint.get('num_points', None)
+        ckpt_use_gs  = checkpoint.get('use_gs', use_gs)
+        ckpt_sigma   = checkpoint.get('gs_sigma', GS_SIGMA)
+        # Architecture metadata: read explicitly if saved, else auto-detect
+        # from the state_dict keys to handle legacy (pre-GELU) checkpoints.
+        ckpt_activation = checkpoint.get('activation', None)
+        ckpt_norm       = checkpoint.get('norm', None)
     else:
-        model_state = checkpoint
-        output_dim  = None
-        ckpt_type   = model_name
-        ckpt_dim    = dim
-        ckpt_npts   = None
-        ckpt_use_gs = use_gs
-        ckpt_sigma  = GS_SIGMA
+        model_state  = checkpoint
+        output_dim   = None
+        ckpt_type    = model_name
+        ckpt_dim     = dim
+        ckpt_npts    = None
+        ckpt_use_gs  = use_gs
+        ckpt_sigma   = GS_SIGMA
+        ckpt_activation = None
+        ckpt_norm       = None
+
+    # ── Detect architecture from state_dict when metadata is absent ──────
+    # Legacy checkpoints (before the GELU/BN upgrade) have no BatchNorm keys.
+    # New checkpoints have keys like "phi_layers.2.running_mean" (BatchNorm)
+    # or "phi_layers.2.weight" where shape is (C,) not (C_out, C_in) (LayerNorm).
+    # Heuristic: if any key contains 'running_mean' → has BatchNorm → new arch.
+    _has_bn = any('running_mean' in k for k in model_state)
+    if ckpt_activation is None:
+        # Old checkpoints used relu; new ones use gelu
+        ckpt_activation = 'gelu' if _has_bn else 'relu'
+    if ckpt_norm is None:
+        ckpt_norm = 'bn' if _has_bn else 'none'
+
+    print(f'  arch: activation={ckpt_activation}  norm={ckpt_norm}  ' +
+          ('(legacy ReLU checkpoint)' if not _has_bn else '(new GELU checkpoint)'))
 
     # Resolve class name (trust ckpt_type; detect legacy TFN by key pattern)
     _state_keys    = set(model_state.keys())
@@ -569,18 +611,23 @@ def load_and_eval(model_name, use_gs=False):
             model_PV.load_state_dict(model_state)
         elif class_name == 'DistanceMatrixRaggedModel':
             npts = ckpt_npts or (ckpt_dim * (ckpt_dim - 1) // 2)
-            model_PV = build_analysis_model(class_name, output_dim, n=ckpt_dim,
-                                            extra={'num_points': npts})
+            model_PV = build_analysis_model(
+                class_name, output_dim, n=ckpt_dim,
+                extra={'num_points': npts},
+                activation=ckpt_activation, norm=ckpt_norm)
             model_PV.load_state_dict(model_state)
         elif class_name == 'RaggedPersistenceModel':
-            model_PV = RaggedPersistenceModel(output_dim=output_dim)
+            model_PV = RaggedPersistenceModel(output_dim=output_dim,
+                                              activation=ckpt_activation)
             _w0_key = 'ragged_layers.0.weight_param'
             if _w0_key in model_state:
                 _w0_shape = model_state[_w0_key].shape
                 model_PV.ragged_layers[0]([torch.zeros(1, _w0_shape[0])])
             model_PV.load_state_dict(model_state)
         else:
-            model_PV = build_analysis_model(class_name, output_dim, n=ckpt_dim)
+            model_PV = build_analysis_model(
+                class_name, output_dim, n=ckpt_dim,
+                activation=ckpt_activation, norm=ckpt_norm)
             model_PV.load_state_dict(model_state)
 
         # Fix 2: move ALL tensors (including plain-attribute CG/GT tensors) to device
