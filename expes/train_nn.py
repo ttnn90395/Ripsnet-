@@ -152,7 +152,8 @@ def precompute_geometry(model, data_list, mname):
     cache = []
     with torch.no_grad():
         for pc in tqdm(data_list, desc="Precomputing geometry", leave=False):
-            cache.append(knn_geometry(pc, rbf_enc, gt_basis, k))
+            rbf, gt_edge, nbr_idx = knn_geometry(pc, rbf_enc, gt_basis, k)
+            cache.append((rbf.detach(), gt_edge.detach(), nbr_idx.detach()))
     return cache
 
 
@@ -181,13 +182,12 @@ def tfn_batched_forward(model, data_list, geom_cache, mname, batch_size=32):
                 for pc, geom in zip(batch, geom_b):
                     desc = inner._encode_single(
                         pc, precomputed_geom=geom)
-                    descs.append(desc)
+                    descs.append(desc.detach())       # prevent grad leak
                 descs_t = torch.stack(descs)          # (B, inv_dim)
                 out = inner.rho(descs_t)              # (B, output_dim)
             else:
                 out = model(batch)                    # standard forward
-        out_np = out.cpu().numpy()
-        results.append(out_np)
+        results.append(out.detach().cpu().numpy())
     return np.vstack(results)
 
 

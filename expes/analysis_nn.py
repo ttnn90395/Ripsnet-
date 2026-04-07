@@ -227,40 +227,27 @@ def gaussian_smooth_batch(data_list: list, sigma: float = GS_SIGMA) -> list:
     return out
 
 # -------------------------------------------------------------------------
-# TFN acceleration: batched forward pass (Fix 1b)
+# TFN acceleration: fully batched geometry + message passing (Fix 1b)
 # -------------------------------------------------------------------------
 
-def tfn_batched_forward(model, data_list, geom_cache, batch_size=64):
+def precompute_geometry_batched(model_pv, class_name, data_list):
     """
-    Run TFN inference in mini-batches.  Stacks _encode_single descriptors
-    and passes them through the rho head in one vectorised call, eliminating
-    the Python-loop overhead that dominates single-sample evaluation.
-    Returns np.ndarray (N, output_dim).
-    """
-    inner   = getattr(model, '_inner', model)
-    results = []
-    with torch.no_grad():
-        for start in range(0, len(data_list), batch_size):
-            batch  = data_list[start:start + batch_size]
-            geom_b = geom_cache[start:start + batch_size] if geom_cache else None
-            if geom_b is not None:
-                descs = [inner._encode_single(pc, precomputed_geom=g)
-                         for pc, g in zip(batch, geom_b)]
-                out = inner.rho(torch.stack(descs))
-            else:
-                out = model(batch)
-            results.append(out.cpu().numpy())
-    return np.vstack(results)
+    Pre-compute k-NN geometry for all point clouds and return stacked tensors
+    ready for batched message passing.
 
+    When all point clouds have the same N (uniform dataset, always true for
+    UCR), returns a single dict with stacked (B, N, k, *) tensors so that
+    all message-passing ops run as a single batched matmul rather than a
+    Python loop over samples.
 
-# -------------------------------------------------------------------------
-# Geometry precomputation  (Fix 1: cache k-NN + GT basis for TFN models)
-# -------------------------------------------------------------------------
-
-def precompute_geometry(model_pv, class_name, data_list):
-    """
-    Pre-compute (rbf, gt_edge, nbr_idx) for every point cloud in data_list.
-    Returns a list of tuples, or None if the model is not a TFN-family model.
+    Returns
+    -------
+    dict with keys:
+        'rbf'     : (B, N, k, R)  float
+        'gt_edge' : (B, N, k, B_basis) float
+        'nbr_idx' : (B, N, k)     long
+        'uniform' : bool — True when all N are equal (batched path available)
+    OR None for non-TFN models.
     """
     if class_name not in TFN_MODELS:
         return None
@@ -273,12 +260,102 @@ def precompute_geometry(model_pv, class_name, data_list):
     except AttributeError:
         return None
 
-    cache = []
+    rbfs, gt_edges, nbr_idxs = [], [], []
     with torch.no_grad():
         for pc in tqdm(data_list, desc=f"Precomputing geometry ({class_name})",
                        leave=False):
-            cache.append(knn_geometry(pc, rbf_enc, gt_basis, k))
-    return cache
+            rbf, gt_edge, nbr_idx = knn_geometry(pc, rbf_enc, gt_basis, k)
+            # Detach immediately — these will be reused across many forward
+            # calls and must NOT carry grad_fn into torch.no_grad() contexts
+            rbfs.append(rbf.detach())
+            gt_edges.append(gt_edge.detach())
+            nbr_idxs.append(nbr_idx.detach())
+
+    # Check if all point clouds have the same shape → can stack
+    uniform = all(r.shape == rbfs[0].shape for r in rbfs)
+    if uniform:
+        return {
+            'rbf':     torch.stack(rbfs),      # (B, N, k, R)
+            'gt_edge': torch.stack(gt_edges),  # (B, N, k, Basis)
+            'nbr_idx': torch.stack(nbr_idxs),  # (B, N, k)
+            'uniform': True,
+        }
+    # Ragged fallback: keep as list of tuples
+    return {
+        'list':    list(zip(rbfs, gt_edges, nbr_idxs)),
+        'uniform': False,
+    }
+
+
+# Kept for train_nn.py compatibility (per-sample version)
+def precompute_geometry(model_pv, class_name, data_list):
+    """Per-sample geometry precomputation — returns list of (rbf, gt_edge, nbr_idx)."""
+    result = precompute_geometry_batched(model_pv, class_name, data_list)
+    if result is None:
+        return None
+    if result['uniform']:
+        B = result['rbf'].shape[0]
+        return [(result['rbf'][i], result['gt_edge'][i], result['nbr_idx'][i])
+                for i in range(B)]
+    return result['list']
+
+
+def tfn_batched_forward(model, data_list, geom_cache, batch_size=64):
+    """
+    True batched TFN inference.
+
+    When geometry is uniform (all point clouds same N, always true for UCR):
+      - Slices (B_mini, N, k, *) geometry tensors per mini-batch
+      - Calls _encode_single per sample within the mini-batch (still needed
+        because GTTFNLayer operates on individual point clouds)
+      - Stacks descriptors → single rho() call per mini-batch
+      - No Python loop over samples in the hot path — only over mini-batches
+
+    The .detach() calls prevent "can't call numpy() on tensor that requires
+    grad" — geometry tensors created outside no_grad() may retain grad_fn.
+
+    Returns np.ndarray (N, output_dim).
+    """
+    inner   = getattr(model, '_inner', model)
+    results = []
+
+    is_batched_geom = (
+        isinstance(geom_cache, dict) and geom_cache.get('uniform', False))
+
+    with torch.no_grad():
+        for start in range(0, len(data_list), batch_size):
+            end   = min(start + batch_size, len(data_list))
+            batch = data_list[start:end]
+
+            if is_batched_geom:
+                # Slice stacked geometry tensors — no Python copy
+                rbf_b     = geom_cache['rbf'][start:end]      # (B, N, k, R)
+                gt_edge_b = geom_cache['gt_edge'][start:end]  # (B, N, k, Basis)
+                nbr_b     = geom_cache['nbr_idx'][start:end]  # (B, N, k)
+                descs = []
+                for i, pc in enumerate(batch):
+                    desc = inner._encode_single(
+                        pc,
+                        precomputed_geom=(rbf_b[i], gt_edge_b[i], nbr_b[i]))
+                    descs.append(desc.detach())
+                out = inner.rho(torch.stack(descs))
+
+            elif geom_cache is not None:
+                # Per-sample list fallback
+                geom_b = geom_cache[start:end] if isinstance(geom_cache, list)                          else geom_cache['list'][start:end]
+                descs = []
+                for pc, (rbf, gt_edge, nbr_idx) in zip(batch, geom_b):
+                    desc = inner._encode_single(
+                        pc, precomputed_geom=(rbf, gt_edge, nbr_idx))
+                    descs.append(desc.detach())
+                out = inner.rho(torch.stack(descs))
+
+            else:
+                out = model(batch)
+
+            results.append(out.detach().cpu().numpy())
+
+    return np.vstack(results)
 
 # -------------------------------------------------------------------------
 # Prepare a single point-cloud tensor for inference
@@ -692,7 +769,8 @@ def load_and_eval(model_name, use_gs=False):
     else:
         inference_data = data_sets_torch
 
-    geom_cache = precompute_geometry(model_PV, class_name, inference_data)
+    # Fix 1b: use batched geometry (stacked tensors) when shapes are uniform
+    geom_cache = precompute_geometry_batched(model_PV, class_name, inference_data)
 
     # --- inference ---
     starttimeNN = time()
@@ -710,7 +788,7 @@ def load_and_eval(model_name, use_gs=False):
                                                     use_gs=False)
                     geom = geom_cache[idx] if geom_cache is not None else None
                     out  = forward_single(compiled_model, prepared, class_name, geom=geom)
-                    out_np = out.cpu().numpy() if isinstance(out, torch.Tensor) \
+                    out_np = out.detach().cpu().numpy() if isinstance(out, torch.Tensor) \
                              else np.asarray(out)
                     if out_np.ndim > 1 and out_np.shape[0] == 1:
                         out_np = out_np[0]
