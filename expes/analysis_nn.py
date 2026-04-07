@@ -165,23 +165,24 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
     if name == 'HierarchicalGTTFN':
         return HierarchicalGTTFN(n=n_dim, num_classes=output_dim)
 
-    # All other models accept activation and norm
+    # All other models accept activation and norm — BOTH must be forwarded
+    # so that legacy checkpoints (relu, norm='none') reconstruct correctly.
     if name == 'PointNet3D':
         return PointNet3D(output_dim=output_dim,
-                          activation=activation)
+                          activation=activation, norm=norm)
     if name == 'ScalarDistanceDeepSet':
         return ScalarDistanceDeepSet(output_dim=output_dim,
-                                     activation=activation)
+                                     activation=activation, norm=norm)
     if name == 'PointNetTutorial':
         return PointNetTutorial(output_dim=output_dim,
-                                activation=activation)
+                                activation=activation, norm=norm)
     if name == 'ScalarInputMLP':
         return ScalarInputMLP(output_dim=output_dim,
-                              activation=activation)
+                              activation=activation, norm=norm)
     if name == 'MultiInputModel':
         return MultiInputModel(target_output_dim=output_dim,
                                scalar_input_dim=1,
-                               activation=activation)
+                               activation=activation, norm=norm)
     if name == 'DenseRagged':
         return DenseRagged(in_features=n_dim, out_features=output_dim,
                            activation=activation,
@@ -195,7 +196,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
         npts = extra.get('num_points', n_dim)
         return DistanceMatrixRaggedModel(output_dim=output_dim,
                                          num_points=npts,
-                                         activation=activation)
+                                         activation=activation, norm=norm)
     raise ValueError(f"Unknown model name: {name}")
 
 # -------------------------------------------------------------------------
@@ -224,6 +225,33 @@ def gaussian_smooth_batch(data_list: list, sigma: float = GS_SIGMA) -> list:
         W     = W / W.sum(-1, keepdim=True)
         out.append(W @ x)
     return out
+
+# -------------------------------------------------------------------------
+# TFN acceleration: batched forward pass (Fix 1b)
+# -------------------------------------------------------------------------
+
+def tfn_batched_forward(model, data_list, geom_cache, batch_size=64):
+    """
+    Run TFN inference in mini-batches.  Stacks _encode_single descriptors
+    and passes them through the rho head in one vectorised call, eliminating
+    the Python-loop overhead that dominates single-sample evaluation.
+    Returns np.ndarray (N, output_dim).
+    """
+    inner   = getattr(model, '_inner', model)
+    results = []
+    with torch.no_grad():
+        for start in range(0, len(data_list), batch_size):
+            batch  = data_list[start:start + batch_size]
+            geom_b = geom_cache[start:start + batch_size] if geom_cache else None
+            if geom_b is not None:
+                descs = [inner._encode_single(pc, precomputed_geom=g)
+                         for pc, g in zip(batch, geom_b)]
+                out = inner.rho(torch.stack(descs))
+            else:
+                out = model(batch)
+            results.append(out.cpu().numpy())
+    return np.vstack(results)
+
 
 # -------------------------------------------------------------------------
 # Geometry precomputation  (Fix 1: cache k-NN + GT basis for TFN models)
@@ -666,33 +694,35 @@ def load_and_eval(model_name, use_gs=False):
 
     geom_cache = precompute_geometry(model_PV, class_name, inference_data)
 
-    # --- inference loop ---
+    # --- inference ---
     starttimeNN = time()
-    PV_NN_list  = []
-    with torch.no_grad():
-        for idx, x_tensor in enumerate(
-                tqdm(inference_data, desc=f"Predicting ({label})")):
-            try:
-                # For TFN models inference_data is already padded; for others
-                # prepare_single_input handles the format (GS already applied above)
-                if class_name in TFN_MODELS:
-                    prepared = x_tensor   # already padded
-                else:
-                    # GS was applied at batch level; pass use_gs=False here
+    try:
+        if class_name in TFN_MODELS:
+            # Acceleration (Fix 1b): batched encode + single rho call per mini-batch
+            PV_NN = tfn_batched_forward(
+                compiled_model, inference_data, geom_cache, batch_size=64)
+        else:
+            PV_NN_list = []
+            for idx, x_tensor in enumerate(
+                    tqdm(inference_data, desc=f"Predicting ({label})")):
+                try:
                     prepared = prepare_single_input(class_name, x_tensor,
                                                     use_gs=False)
-                geom = geom_cache[idx] if geom_cache is not None else None
-                out  = forward_single(compiled_model, prepared, class_name, geom=geom)
-                out_np = out.cpu().numpy() if isinstance(out, torch.Tensor) \
-                         else np.asarray(out)
-                if out_np.ndim > 1 and out_np.shape[0] == 1:
-                    out_np = out_np[0]
-                PV_NN_list.append(out_np)
-            except Exception as e:
-                print(f'  WARNING: inference failed on sample {idx} – {e}')
-                PV_NN_list.append(np.zeros(output_dim, dtype=np.float32))
+                    geom = geom_cache[idx] if geom_cache is not None else None
+                    out  = forward_single(compiled_model, prepared, class_name, geom=geom)
+                    out_np = out.cpu().numpy() if isinstance(out, torch.Tensor) \
+                             else np.asarray(out)
+                    if out_np.ndim > 1 and out_np.shape[0] == 1:
+                        out_np = out_np[0]
+                    PV_NN_list.append(out_np)
+                except Exception as e:
+                    print(f'  WARNING: inference failed on sample {idx} – {e}')
+                    PV_NN_list.append(np.zeros(output_dim, dtype=np.float32))
+            PV_NN = np.vstack(PV_NN_list)
+    except Exception as e:
+        print(f'  WARNING: inference failed entirely – {e}')
+        PV_NN = np.zeros((N_sets, output_dim), dtype=np.float32)
 
-    PV_NN  = np.vstack(PV_NN_list)
     timeNN = time() - starttimeNN
     print(f"  NN time: {timeNN:.2f}s  "
           f"(Gudhi clean: {timeG:.2f}s  noise: {timeGn:.2f}s)")
