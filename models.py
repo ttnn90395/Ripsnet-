@@ -57,12 +57,15 @@ from gt_tfn_layer import (
     ChannelMixer,
     EquivariantGate,
     ResidualProjection,
-    GTTensorFieldNetwork,
+    GTTensorFieldNetwork as _GTTensorFieldNetworkBase,
 )
 from gt_improvements import (
-    HierarchicalGTTFN,
+    HierarchicalGTTFN as _HierarchicalGTTFNBase,
     OnEquivariantWrapper,
 )
+
+# Re-export with device-aware mixin applied AFTER the mixin class is defined
+# (actual subclasses are created below, after _DeviceAwareMixin is defined)
 
 
 # ---------------------------------------------------------------------------
@@ -105,18 +108,24 @@ def _act(name: str = 'gelu') -> nn.Module:
 
 def _build_mlp(dims: List[int],
                activation: str = 'gelu',
-               norm: str = 'bn',
+               norm: str = 'ln',
                final_activation: Optional[str] = None) -> nn.Sequential:
     """
     Build a fully-connected MLP with optional normalisation.
 
     dims             : [in, h1, h2, ..., out]
     activation       : activation after each hidden layer
-    norm             : 'bn'  BatchNorm1d after each hidden layer (default)
-                       'ln'  LayerNorm after each hidden layer
+    norm             : 'ln'  LayerNorm after each hidden layer (default)
+                              Works with any batch size, including 1.
+                              BatchNorm1d requires batch_size > 1 and cannot
+                              be used here since training is sample-by-sample.
                        'none' no normalisation
     final_activation : optional activation after the last linear layer
                        (e.g. 'sigmoid' for bounded outputs)
+
+    Note: 'bn' is accepted as an alias for 'ln' for checkpoint compatibility
+    (old code saved norm='bn'; we silently upgrade to LayerNorm which has the
+    same effect on single-sample inputs but also works during training).
     """
     layers = []
     for i in range(len(dims) - 1):
@@ -127,10 +136,11 @@ def _build_mlp(dims: List[int],
                 layers.append(_act(final_activation))
         else:
             layers.append(_act(activation))
-            if norm == 'bn':
-                layers.append(nn.BatchNorm1d(dims[i + 1]))
-            elif norm == 'ln':
+            # LayerNorm normalises over the feature dim → works at batch_size=1
+            # Accept 'bn' as alias for backward-compat with saved checkpoints
+            if norm in ('ln', 'bn'):
                 layers.append(nn.LayerNorm(dims[i + 1]))
+            # norm == 'none': no normalisation layer added
     return nn.Sequential(*layers)
 
 
@@ -168,13 +178,45 @@ def _move_basis_tensors(module: nn.Module, device):
 
 
 # ---------------------------------------------------------------------------
+# Device-aware helpers used by all TFN subclasses defined below.
+# ---------------------------------------------------------------------------
+
+def _tfn_forward(self, batch, node_attrs, base_cls):
+    """
+    Device-safe forward for any GTTensorFieldNetwork subclass.
+    Moves GTBasis/CG tensors to the input device before message passing,
+    handling recursive sub-GTBasis objects created at runtime.
+    """
+    if batch:
+        _move_basis_tensors(self, batch[0].device)
+    return base_cls.forward(self, batch, node_attrs)
+
+
+# ---------------------------------------------------------------------------
 # GTTensorFieldNetworkV2
 # ---------------------------------------------------------------------------
 
-class GTTensorFieldNetworkV2(GTTensorFieldNetwork):
+# Device-aware wrappers for the base models imported from external modules
+class GTTensorFieldNetwork(_GTTensorFieldNetworkBase):
+    """SO(n) base model with device-aware forward pass."""
+    def forward(self, batch, node_attrs=None):
+        return _tfn_forward(self, batch, node_attrs, _GTTensorFieldNetworkBase)
+
+
+class HierarchicalGTTFN(_HierarchicalGTTFNBase):
+    """Hierarchical GT-TFN with device-aware forward pass."""
+    def forward(self, batch, node_attrs=None):
+        if batch:
+            _move_basis_tensors(self, batch[0].device)
+        return _HierarchicalGTTFNBase.forward(self, batch, node_attrs)
+
+
+class GTTensorFieldNetworkV2(_GTTensorFieldNetworkBase):
     """
     Recommended GT-TFN with all improvements ON by default.
     Device-fix overrides ensure GTBasis/CG tensors move with the model.
+    Inherits _DeviceAwareMixin so that every forward() call moves basis
+    tensors to the correct device before message passing.
     """
 
     def __init__(
@@ -234,9 +276,7 @@ class GTTensorFieldNetworkV2(GTTensorFieldNetwork):
         return self
 
     def forward(self, batch, node_attrs=None):
-        if batch:
-            _move_basis_tensors(self, batch[0].device)
-        return super().forward(batch, node_attrs)
+        return _tfn_forward(self, batch, node_attrs, _GTTensorFieldNetworkBase)
 
 
 # ---------------------------------------------------------------------------

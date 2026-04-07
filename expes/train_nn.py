@@ -435,7 +435,7 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
     optimizer     = optimizer_class(m.parameters(), lr=optim_lr)
     # LR scheduler: reduce on plateau for stable convergence
     scheduler     = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=10, min_lr=1e-6, verbose=False)
+        optimizer, mode='min', factor=0.5, patience=10, min_lr=1e-6)
     criterion     = nn.MSELoss()
     targets_train = np.hstack(PVs_train)
     targets_test  = np.hstack(PVs_test)
