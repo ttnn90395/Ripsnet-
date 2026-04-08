@@ -59,13 +59,8 @@ from gt_tfn_layer import (
     ResidualProjection,
     GTTensorFieldNetwork as _GTTensorFieldNetworkBase,
 )
-from gt_improvements import (
-    HierarchicalGTTFN as _HierarchicalGTTFNBase,
-    OnEquivariantWrapper,
-)
-
-# Re-export with device-aware mixin applied AFTER the mixin class is defined
-# (actual subclasses are created below, after _DeviceAwareMixin is defined)
+# gt_improvements imports models.py (circular if done at top level).
+# Imported lazily at the bottom of this file, after all classes are defined.
 
 
 # ---------------------------------------------------------------------------
@@ -203,13 +198,7 @@ class GTTensorFieldNetwork(_GTTensorFieldNetworkBase):
         return _tfn_forward(self, batch, node_attrs, _GTTensorFieldNetworkBase)
 
 
-class HierarchicalGTTFN(_HierarchicalGTTFNBase):
-    """Hierarchical GT-TFN with device-aware forward pass."""
-    def forward(self, batch, node_attrs=None):
-        if batch:
-            _move_basis_tensors(self, batch[0].device)
-        return _HierarchicalGTTFNBase.forward(self, batch, node_attrs)
-
+# HierarchicalGTTFN defined at the bottom after the lazy gt_improvements import.
 
 class GTTensorFieldNetworkV2(_GTTensorFieldNetworkBase):
     """
@@ -674,6 +663,31 @@ class DistanceMatrixRaggedModel(nn.Module):
             phi_outs.append(row_phi.mean(dim=0))
 
         return self.rho(torch.stack(phi_outs))
+
+
+# ---------------------------------------------------------------------------
+# Lazy import of gt_improvements (avoids circular import)
+# Must be done AFTER all classes above are fully defined.
+# ---------------------------------------------------------------------------
+
+def _load_gt_improvements():
+    """Import HierarchicalGTTFN and OnEquivariantWrapper from gt_improvements."""
+    from gt_improvements import (
+        HierarchicalGTTFN as _HierarchicalGTTFNBase,
+        OnEquivariantWrapper as _OnEquivariantWrapperBase,
+    )
+
+    class HierarchicalGTTFN(_HierarchicalGTTFNBase):
+        """Hierarchical GT-TFN with device-aware forward pass."""
+        def forward(self, batch, node_attrs=None):
+            if batch:
+                _move_basis_tensors(self, batch[0].device)
+            return _HierarchicalGTTFNBase.forward(self, batch, node_attrs)
+
+    return HierarchicalGTTFN, _OnEquivariantWrapperBase
+
+
+HierarchicalGTTFN, OnEquivariantWrapper = _load_gt_improvements()
 
 
 # ---------------------------------------------------------------------------
