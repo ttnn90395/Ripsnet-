@@ -402,6 +402,13 @@ def evaluate(model, data, targets, criterion, mname, geom_cache=None):
 ES_PATIENCE   = 20    # epochs without improvement before stopping
 ES_MIN_DELTA  = 1e-5  # minimum improvement threshold
 
+import torch
+from torch.utils.data import DataLoader, TensorDataset
+# np est déjà importé
+
+# Définir une taille de lot par défaut
+BATCH_SIZE = 32
+
 def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
     tag   = '_GS' if use_gs else ''
     label = f'{mname}{tag}'
@@ -409,20 +416,56 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
 
     m = deep_to(build_model_by_name(mname, n=dim), device)
 
-    train_data = prepare_data_for_model(mname, data_train_torch,
-                                        use_gs=use_gs, gs_sigma=gs_sigma)
-    test_data  = prepare_data_for_model(mname, data_test_torch,
-                                        use_gs=use_gs, gs_sigma=gs_sigma)
+    # Préparer les données brutes (features pour le modèle)
+    # Supposons que prepare_data_for_model renvoie un tenseur unique ou une liste de tenseurs
+    raw_train_data = prepare_data_for_model(mname, data_train_torch,
+                                            use_gs=use_gs, gs_sigma=gs_sigma)
+    raw_test_data  = prepare_data_for_model(mname, data_test_torch,
+                                            use_gs=use_gs, gs_sigma=gs_sigma)
 
-    # Warm-up: trigger lazy param init before optimizer
+    # Convertir les cibles (labels) en tenseurs PyTorch et les déplacer vers le périphérique
+    targets_train_tensor = torch.from_numpy(np.hstack(PVs_train)).float().to(device)
+    targets_test_tensor  = torch.from_numpy(np.hstack(PVs_test)).float().to(device)
+
+    # Convertir les caractéristiques en tenseurs PyTorch et les déplacer vers le périphérique
+    # Gérer les cas où raw_train_data peut être une liste de tenseurs ou un seul tenseur
+    if isinstance(raw_train_data, (list, tuple)): # Si c'est une liste/tuple de tenseurs, les concaténer.
+        train_features_tensor = torch.cat([t.to(device) for t in raw_train_data])
+    elif isinstance(raw_train_data, np.ndarray): # Si c'est un tableau numpy, le convertir en tenseur
+        train_features_tensor = torch.from_numpy(raw_train_data).float().to(device)
+    else: # Supposer que c'est déjà un torch.Tensor
+        train_features_tensor = raw_train_data.to(device)
+
+    if isinstance(raw_test_data, (list, tuple)):
+        test_features_tensor = torch.cat([t.to(device) for t in raw_test_data])
+    elif isinstance(raw_test_data, np.ndarray):
+        test_features_tensor = torch.from_numpy(raw_test_data).float().to(device)
+    else:
+        test_features_tensor = raw_test_data.to(device)
+
+
+    # Créer des TensorDatasets à partir des caractéristiques et des cibles
+    train_dataset = TensorDataset(train_features_tensor, targets_train_tensor)
+    test_dataset  = TensorDataset(test_features_tensor, targets_test_tensor)
+
+    # Créer des DataLoaders pour le traitement par lots
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    test_loader  = DataLoader(test_dataset,  batch_size=BATCH_SIZE, shuffle=False)
+
+    # Warm-up: déclencher l'initialisation paresseuse des paramètres avant l'optimiseur
     m.train()
     with torch.no_grad():
-        forward_single(m, train_data[0], mname)
+        # Utiliser le premier lot du train_loader pour le warm-up.
+        # Ceci suppose que le modèle peut prendre un seul lot en entrée pour le warm-up.
+        first_batch_features, _ = next(iter(train_loader))
+        forward_single(m, first_batch_features, mname)
     m = deep_to(m, device)
 
-    # Fix 1: precompute geometry for TFN models
-    geom_train = precompute_geometry(m, train_data, mname)
-    geom_test  = precompute_geometry(m, test_data,  mname)
+    # Fix 1: précalculer la géométrie pour les modèles TFN
+    # geom_train et geom_test sont probablement globaux pour le dataset, donc ils sont calculés une fois
+    # avec les données brutes *complètes*, et non lot par lot.
+    geom_train = precompute_geometry(m, raw_train_data, mname)
+    geom_test  = precompute_geometry(m, raw_test_data,  mname)
 
     # Fix 3: torch.compile
     if hasattr(torch, 'compile') and device.type == 'cuda':
@@ -433,12 +476,10 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
             print(f'  torch.compile skipped: {e}')
 
     optimizer     = optimizer_class(m.parameters(), lr=optim_lr)
-    # LR scheduler: reduce on plateau for stable convergence
+    # Planificateur de LR: réduire sur plateau pour une convergence stable
     scheduler     = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=10, min_lr=1e-6)
     criterion     = nn.MSELoss()
-    targets_train = np.hstack(PVs_train)
-    targets_test  = np.hstack(PVs_test)
 
     early_stop = EarlyStopping(patience=ES_PATIENCE, min_delta=ES_MIN_DELTA,
                                 restore=True)
@@ -447,10 +488,11 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
     tr_loss = val_loss = 0.0
 
     for epoch in tqdm(range(num_epochs), desc=f"Epochs ({label})"):
-        tr_loss  = train_epoch(m, train_data, targets_train,
-                               optimizer, criterion, mname, geom_train)
-        val_loss = evaluate(m, test_data, targets_test,
-                            criterion, mname, geom_test)
+        # Passer les DataLoaders à train_epoch et evaluate
+        # En supposant que ces fonctions sont maintenant adaptées pour itérer sur les DataLoaders en interne.
+        # Les arguments 'targets' sont supprimés de ces appels car ils sont fournis par le DataLoader.
+        tr_loss  = train_epoch(m, train_loader, optimizer, criterion, mname, geom_train)
+        val_loss = evaluate(m, test_loader, criterion, mname, geom_test)
 
         scheduler.step(val_loss)
 
