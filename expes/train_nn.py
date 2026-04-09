@@ -73,10 +73,10 @@ if normalize:
 output_dim = sum([PVs_train[hidx].shape[1] for hidx in range(len(homdim))])
 
 if dataset_name[:5] == 'synth':
-    optim_lr        = 5e-4
+    optim_lr        = 5e-3
     optimizer_class = optim.Adamax
 else:
-    optim_lr        = 5e-4
+    optim_lr        = 5e-3
     optimizer_class = optim.Adam
 
 PVs_train_torch = [torch.FloatTensor(PVs_train[hidx]).to(device) for hidx in range(len(homdim))]
@@ -86,7 +86,7 @@ PVs_test_torch  = [torch.FloatTensor(PVs_test[hidx]).to(device)  for hidx in ran
 # Gaussian smoothing  (Fix 4: batched vectorised kernel)
 # -------------------------------------------------------------------------
 
-GS_SIGMA = 0.5
+GS_SIGMA = 0.01
 
 def gaussian_smooth_batch(data_list: list, sigma: float = GS_SIGMA) -> list:
     """Vectorised GS: single (B,N,d) tensor when shapes are uniform."""
@@ -161,7 +161,7 @@ def precompute_geometry(model, data_list, mname):
 # TFN acceleration: batched forward pass over entire dataset
 # -------------------------------------------------------------------------
 
-def tfn_batched_forward(model, data_list, geom_cache, mname, batch_size=32):
+def tfn_batched_forward(model, data_list, geom_cache, mname, batch_size=64):
     """
     Run TFN inference over data_list in mini-batches, eliminating the Python
     loop overhead for forward passes.  Each mini-batch calls model(batch)
@@ -322,7 +322,7 @@ class EarlyStopping:
     min_delta : minimum improvement to count as an improvement
     restore   : if True, restore the best model weights on stop
     """
-    def __init__(self, patience: int = 15, min_delta: float = 1e-5,
+    def __init__(self, patience: int = 25, min_delta: float = 1e-5,
                  restore: bool = True):
         self.patience   = patience
         self.min_delta  = min_delta
@@ -399,8 +399,8 @@ def evaluate(model, data, targets, criterion, mname, geom_cache=None):
 # -------------------------------------------------------------------------
 
 # Early stopping defaults — can be tightened per model type
-ES_PATIENCE   = 20    # epochs without improvement before stopping
-ES_MIN_DELTA  = 1e-5  # minimum improvement threshold
+ES_PATIENCE   = 30    # epochs without improvement before stopping
+ES_MIN_DELTA  = 5e-6  # minimum improvement threshold
 
 def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
     tag   = '_GS' if use_gs else ''
@@ -443,7 +443,7 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
     early_stop = EarlyStopping(patience=ES_PATIENCE, min_delta=ES_MIN_DELTA,
                                 restore=True)
 
-    log_every = max(1, num_epochs // 10)
+    log_every = max(1, num_epochs // 100)
     tr_loss = val_loss = 0.0
 
     for epoch in tqdm(range(num_epochs), desc=f"Epochs ({label})"):
