@@ -18,14 +18,16 @@ if ROOT_DIR not in sys.path:
 from sklearn.model_selection import KFold
 from models import (
     TensorFieldNetwork, GTTensorFieldNetwork, GTTensorFieldNetworkV2,
-    HierarchicalGTTFN, PointNet3D,
+    HierarchicalGTTFN, HierarchicalTensorFieldNetwork,
+    OnEquivariantTensorFieldNetwork, PointNet3D,
     ScalarDistanceDeepSet, PointNetTutorial, ScalarInputMLP, MultiInputModel,
     DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,
 )
 
 MODEL_NAMES = [
     'TensorFieldNetwork', 'GTTensorFieldNetwork', 'GTTensorFieldNetworkV2',
-    'HierarchicalGTTFN', 'PointNet3D',
+    'HierarchicalGTTFN', 'HierarchicalTensorFieldNetwork',
+    'OnEquivariantTensorFieldNetwork', 'PointNet3D',
     'ScalarDistanceDeepSet', 'PointNetTutorial', 'ScalarInputMLP', 'MultiInputModel',
     'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
 ]
@@ -138,8 +140,10 @@ def deep_to(module: nn.Module, target_device) -> nn.Module:
 
 def precompute_geometry(model, data_list, mname):
     """
-    Pre-compute (rbf, gt_edge, nbr_idx) once for all point clouds.
-    Returns list of tuples, or None for non-TFN models.
+    Precompute k-NN geometry for all point clouds.
+
+    Returns either a stacked 'uniform' geometry dict (B, N, k, *) when all
+    point clouds share the same size, or a list of per-sample tuples.
     """
     if mname not in TFN_MODELS:
         return None
@@ -151,12 +155,27 @@ def precompute_geometry(model, data_list, mname):
         k        = inner.k_neighbors
     except AttributeError:
         return None
-    cache = []
+
+    rbfs, gt_edges, nbr_idxs = [], [], []
     with torch.no_grad():
         for pc in tqdm(data_list, desc="Precomputing geometry", leave=False):
             rbf, gt_edge, nbr_idx = knn_geometry(pc, rbf_enc, gt_basis, k)
-            cache.append((rbf.detach(), gt_edge.detach(), nbr_idx.detach()))
-    return cache
+            rbfs.append(rbf.detach())
+            gt_edges.append(gt_edge.detach())
+            nbr_idxs.append(nbr_idx.detach())
+
+    uniform = all(r.shape == rbfs[0].shape for r in rbfs)
+    if uniform:
+        return {
+            'uniform': True,
+            'rbf': torch.stack(rbfs),
+            'gt_edge': torch.stack(gt_edges),
+            'nbr_idx': torch.stack(nbr_idxs),
+        }
+    return {
+        'uniform': False,
+        'list': list(zip(rbfs, gt_edges, nbr_idxs)),
+    }
 
 
 # -------------------------------------------------------------------------
@@ -175,20 +194,31 @@ def tfn_batched_forward(model, data_list, geom_cache, mname, batch_size=64):
     results = []
     for start in range(0, len(data_list), batch_size):
         batch    = data_list[start:start + batch_size]
-        geom_b   = geom_cache[start:start + batch_size] if geom_cache else None
+        batch_idx = range(start, min(start + batch_size, len(data_list)))
+        geom_b   = _get_geom_batch(geom_cache, batch_idx) if geom_cache else None
         with torch.no_grad():
             if geom_b is not None:
-                # Use precomputed geometry: call _encode_single per sample,
-                # stack descriptors, then pass through rho in one shot
                 descs = []
-                for pc, geom in zip(batch, geom_b):
-                    desc = inner._encode_single(
-                        pc, precomputed_geom=geom)
-                    descs.append(desc.detach())       # prevent grad leak
-                descs_t = torch.stack(descs)          # (B, inv_dim)
-                out = inner.rho(descs_t)              # (B, output_dim)
+                if isinstance(geom_b, dict) and geom_b.get('uniform', False):
+                    for i, pc in enumerate(batch):
+                        desc = inner._encode_single(
+                            pc,
+                            precomputed_geom=(
+                                geom_b['rbf'][i],
+                                geom_b['gt_edge'][i],
+                                geom_b['nbr_idx'][i],
+                            ),
+                        )
+                        descs.append(desc.detach())
+                else:
+                    for pc, geom in zip(batch, geom_b):
+                        desc = inner._encode_single(
+                            pc, precomputed_geom=geom)
+                        descs.append(desc.detach())
+                descs_t = torch.stack(descs)
+                out = inner.rho(descs_t)
             else:
-                out = model(batch)                    # standard forward
+                out = model(batch)
         results.append(out.detach().cpu().numpy())
     return np.vstack(results)
 
@@ -207,7 +237,29 @@ def _pad_to_3d(data_list):
     return out
 
 
-def prepare_data_for_model(mname, data_list, use_gs=False, gs_sigma=GS_SIGMA):
+def augment_point_cloud(pc, sigma=0.01, clip=0.05):
+    if pc.ndim != 2 or pc.shape[1] not in (2, 3):
+        return pc
+    if pc.shape[1] == 2:
+        theta = float(torch.rand(1, device=pc.device) * 2 * np.pi)
+        c, s = np.cos(theta), np.sin(theta)
+        R = torch.tensor([[c, -s], [s, c]], device=pc.device, dtype=pc.dtype)
+        pc = pc @ R
+    else:
+        R = torch.randn(3, 3, device=pc.device, dtype=pc.dtype)
+        q, _ = torch.linalg.qr(R)
+        if torch.det(q) < 0:
+            q[:, 0] = -q[:, 0]
+        pc = pc @ q
+    noise = torch.randn_like(pc) * sigma
+    noise = noise.clamp(-clip, clip)
+    return pc + noise
+
+
+def prepare_data_for_model(mname, data_list, use_gs=False,
+                           gs_sigma=GS_SIGMA, augment=False):
+    if augment:
+        data_list = [augment_point_cloud(x) for x in data_list]
     if use_gs:
         data_list = gaussian_smooth_batch(data_list, sigma=gs_sigma)
 
@@ -264,6 +316,10 @@ def build_model_by_name(name, n=None):
         return GTTensorFieldNetworkV2(n=_n, num_classes=output_dim)
     if name == 'HierarchicalGTTFN':
         return HierarchicalGTTFN(n=_n, num_classes=output_dim)
+    if name == 'HierarchicalTensorFieldNetwork':
+        return HierarchicalTensorFieldNetwork(num_classes=output_dim)
+    if name == 'OnEquivariantTensorFieldNetwork':
+        return OnEquivariantTensorFieldNetwork(num_classes=output_dim)
     if name == 'PointNet3D':
         return PointNet3D(output_dim=output_dim)
     if name == 'ScalarDistanceDeepSet':
@@ -310,6 +366,23 @@ def forward_single(model, x, mname, geom=None):
     return model(x.unsqueeze(0))
 
 
+def _get_geom_batch(geom_cache, batch_idx):
+    if geom_cache is None:
+        return None
+    if isinstance(batch_idx, range):
+        batch_idx = list(batch_idx)
+    if isinstance(geom_cache, dict) and geom_cache.get('uniform', False):
+        return {
+            'uniform': True,
+            'rbf': geom_cache['rbf'][batch_idx],
+            'gt_edge': geom_cache['gt_edge'][batch_idx],
+            'nbr_idx': geom_cache['nbr_idx'][batch_idx],
+        }
+    if isinstance(geom_cache, dict):
+        return [geom_cache['list'][i] for i in batch_idx]
+    return [geom_cache[i] for i in batch_idx]
+
+
 def forward_batch(model, batch_data, mname, geom_batch=None):
     """Forward a mini-batch of samples through the model."""
     if len(batch_data) == 0:
@@ -327,6 +400,21 @@ def forward_batch(model, batch_data, mname, geom_batch=None):
 
     if geom_batch is not None and mname in TFN_MODELS:
         inner = getattr(model, '_inner', model)
+        if isinstance(geom_batch, dict) and geom_batch.get('uniform', False):
+            descs = []
+            for i, pc in enumerate(batch_data):
+                desc = inner._encode_single(
+                    pc,
+                    precomputed_geom=(
+                        geom_batch['rbf'][i],
+                        geom_batch['gt_edge'][i],
+                        geom_batch['nbr_idx'][i],
+                    ),
+                )
+                descs.append(desc)
+            descs_t = torch.stack(descs)
+            return inner.rho(descs_t)
+
         descs = [inner._encode_single(x, precomputed_geom=geom)
                  for x, geom in zip(batch_data, geom_batch)]
         descs_t = torch.stack(descs)
@@ -396,7 +484,8 @@ def get_target(targets, i):
 
 
 def train_epoch(model, data, targets, optimizer, criterion, mname,
-                geom_cache=None, batch_size=32):
+                geom_cache=None, batch_size=32, scaler=None,
+                use_amp=False, max_grad_norm=1.0):
     model.train()
     total_loss = 0.0
     n = len(data)
@@ -405,14 +494,25 @@ def train_epoch(model, data, targets, optimizer, criterion, mname,
         batch_idx = perm[start:start + batch_size]
         batch_data = [data[i] for i in batch_idx]
         batch_targets = targets[batch_idx]
-        batch_geom = ([geom_cache[i] for i in batch_idx]
-                      if geom_cache is not None else None)
+        batch_geom = _get_geom_batch(geom_cache, batch_idx)
 
-        optimizer.zero_grad()
-        output = forward_batch(model, batch_data, mname, geom_batch=batch_geom)
-        loss = criterion(output, batch_targets)
-        loss.backward()
-        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            output = forward_batch(model, batch_data, mname,
+                                   geom_batch=batch_geom)
+            loss = criterion(output, batch_targets)
+
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            optimizer.step()
+
         total_loss += loss.item() * len(batch_data)
     return total_loss / n
 
@@ -427,9 +527,9 @@ def evaluate(model, data, targets, criterion, mname,
             batch_idx = range(start, min(start + batch_size, n))
             batch_data = [data[i] for i in batch_idx]
             batch_targets = targets[start:start + len(batch_data)]
-            batch_geom = ([geom_cache[i] for i in batch_idx]
-                          if geom_cache is not None else None)
-            output = forward_batch(model, batch_data, mname, geom_batch=batch_geom)
+            batch_geom = _get_geom_batch(geom_cache, batch_idx)
+            output = forward_batch(model, batch_data, mname,
+                                   geom_batch=batch_geom)
             loss = criterion(output, batch_targets)
             total_loss += loss.item() * len(batch_data)
     return total_loss / n
@@ -450,10 +550,12 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
 
     m = deep_to(build_model_by_name(mname, n=dim), device)
 
-    train_data = prepare_data_for_model(mname, data_train_torch,
-                                        use_gs=use_gs, gs_sigma=gs_sigma)
-    test_data  = prepare_data_for_model(mname, data_test_torch,
-                                        use_gs=use_gs, gs_sigma=gs_sigma)
+    train_data = prepare_data_for_model(
+        mname, data_train_torch, use_gs=use_gs,
+        gs_sigma=gs_sigma, augment=True)
+    test_data  = prepare_data_for_model(
+        mname, data_test_torch, use_gs=use_gs,
+        gs_sigma=gs_sigma, augment=False)
 
     # Warm-up: trigger lazy param init before optimizer
     m.train()
@@ -473,13 +575,15 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
         except Exception as e:
             print(f'  torch.compile skipped: {e}')
 
-    optimizer     = optimizer_class(m.parameters(), lr=optim_lr)
+    optimizer     = optimizer_class(
+        m.parameters(), lr=optim_lr, weight_decay=1e-5)
     # LR scheduler: reduce on plateau for stable convergence
     scheduler     = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=10, min_lr=1e-6)
     criterion     = nn.MSELoss()
     targets_train = torch.FloatTensor(np.hstack(PVs_train)).to(device)
     targets_test  = torch.FloatTensor(np.hstack(PVs_test)).to(device)
+    scaler        = torch.cuda.amp.GradScaler(enabled=(device.type == 'cuda'))
 
     early_stop = EarlyStopping(patience=ES_PATIENCE, min_delta=ES_MIN_DELTA,
                                 restore=True)
@@ -487,14 +591,15 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
     log_every = max(1, num_epochs // 100)
     tr_loss = val_loss = 0.0
 
+    use_amp = device.type == 'cuda'
     for epoch in tqdm(range(num_epochs), desc=f"Epochs ({label})"):
-        tr_loss  = train_epoch(m, train_data, targets_train,
-                               optimizer, criterion, mname,
-                               geom_cache=geom_train,
-                               batch_size=batch_size)
-        val_loss = evaluate(m, test_data, targets_test,
-                            criterion, mname, geom_cache=geom_test,
-                            batch_size=batch_size)
+        tr_loss  = train_epoch(
+            m, train_data, targets_train, optimizer, criterion, mname,
+            geom_cache=geom_train, batch_size=batch_size,
+            scaler=scaler, use_amp=use_amp, max_grad_norm=1.0)
+        val_loss = evaluate(
+            m, test_data, targets_test, criterion, mname,
+            geom_cache=geom_test, batch_size=batch_size)
 
         scheduler.step(val_loss)
 

@@ -671,10 +671,11 @@ class DistanceMatrixRaggedModel(nn.Module):
 # ---------------------------------------------------------------------------
 
 def _load_gt_improvements():
-    """Import HierarchicalGTTFN and OnEquivariantWrapper from gt_improvements."""
+    """Import HierarchicalGTTFN, OnEquivariantWrapper and GTTFNEncoder."""
     from gt_improvements import (
         HierarchicalGTTFN as _HierarchicalGTTFNBase,
         OnEquivariantWrapper as _OnEquivariantWrapperBase,
+        GTTFNEncoder as _GTTFNEncoderBase,
     )
 
     class HierarchicalGTTFN(_HierarchicalGTTFNBase):
@@ -684,10 +685,110 @@ def _load_gt_improvements():
                 _move_basis_tensors(self, batch[0].device)
             return _HierarchicalGTTFNBase.forward(self, batch, node_attrs)
 
-    return HierarchicalGTTFN, _OnEquivariantWrapperBase
+    class GTTFNEncoder(_GTTFNEncoderBase):
+        """Device-aware TFN encoder wrapper."""
+        def forward(self, batch, node_attrs=None):
+            if batch:
+                _move_basis_tensors(self, batch[0].device)
+            return _GTTFNEncoderBase.forward(self, batch, node_attrs)
+
+    return HierarchicalGTTFN, _OnEquivariantWrapperBase, GTTFNEncoder
 
 
-HierarchicalGTTFN, OnEquivariantWrapper = _load_gt_improvements()
+HierarchicalGTTFN, OnEquivariantWrapper, GTTFNEncoder = _load_gt_improvements()
+
+
+class HierarchicalTensorFieldNetwork(nn.Module):
+    """Hierarchical TFN variant with multi-scale pooling for 3D point clouds."""
+
+    def __init__(
+        self,
+        num_classes: int,
+        max_order: int = 1,
+        hidden_channels: int = 32,
+        stage_sizes: Optional[List[int]] = None,
+        stage_radii: Optional[List[float]] = None,
+        k_local: int = 16,
+        k_global: int = 16,
+        num_layers_per_stage: int = 2,
+        num_rbf: int = 32,
+        cutoff: float = 1.0,
+        classifier_dims: Optional[List[int]] = None,
+        node_attr_dim: int = 0,
+    ):
+        super().__init__()
+        if stage_sizes is None:
+            stage_sizes = [128, 32]
+        if stage_radii is None:
+            stage_radii = [0.2, 0.4]
+        if classifier_dims is None:
+            classifier_dims = [128, 64]
+        self._inner = HierarchicalGTTFN(
+            n=3,
+            num_classes=num_classes,
+            max_order=max_order,
+            hidden_channels=hidden_channels,
+            stage_sizes=stage_sizes,
+            stage_radii=stage_radii,
+            k_local=k_local,
+            k_global=k_global,
+            num_layers_per_stage=num_layers_per_stage,
+            num_rbf=num_rbf,
+            cutoff=cutoff,
+            classifier_dims=classifier_dims,
+            node_attr_dim=node_attr_dim,
+        )
+
+    def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
+        return self._inner(batch)
+
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
+        self._inner.to(*args, **kwargs)
+        return self
+
+    def cuda(self, device=None):
+        super().cuda(device)
+        self._inner.cuda(device)
+        return self
+
+    def cpu(self):
+        super().cpu()
+        self._inner.cpu()
+        return self
+
+
+class OnEquivariantTensorFieldNetwork(nn.Module):
+    """O(3)-invariant TFN via group averaging over reflections."""
+
+    def __init__(
+        self,
+        num_classes: int,
+        max_order: int = 1,
+        hidden_channels: int = 32,
+        num_layers: int = 4,
+        num_rbf: int = 32,
+        cutoff: float = 5.0,
+        k_neighbors: int = 16,
+        classifier_dims: Optional[List[int]] = None,
+    ):
+        super().__init__()
+        if classifier_dims is None:
+            classifier_dims = [128, 64]
+        base = TensorFieldNetwork(
+            num_classes=num_classes,
+            max_order=max_order,
+            hidden_channels=hidden_channels,
+            num_layers=num_layers,
+            num_rbf=num_rbf,
+            cutoff=cutoff,
+            k_neighbors=k_neighbors,
+            classifier_dims=classifier_dims,
+        )
+        self._inner = OnEquivariantWrapper(base)
+
+    def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
+        return self._inner(batch)
 
 
 # ---------------------------------------------------------------------------
@@ -705,7 +806,10 @@ __all__ = [
     'GTTensorFieldNetwork',
     'GTTensorFieldNetworkV2',
     'HierarchicalGTTFN',
+    'HierarchicalTensorFieldNetwork',
     'OnEquivariantWrapper',
+    'OnEquivariantTensorFieldNetwork',
+    'GTTFNEncoder',
     'PointNet3D',
     # Notebook / ragged models
     'ScalarDistanceDeepSet',

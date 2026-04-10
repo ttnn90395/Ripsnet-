@@ -32,14 +32,16 @@ os.makedirs('results', exist_ok=True)
 
 from models import (
     TensorFieldNetwork, GTTensorFieldNetwork, GTTensorFieldNetworkV2,
-    HierarchicalGTTFN, PointNet3D,
+    HierarchicalGTTFN, HierarchicalTensorFieldNetwork,
+    OnEquivariantTensorFieldNetwork, PointNet3D,
     ScalarDistanceDeepSet, PointNetTutorial, ScalarInputMLP, MultiInputModel,
     DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,
 )
 
 MODEL_NAMES = [
     'TensorFieldNetwork', 'GTTensorFieldNetwork', 'GTTensorFieldNetworkV2',
-    'HierarchicalGTTFN', 'PointNet3D',
+    'HierarchicalGTTFN', 'HierarchicalTensorFieldNetwork',
+    'OnEquivariantTensorFieldNetwork', 'PointNet3D',
     'ScalarDistanceDeepSet', 'PointNetTutorial', 'ScalarInputMLP', 'MultiInputModel',
     'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
 ]
@@ -164,6 +166,10 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
         return GTTensorFieldNetworkV2(n=n_dim, num_classes=output_dim)
     if name == 'HierarchicalGTTFN':
         return HierarchicalGTTFN(n=n_dim, num_classes=output_dim)
+    if name == 'HierarchicalTensorFieldNetwork':
+        return HierarchicalTensorFieldNetwork(num_classes=output_dim)
+    if name == 'OnEquivariantTensorFieldNetwork':
+        return OnEquivariantTensorFieldNetwork(num_classes=output_dim)
 
     # All other models accept activation and norm — BOTH must be forwarded
     # so that legacy checkpoints (relu, norm='none') reconstruct correctly.

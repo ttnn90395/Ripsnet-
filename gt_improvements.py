@@ -430,3 +430,37 @@ class OnEquivariantWrapper(nn.Module):
                    else self.base(self._reflect(batch), **kwargs)
         return 0.5 * (out_orig + out_refl)
 
+
+class GTTFNEncoder(nn.Module):
+    """Reusable TFN encoder backbone for embeddings or downstream heads."""
+
+    def __init__(
+        self,
+        n: int,
+        embedding_dim: int = 128,
+        max_order: int = 1,
+        hidden_channels: int = 32,
+        num_layers: int = 4,
+        num_rbf: int = 32,
+        cutoff: float = 5.0,
+        k_neighbors: int = 16,
+        classifier_dims: Optional[List[int]] = None,
+    ):
+        super().__init__()
+        if classifier_dims is None:
+            classifier_dims = [128, 64]
+        self.encoder = GTTensorFieldNetwork(
+            n=n,
+            num_classes=embedding_dim,
+            max_order=max_order,
+            hidden_channels=hidden_channels,
+            num_layers=num_layers,
+            num_rbf=num_rbf,
+            cutoff=cutoff,
+            k_neighbors=k_neighbors,
+            classifier_dims=classifier_dims,
+        )
+
+    def forward(self, batch: List[torch.Tensor], node_attrs: Optional[List[torch.Tensor]] = None) -> torch.Tensor:
+        return self.encoder(batch, node_attrs) if node_attrs is not None else self.encoder(batch)
+
