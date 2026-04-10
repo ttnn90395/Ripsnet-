@@ -44,8 +44,10 @@ normalize    = int(sys.argv[3])
 num_epochs   = int(sys.argv[4])
 PV_type      = sys.argv[5]
 mode         = sys.argv[6]
+batch_size   = int(sys.argv[7]) if len(sys.argv) > 7 else 32
 
 print(sys.argv)
+print(f'Batch size: {batch_size}')
 
 data = pck.load(open('datasets/' + dataset_name + ".pkl", 'rb'))
 data_train = data["data_train"]
@@ -308,6 +310,31 @@ def forward_single(model, x, mname, geom=None):
     return model(x.unsqueeze(0))
 
 
+def forward_batch(model, batch_data, mname, geom_batch=None):
+    """Forward a mini-batch of samples through the model."""
+    if len(batch_data) == 0:
+        return torch.empty(0, output_dim, device=device)
+
+    if mname == 'MultiInputModel':
+        pcs = [x[0] for x in batch_data]
+        scalars = torch.cat([x[1].reshape(1, -1) for x in batch_data], dim=0)
+        return model(pcs, scalars)
+
+    if mname == 'ScalarInputMLP':
+        if isinstance(batch_data, list):
+            batch_data = torch.cat([x.reshape(1, -1) for x in batch_data], dim=0)
+        return model(batch_data)
+
+    if geom_batch is not None and mname in TFN_MODELS:
+        inner = getattr(model, '_inner', model)
+        descs = [inner._encode_single(x, precomputed_geom=geom)
+                 for x, geom in zip(batch_data, geom_batch)]
+        descs_t = torch.stack(descs)
+        return inner.rho(descs_t)
+
+    return model(batch_data)
+
+
 # -------------------------------------------------------------------------
 # Early stopping helper
 # -------------------------------------------------------------------------
@@ -368,30 +395,44 @@ def get_target(targets, i):
     return torch.FloatTensor(targets[i:i + 1]).to(device)
 
 
-def train_epoch(model, data, targets, optimizer, criterion, mname, geom_cache=None):
+def train_epoch(model, data, targets, optimizer, criterion, mname,
+                geom_cache=None, batch_size=32):
     model.train()
     total_loss = 0.0
-    for i in range(len(data)):
+    n = len(data)
+    perm = np.random.permutation(n)
+    for start in range(0, n, batch_size):
+        batch_idx = perm[start:start + batch_size]
+        batch_data = [data[i] for i in batch_idx]
+        batch_targets = targets[batch_idx]
+        batch_geom = ([geom_cache[i] for i in batch_idx]
+                      if geom_cache is not None else None)
+
         optimizer.zero_grad()
-        geom   = geom_cache[i] if geom_cache is not None else None
-        output = forward_single(model, data[i], mname, geom=geom)
-        loss   = criterion(output, get_target(targets, i))
+        output = forward_batch(model, batch_data, mname, geom_batch=batch_geom)
+        loss = criterion(output, batch_targets)
         loss.backward()
         optimizer.step()
-        total_loss += loss.item()
-    return total_loss / len(data)
+        total_loss += loss.item() * len(batch_data)
+    return total_loss / n
 
 
-def evaluate(model, data, targets, criterion, mname, geom_cache=None):
+def evaluate(model, data, targets, criterion, mname,
+             geom_cache=None, batch_size=32):
     model.eval()
     total_loss = 0.0
+    n = len(data)
     with torch.no_grad():
-        for i in range(len(data)):
-            geom   = geom_cache[i] if geom_cache is not None else None
-            output = forward_single(model, data[i], mname, geom=geom)
-            loss   = criterion(output, get_target(targets, i))
-            total_loss += loss.item()
-    return total_loss / len(data)
+        for start in range(0, n, batch_size):
+            batch_idx = range(start, min(start + batch_size, n))
+            batch_data = [data[i] for i in batch_idx]
+            batch_targets = targets[start:start + len(batch_data)]
+            batch_geom = ([geom_cache[i] for i in batch_idx]
+                          if geom_cache is not None else None)
+            output = forward_batch(model, batch_data, mname, geom_batch=batch_geom)
+            loss = criterion(output, batch_targets)
+            total_loss += loss.item() * len(batch_data)
+    return total_loss / n
 
 
 # -------------------------------------------------------------------------
@@ -437,8 +478,8 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
     scheduler     = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=10, min_lr=1e-6)
     criterion     = nn.MSELoss()
-    targets_train = np.hstack(PVs_train)
-    targets_test  = np.hstack(PVs_test)
+    targets_train = torch.FloatTensor(np.hstack(PVs_train)).to(device)
+    targets_test  = torch.FloatTensor(np.hstack(PVs_test)).to(device)
 
     early_stop = EarlyStopping(patience=ES_PATIENCE, min_delta=ES_MIN_DELTA,
                                 restore=True)
@@ -448,9 +489,12 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
 
     for epoch in tqdm(range(num_epochs), desc=f"Epochs ({label})"):
         tr_loss  = train_epoch(m, train_data, targets_train,
-                               optimizer, criterion, mname, geom_train)
+                               optimizer, criterion, mname,
+                               geom_cache=geom_train,
+                               batch_size=batch_size)
         val_loss = evaluate(m, test_data, targets_test,
-                            criterion, mname, geom_test)
+                            criterion, mname, geom_cache=geom_test,
+                            batch_size=batch_size)
 
         scheduler.step(val_loss)
 
