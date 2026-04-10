@@ -540,7 +540,7 @@ def evaluate(model, data, targets, criterion, mname,
 # -------------------------------------------------------------------------
 
 # Early stopping defaults — can be tightened per model type
-ES_PATIENCE   = 30    # epochs without improvement before stopping
+ES_PATIENCE   = 50    # epochs without improvement before stopping
 ES_MIN_DELTA  = 5e-6  # minimum improvement threshold
 
 def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
