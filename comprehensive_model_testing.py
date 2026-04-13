@@ -139,11 +139,29 @@ def create_model(model_name, num_classes):
         return TFNWrapper(base_model)
 
     elif model_name == 'GTTensorFieldNetwork':
-        base_model = GTTensorFieldNetwork(n=2, num_classes=num_classes)  # 2D point clouds
+        base_model = GTTensorFieldNetwork(
+            n=2,
+            num_classes=num_classes,
+            hidden_channels=64,
+            num_layers=6,
+            num_rbf=64,
+            cutoff=2.0,
+            k_neighbors=16,
+            classifier_dims=[256, 128],
+            radial_hidden=128,
+        )  # 2D point clouds
         return TFNWrapper(base_model)
 
     elif model_name == 'HierarchicalGTTFN':
-        base_model = HierarchicalGTTFN(n=2, num_classes=num_classes)  # 2D point clouds
+        base_model = HierarchicalGTTFN(
+            n=2,
+            num_classes=num_classes,
+            hidden_channels=64,
+            stage_sizes=[256, 64],
+            num_rbf=64,
+            cutoff=2.0,
+            classifier_dims=[256, 128],
+        )  # 2D point clouds
         return TFNWrapper(base_model)
 
     elif model_name == 'ScalarDistanceDeepSet':
@@ -382,11 +400,12 @@ def test_all_models():
 
             # Train model
             print(f"Training {model_name}...")
+            train_epochs = 20 if model_name in ['TensorFieldNetwork', 'GTTensorFieldNetwork', 'HierarchicalGTTFN'] else 10
             model, history, _ = train_model_classification(
                 model, optimizer, criterion,
                 train_data_prepared, label_classif_train,
                 clean_test_data_prepared, clean_label_classif_test,
-                model_name, epochs=10,
+                model_name, epochs=train_epochs,
             )
 
             # Evaluate on clean test data

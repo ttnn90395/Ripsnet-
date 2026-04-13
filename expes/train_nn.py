@@ -309,17 +309,69 @@ def build_model_by_name(name, n=None):
     _n    = dim if n is None else n
     _npts = data_train_torch[0].shape[0] if data_train_torch else 128
     if name == 'TensorFieldNetwork':
-        return TensorFieldNetwork(num_classes=output_dim)
+        return TensorFieldNetwork(
+            num_classes=output_dim,
+            hidden_channels=64,
+            num_layers=6,
+            num_rbf=64,
+            cutoff=2.0,
+            k_neighbors=16,
+            classifier_dims=[256, 128],
+        )
     if name == 'GTTensorFieldNetwork':
-        return GTTensorFieldNetwork(n=_n, num_classes=output_dim)
+        return GTTensorFieldNetwork(
+            n=_n,
+            num_classes=output_dim,
+            hidden_channels=64,
+            num_layers=6,
+            num_rbf=64,
+            cutoff=2.0,
+            k_neighbors=16,
+            classifier_dims=[256, 128],
+            radial_hidden=128,
+        )
     if name == 'GTTensorFieldNetworkV2':
-        return GTTensorFieldNetworkV2(n=_n, num_classes=output_dim)
+        return GTTensorFieldNetworkV2(
+            n=_n,
+            num_classes=output_dim,
+            hidden_channels=64,
+            num_layers=6,
+            num_rbf=64,
+            cutoff=2.0,
+            k_neighbors=16,
+            classifier_dims=[256, 128],
+            radial_hidden=128,
+        )
     if name == 'HierarchicalGTTFN':
-        return HierarchicalGTTFN(n=_n, num_classes=output_dim)
+        return HierarchicalGTTFN(
+            n=_n,
+            num_classes=output_dim,
+            hidden_channels=64,
+            stage_sizes=[256, 64],
+            num_rbf=64,
+            cutoff=2.0,
+            classifier_dims=[256, 128],
+        )
     if name == 'HierarchicalTensorFieldNetwork':
-        return HierarchicalTensorFieldNetwork(num_classes=output_dim)
+        return HierarchicalTensorFieldNetwork(
+            num_classes=output_dim,
+            hidden_channels=64,
+            stage_sizes=[256, 64],
+            num_rbf=64,
+            cutoff=2.0,
+            classifier_dims=[256, 128],
+        )
     if name == 'OnEquivariantTensorFieldNetwork':
-        return OnEquivariantTensorFieldNetwork(num_classes=output_dim)
+        return OnEquivariantTensorFieldNetwork(
+            num_classes=output_dim,
+            max_order=1,
+            hidden_channels=64,
+            num_layers=6,
+            num_rbf=64,
+            cutoff=2.0,
+            k_neighbors=16,
+            classifier_dims=[256, 128],
+        )
     if name == 'PointNet3D':
         return PointNet3D(output_dim=output_dim)
     if name == 'ScalarDistanceDeepSet':
@@ -583,7 +635,8 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
     criterion     = nn.MSELoss()
     targets_train = torch.FloatTensor(np.hstack(PVs_train)).to(device)
     targets_test  = torch.FloatTensor(np.hstack(PVs_test)).to(device)
-    scaler        = torch.cuda.amp.GradScaler(enabled=(device.type == 'cuda'))
+    scaler        = torch.amp.GradScaler(device_type='cuda',
+                                         enabled=(device.type == 'cuda'))
 
     early_stop = EarlyStopping(patience=ES_PATIENCE, min_delta=ES_MIN_DELTA,
                                 restore=True)

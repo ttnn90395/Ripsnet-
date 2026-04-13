@@ -213,17 +213,17 @@ class GTTensorFieldNetworkV2(_GTTensorFieldNetworkBase):
         n:               int,
         num_classes:     int,
         max_order:       int       = 1,
-        hidden_channels: int       = 32,
-        num_layers:      int       = 4,
-        num_rbf:         int       = 32,
-        cutoff:          float     = 5.0,
+        hidden_channels: int       = 64,
+        num_layers:      int       = 6,
+        num_rbf:         int       = 64,
+        cutoff:          float     = 2.0,
         k_neighbors:     int       = 16,
         use_gate:        bool      = True,
         use_residual:    bool      = True,
         use_channel_mix: bool      = True,
         node_attr_dim:   int       = 0,
-        classifier_dims: List[int] = [128, 64],
-        radial_hidden:   int       = 64,
+        classifier_dims: List[int] = [256, 128],
+        radial_hidden:   int       = 128,
     ):
         super().__init__(
             n=n, num_classes=num_classes,
@@ -279,12 +279,12 @@ class TensorFieldNetwork(nn.Module):
         self,
         num_classes:     int,
         max_order:       int       = 1,
-        hidden_channels: int       = 32,
-        num_layers:      int       = 4,
-        num_rbf:         int       = 32,
-        cutoff:          float     = 5.0,
+        hidden_channels: int       = 64,
+        num_layers:      int       = 6,
+        num_rbf:         int       = 64,
+        cutoff:          float     = 2.0,
         k_neighbors:     int       = 16,
-        classifier_dims: List[int] = [128, 64],
+        classifier_dims: List[int] = [256, 128],
     ):
         super().__init__()
         self._inner = GTTensorFieldNetworkV2(
@@ -705,24 +705,24 @@ class HierarchicalTensorFieldNetwork(nn.Module):
         self,
         num_classes: int,
         max_order: int = 1,
-        hidden_channels: int = 32,
+        hidden_channels: int = 64,
         stage_sizes: Optional[List[int]] = None,
         stage_radii: Optional[List[float]] = None,
         k_local: int = 16,
         k_global: int = 16,
         num_layers_per_stage: int = 2,
-        num_rbf: int = 32,
-        cutoff: float = 1.0,
+        num_rbf: int = 64,
+        cutoff: float = 2.0,
         classifier_dims: Optional[List[int]] = None,
         node_attr_dim: int = 0,
     ):
         super().__init__()
         if stage_sizes is None:
-            stage_sizes = [128, 32]
+            stage_sizes = [256, 64]
         if stage_radii is None:
             stage_radii = [0.2, 0.4]
         if classifier_dims is None:
-            classifier_dims = [128, 64]
+            classifier_dims = [256, 128]
         self._inner = HierarchicalGTTFN(
             n=3,
             num_classes=num_classes,
