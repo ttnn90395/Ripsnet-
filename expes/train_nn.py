@@ -185,8 +185,8 @@ def precompute_geometry(model, data_list, mname):
 def tfn_batched_forward(model, data_list, geom_cache, mname, batch_size=64):
     """
     Run TFN inference over data_list in mini-batches, eliminating the Python
-    loop overhead for forward passes.  Each mini-batch calls model(batch)
-    directly, which processes B point clouds in a single forward.
+    loop overhead for forward passes.  Each mini-batch calls the fastest
+    available geometry-aware TFN path.
 
     Returns np.ndarray of shape (N, output_dim).
     """
@@ -196,27 +196,33 @@ def tfn_batched_forward(model, data_list, geom_cache, mname, batch_size=64):
         batch    = data_list[start:start + batch_size]
         batch_idx = range(start, min(start + batch_size, len(data_list)))
         geom_b   = _get_geom_batch(geom_cache, batch_idx) if geom_cache else None
-        with torch.no_grad():
+        with torch.inference_mode():
             if geom_b is not None:
-                descs = []
-                if isinstance(geom_b, dict) and geom_b.get('uniform', False):
-                    for i, pc in enumerate(batch):
-                        desc = inner._encode_single(
-                            pc,
-                            precomputed_geom=(
-                                geom_b['rbf'][i],
-                                geom_b['gt_edge'][i],
-                                geom_b['nbr_idx'][i],
-                            ),
-                        )
-                        descs.append(desc.detach())
+                if isinstance(geom_b, dict) and geom_b.get('uniform', False) and hasattr(inner, '_encode_batch'):
+                    batch_tensor = torch.stack(batch)
+                    out = inner._encode_batch(
+                        batch_tensor,
+                        precomputed_geom=(geom_b['rbf'], geom_b['gt_edge'], geom_b['nbr_idx']))
                 else:
-                    for pc, geom in zip(batch, geom_b):
-                        desc = inner._encode_single(
-                            pc, precomputed_geom=geom)
-                        descs.append(desc.detach())
-                descs_t = torch.stack(descs)
-                out = inner.rho(descs_t)
+                    descs = []
+                    if isinstance(geom_b, dict) and geom_b.get('uniform', False):
+                        for i, pc in enumerate(batch):
+                            desc = inner._encode_single(
+                                pc,
+                                precomputed_geom=(
+                                    geom_b['rbf'][i],
+                                    geom_b['gt_edge'][i],
+                                    geom_b['nbr_idx'][i],
+                                ),
+                            )
+                            descs.append(desc.detach())
+                    else:
+                        for pc, geom in zip(batch, geom_b):
+                            desc = inner._encode_single(
+                                pc, precomputed_geom=geom)
+                            descs.append(desc.detach())
+                    descs_t = torch.stack(descs)
+                    out = inner.rho(descs_t)
             else:
                 out = model(batch)
         results.append(out.detach().cpu().numpy())
@@ -452,6 +458,12 @@ def forward_batch(model, batch_data, mname, geom_batch=None):
 
     if geom_batch is not None and mname in TFN_MODELS:
         inner = getattr(model, '_inner', model)
+        if isinstance(geom_batch, dict) and geom_batch.get('uniform', False) and hasattr(inner, '_encode_batch'):
+            batch_tensor = torch.stack(batch_data)
+            return inner._encode_batch(
+                batch_tensor,
+                precomputed_geom=(geom_batch['rbf'], geom_batch['gt_edge'], geom_batch['nbr_idx']))
+
         if isinstance(geom_batch, dict) and geom_batch.get('uniform', False):
             descs = []
             for i, pc in enumerate(batch_data):

@@ -323,39 +323,51 @@ class GTTFNLayer(nn.Module):
     def forward(
         self,
         feats:    FeatureDict,
-        rbf:      torch.Tensor,   # dense: (N,N,R)  or  sparse: (N,k,R)
-        gt_edge:  torch.Tensor,   # dense: (N,N,B)  or  sparse: (N,k,B)
-        mask_or_nbr: torch.Tensor, # dense: (N,N) bool  or  sparse: (N,k) long
+        rbf:      torch.Tensor,   # dense: (N,N,R) or sparse: (N,k,R)
+        gt_edge:  torch.Tensor,   # dense: (N,N,B) or sparse: (N,k,B)
+        mask_or_nbr: torch.Tensor, # dense: (N,N) bool or sparse: (N,k) long
         sparse:   bool = False,
     ) -> FeatureDict:
-        N   = rbf.shape[0]
-        out: FeatureDict = {
-            sig: torch.zeros(N, c, sig.dim(), device=rbf.device)
-            for sig, c in self.out_types.items()
-        }
+        batch_mode = rbf.ndim == 4
+        if batch_mode:
+            B, N = rbf.shape[0], rbf.shape[1]
+            out: FeatureDict = {
+                sig: torch.zeros(B, N, c, sig.dim(), device=rbf.device)
+                for sig, c in self.out_types.items()
+            }
+        else:
+            N = rbf.shape[0]
+            out: FeatureDict = {
+                sig: torch.zeros(N, c, sig.dim(), device=rbf.device)
+                for sig, c in self.out_types.items()
+            }
 
         gt_by_sig = self._split_edge(gt_edge)
 
         for sig_in, sig_edge, sig_out in self._interactions:
             if sig_in not in feats:
                 continue
-            f_in  = feats[sig_in]                                    # (N, Ci, di)
+            f_in  = feats[sig_in]                                    # (N, Ci, di) or (B, N, Ci, di)
             c_in  = f_in.shape[1]
             c_out = self.out_types[sig_out]
             cg_t  = self.cg.get(sig_in, sig_edge, sig_out)          # (di, de, do)
-            e_f   = gt_by_sig[sig_edge]                              # (N, K, de)
+            e_f   = gt_by_sig[sig_edge]                              # (N, K, de) or (B, N, K, de)
             key   = _interaction_key(sig_in, sig_edge, sig_out)
-            rad   = self.radial_nets[key](rbf)                       # (N, K, Ci*Co)
+            rad   = self.radial_nets[key](rbf)                       # (..., K, Ci*Co)
             K     = rad.shape[1]
-            rad   = rad.reshape(N, K, c_in, c_out)
-
-            # Contract f_in with CG: (N, Ci, di) × (di, de, do) → (N, Ci, de, do)
-            fCG   = torch.einsum("jci,ieo->jceo", f_in, cg_t)       # (N, Ci, de, do)
+            if batch_mode:
+                rad = rad.reshape(B, N, K, c_in, c_out)
+                fCG = torch.einsum("bnci,ieo->bnceo", f_in, cg_t)  # (B, N, Ci, de, do)
+            else:
+                rad = rad.reshape(N, K, c_in, c_out)
+                fCG = torch.einsum("jci,ieo->jceo", f_in, cg_t)     # (N, Ci, de, do)
 
             if sparse:
-                msg = self._message_sparse(fCG, e_f, rad, mask_or_nbr, N, K, c_in, c_out)
+                msg = self._message_sparse(fCG, e_f, rad, mask_or_nbr,
+                                           N, K, c_in, c_out)
             else:
-                msg = self._message_dense(fCG, e_f, rad, mask_or_nbr, N, K, c_in, c_out)
+                msg = self._message_dense(fCG, e_f, rad, mask_or_nbr,
+                                          N, K, c_in, c_out)
 
             out[sig_out] = out[sig_out] + msg
 
@@ -375,23 +387,27 @@ class GTTFNLayer(nn.Module):
     # ------------------------------------------------------------------
     def _message_dense(self, fCG, e_feat, radial, mask, N, K, c_in, c_out):
         """Dense (N,N) message passing."""
-        # fCG:   (N, Ci, de, do)
-        # e_feat:(N, N, de)
-        # radial:(N, N, Ci, Co)
-        # mask:  (N, N) bool
-        contracted = torch.einsum("ije,jceo->ijco", e_feat, fCG)     # (N,N,Ci,do)
-        masked     = contracted * mask.unsqueeze(-1).unsqueeze(-1).float()
-        return torch.einsum("ijco,ijcd->iod", radial, masked)         # (N,Co,do)
+        if fCG.ndim == 5:
+            contracted = torch.einsum("bnje,bnceo->bnjco", e_feat, fCG)  # (B, N, N, Ci, do)
+            masked = contracted * mask.unsqueeze(-1).unsqueeze(-1).float()
+            return torch.einsum("bnjco,bnjcd->bnod", radial, masked)    # (B, N, Co, do)
+
+        contracted = torch.einsum("ije,jceo->ijco", e_feat, fCG)      # (N, N, Ci, do)
+        masked = contracted * mask.unsqueeze(-1).unsqueeze(-1).float()
+        return torch.einsum("ijco,ijcd->iod", radial, masked)         # (N, Co, do)
 
     def _message_sparse(self, fCG, e_feat, radial, nbr_idx, N, k, c_in, c_out):
         """Sparse (N,k) message passing — gather neighbor features by index."""
-        # fCG:    (N, Ci, de, do)
-        # e_feat: (N, k, de)
-        # radial: (N, k, Ci, Co)
-        # nbr_idx:(N, k) long
+        if fCG.ndim == 5:
+            idx = nbr_idx.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(
+                -1, -1, -1, c_in, fCG.shape[3], fCG.shape[4])
+            fCG_nbr = fCG.gather(1, idx)                                 # (B, N, k, Ci, de, do)
+            contracted = torch.einsum("bnje,bnjceo->bnjco", e_feat, fCG_nbr)  # (B, N, k, Ci, do)
+            return torch.einsum("bnjco,bnjcd->bnod", radial, contracted)         # (B, N, Co, do)
+
         fCG_nbr = fCG[nbr_idx.reshape(-1)].reshape(N, k, c_in, fCG.shape[2], fCG.shape[3])
-        contracted = torch.einsum("ije,ijceo->ijco", e_feat, fCG_nbr)  # (N,k,Ci,do)
-        return torch.einsum("ijco,ijcd->iod", radial, contracted)        # (N,Co,do)
+        contracted = torch.einsum("ije,ijceo->ijco", e_feat, fCG_nbr)      # (N, k, Ci, do)
+        return torch.einsum("ijco,ijcd->iod", radial, contracted)           # (N, Co, do)
 
     def _split_edge(self, gt_edge):
         result, offset = {}, 0
@@ -403,10 +419,53 @@ class GTTFNLayer(nn.Module):
     def _apply_norm(self, feats: FeatureDict) -> FeatureDict:
         out = {}
         for sig, f in feats.items():
-            norms  = f.norm(dim=-1, keepdim=True).clamp(min=1e-8)   # (N,C,1)
+            norms  = f.norm(dim=-1, keepdim=True).clamp(min=1e-8)
             scaled = self.layer_norms[_sig_key(sig)](norms.squeeze(-1))
             out[sig] = f / norms * scaled.unsqueeze(-1)
         return out
+
+
+def knn_geometry_batch(
+    pos:         torch.Tensor,
+    rbf_encoder: RBFExpansion,
+    gt_basis:    GTBasis,
+    k:           int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Batched sparse k-NN geometry for uniform point clouds."""
+    B, N, n = pos.shape
+    k = min(k, N - 1)
+    diff = pos.unsqueeze(2) - pos.unsqueeze(1)                     # (B, N, N, n)
+    dist = diff.norm(dim=-1)                                       # (B, N, N)
+
+    dist_masked = dist.clone()
+    idx = torch.arange(N, device=pos.device)
+    dist_masked[:, idx, idx] = float('inf')
+    _, nbr_idx = dist_masked.topk(k, dim=-1, largest=False)        # (B, N, k)
+
+    pos_j = pos.gather(1, nbr_idx.unsqueeze(-1).expand(-1, -1, -1, n))  # (B, N, k, n)
+    diff_knn = pos.unsqueeze(2) - pos_j                                 # (B, N, k, n)
+    dist_knn = diff_knn.norm(dim=-1)                                    # (B, N, k)
+    r_hat = diff_knn / dist_knn.unsqueeze(-1).clamp(min=1e-8)           # (B, N, k, n)
+
+    rbf = rbf_encoder(dist_knn)
+    gt_edge = gt_basis(r_hat.reshape(-1, n)).reshape(B, N, k, -1)
+    return rbf, gt_edge, nbr_idx
+
+
+def pairwise_geometry_batch(
+    pos:         torch.Tensor,
+    rbf_encoder: RBFExpansion,
+    gt_basis:    GTBasis,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Batched dense pairwise geometry for uniform point clouds."""
+    B, N, n = pos.shape
+    diff = pos.unsqueeze(2) - pos.unsqueeze(1)                    # (B, N, N, n)
+    dist = diff.norm(dim=-1)                                       # (B, N, N)
+    r_hat = diff / dist.unsqueeze(-1).clamp(min=1e-8)              # (B, N, N, n)
+    rbf = rbf_encoder(dist)
+    gt_edge = gt_basis(r_hat.reshape(-1, n)).reshape(B, N, N, -1)
+    mask = ~torch.eye(N, dtype=torch.bool, device=pos.device).unsqueeze(0).expand(B, N, N)
+    return rbf, gt_edge, mask
 
 
 # ============================================================================
@@ -501,6 +560,65 @@ class GTTensorFieldNetwork(nn.Module):
 
         self._scalar_sig = scalar_sig
         self._vector_sig = vector_sig
+
+    # ------------------------------------------------------------------
+    def _encode_batch(
+        self,
+        pos:       torch.Tensor,
+        node_attr: Optional[torch.Tensor] = None,
+        precomputed_geom = None
+    ) -> torch.Tensor:
+        if pos.ndim != 3:
+            raise ValueError("pos must be a batched tensor of shape (B, N, n)")
+        B, N = pos.shape[0], pos.shape[1]
+        sc = self._scalar_sig
+        vc = self._vector_sig
+
+        # Initial features
+        f0_parts = [pos.norm(dim=-1, keepdim=True)]                      # (B, N, 1)
+        if node_attr is not None and self.node_attr_dim > 0:
+            f0_parts.append(self.attr_proj(node_attr))
+        f0 = torch.cat(f0_parts, dim=-1).unsqueeze(2)                    # (B, N, C, 1)
+
+        # Reshape: need (B, N, C, d)
+        f1 = (pos / pos.norm(dim=-1, keepdim=True).clamp(min=1e-8)).unsqueeze(2)  # (B, N, 1, n)
+        feats: FeatureDict = {sc: f0, vc: f1}
+
+        if precomputed_geom is not None:
+            rbf, gt_edge, nbr_idx = precomputed_geom
+            use_sparse = True
+        else:
+            use_sparse = (self.k_neighbors is not None and self.k_neighbors < N - 1)
+            if use_sparse:
+                rbf, gt_edge, nbr_idx = knn_geometry_batch(
+                    pos, self.rbf, self.gt_basis, self.k_neighbors)
+            else:
+                rbf, gt_edge, mask = pairwise_geometry_batch(
+                    pos, self.rbf, self.gt_basis)
+
+        for i, layer in enumerate(self.mp_layers):
+            if use_sparse:
+                feats = layer(feats, rbf, gt_edge, nbr_idx, sparse=True)
+            else:
+                feats = layer(feats, rbf, gt_edge, mask, sparse=False)
+            if self.mix_layers is not None:
+                feats = self.mix_layers[i](feats)
+
+        # Invariant readout
+        parts = []
+        for sig in self.gt_basis.signatures:
+            if sig not in feats:
+                parts.append(torch.zeros(B, N, feats[sc].shape[1], device=pos.device))
+                continue
+            f = feats[sig]
+            if sig == sc:
+                parts.append(f.squeeze(-1))       # scalars already invariant
+            else:
+                parts.append(f.norm(dim=-1))      # norms of equivariant feats
+
+        node_inv = torch.cat(parts, dim=-1)        # (B, N, inv_dim)
+        descs = node_inv.max(dim=1).values         # (B, inv_dim)
+        return self.rho(descs)
 
     # ------------------------------------------------------------------
     def _encode_single(

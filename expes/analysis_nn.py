@@ -156,20 +156,90 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
     """
     n_dim = dim if n is None else n
     extra = extra or {}
+    hidden_channels = extra.get('hidden_channels')
+    num_layers = extra.get('num_layers')
+    num_rbf = extra.get('num_rbf')
+    classifier_dims = extra.get('classifier_dims')
+    radial_hidden = extra.get('radial_hidden')
+    cutoff = extra.get('cutoff', 2.0)
+    k_neighbors = extra.get('k_neighbors', 16)
 
     # TFN-family models: activation/norm are internal to gt_tfn_layer.py
     if name == 'TensorFieldNetwork':
-        return TensorFieldNetwork(num_classes=output_dim)
+        return TensorFieldNetwork(
+            num_classes=output_dim,
+            hidden_channels=hidden_channels or 64,
+            num_layers=num_layers or 6,
+            num_rbf=num_rbf or 64,
+            cutoff=cutoff,
+            k_neighbors=k_neighbors,
+            classifier_dims=classifier_dims or [256, 128],
+            radial_hidden=radial_hidden or 128,
+        )
     if name == 'GTTensorFieldNetwork':
-        return GTTensorFieldNetwork(n=n_dim, num_classes=output_dim)
+        return GTTensorFieldNetwork(
+            n=n_dim,
+            num_classes=output_dim,
+            hidden_channels=hidden_channels or 64,
+            num_layers=num_layers or 6,
+            num_rbf=num_rbf or 64,
+            cutoff=cutoff,
+            k_neighbors=k_neighbors,
+            classifier_dims=classifier_dims or [256, 128],
+            radial_hidden=radial_hidden or 128,
+        )
     if name == 'GTTensorFieldNetworkV2':
-        return GTTensorFieldNetworkV2(n=n_dim, num_classes=output_dim)
+        return GTTensorFieldNetworkV2(
+            n=n_dim,
+            num_classes=output_dim,
+            hidden_channels=hidden_channels or 64,
+            num_layers=num_layers or 6,
+            num_rbf=num_rbf or 64,
+            cutoff=cutoff,
+            k_neighbors=k_neighbors,
+            classifier_dims=classifier_dims or [256, 128],
+            radial_hidden=radial_hidden or 128,
+        )
     if name == 'HierarchicalGTTFN':
-        return HierarchicalGTTFN(n=n_dim, num_classes=output_dim)
+        return HierarchicalGTTFN(
+            n=n_dim,
+            num_classes=output_dim,
+            hidden_channels=hidden_channels or 64,
+            stage_sizes=extra.get('stage_sizes', [256, 64]),
+            stage_radii=extra.get('stage_radii', [0.2, 0.4]),
+            k_local=extra.get('k_local', 16),
+            k_global=extra.get('k_global', 16),
+            num_layers_per_stage=extra.get('num_layers_per_stage', 2),
+            num_rbf=num_rbf or 64,
+            cutoff=cutoff,
+            classifier_dims=classifier_dims or [256, 128],
+            node_attr_dim=extra.get('node_attr_dim', 0),
+        )
     if name == 'HierarchicalTensorFieldNetwork':
-        return HierarchicalTensorFieldNetwork(num_classes=output_dim)
+        return HierarchicalTensorFieldNetwork(
+            num_classes=output_dim,
+            hidden_channels=hidden_channels or 64,
+            stage_sizes=extra.get('stage_sizes', [256, 64]),
+            stage_radii=extra.get('stage_radii', [0.2, 0.4]),
+            k_local=extra.get('k_local', 16),
+            k_global=extra.get('k_global', 16),
+            num_layers_per_stage=extra.get('num_layers_per_stage', 2),
+            num_rbf=num_rbf or 64,
+            cutoff=cutoff,
+            classifier_dims=classifier_dims or [256, 128],
+            node_attr_dim=extra.get('node_attr_dim', 0),
+        )
     if name == 'OnEquivariantTensorFieldNetwork':
-        return OnEquivariantTensorFieldNetwork(num_classes=output_dim)
+        return OnEquivariantTensorFieldNetwork(
+            num_classes=output_dim,
+            max_order=extra.get('max_order', 1),
+            hidden_channels=hidden_channels or 64,
+            num_layers=num_layers or 6,
+            num_rbf=num_rbf or 64,
+            cutoff=cutoff,
+            k_neighbors=k_neighbors,
+            classifier_dims=classifier_dims or [256, 128],
+        )
 
     # All other models accept activation and norm — BOTH must be forwarded
     # so that legacy checkpoints (relu, norm='none') reconstruct correctly.
@@ -204,6 +274,54 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
                                          num_points=npts,
                                          activation=activation, norm=norm)
     raise ValueError(f"Unknown model name: {name}")
+
+
+def _infer_tfn_architecture(model_state):
+    """Infer legacy/default TFN architecture parameters from a saved state dict."""
+    keys = set(model_state.keys())
+    prefix = '_inner.' if any(k.startswith('_inner.') for k in keys) else ''
+
+    info = {}
+    rbf_key = prefix + 'rbf.centers'
+    if rbf_key in model_state:
+        info['num_rbf'] = model_state[rbf_key].shape[0]
+
+    gate_key = next(
+        (k for k in keys
+         if k.endswith('.gate.gates.sig_(0,)_n3.weight')
+         or k.endswith('.gate.gates.sig_(1,)_n3.weight')),
+        None)
+    if gate_key is not None:
+        info['hidden_channels'] = model_state[gate_key].shape[0]
+
+    layer_idxs = []
+    mp_prefix = prefix + 'mp_layers.'
+    for k in keys:
+        if k.startswith(mp_prefix):
+            rest = k[len(mp_prefix):]
+            idx = rest.split('.', 1)[0]
+            if idx.isdecimal():
+                layer_idxs.append(int(idx))
+    if layer_idxs:
+        info['num_layers'] = max(layer_idxs) + 1
+
+    rho0 = prefix + 'rho.0.weight'
+    rho2 = prefix + 'rho.2.weight'
+    if rho0 in keys and rho2 in keys:
+        info['classifier_dims'] = [model_state[rho0].shape[0], model_state[rho2].shape[0]]
+
+    if 'hidden_channels' in info and 'classifier_dims' not in info:
+        hidden = info['hidden_channels']
+        info['classifier_dims'] = [hidden * 2, hidden]
+
+    if 'hidden_channels' in info and 'radial_hidden' not in info:
+        info['radial_hidden'] = info['hidden_channels'] * 2
+
+    if info.get('num_layers') == 4 and info.get('num_rbf') == 32 and info.get('hidden_channels') == 32:
+        info.setdefault('cutoff', 5.0)
+
+    return info
+
 
 # -------------------------------------------------------------------------
 # Gaussian smoothing  (Fix 4: batched vectorised kernel)
@@ -312,13 +430,8 @@ def tfn_batched_forward(model, data_list, geom_cache, batch_size=64):
 
     When geometry is uniform (all point clouds same N, always true for UCR):
       - Slices (B_mini, N, k, *) geometry tensors per mini-batch
-      - Calls _encode_single per sample within the mini-batch (still needed
-        because GTTFNLayer operates on individual point clouds)
-      - Stacks descriptors → single rho() call per mini-batch
-      - No Python loop over samples in the hot path — only over mini-batches
-
-    The .detach() calls prevent "can't call numpy() on tensor that requires
-    grad" — geometry tensors created outside no_grad() may retain grad_fn.
+      - Uses a dedicated batched TFN path when available
+      - Avoids Python loops over points inside the hot forward path
 
     Returns np.ndarray (N, output_dim).
     """
@@ -328,7 +441,7 @@ def tfn_batched_forward(model, data_list, geom_cache, batch_size=64):
     is_batched_geom = (
         isinstance(geom_cache, dict) and geom_cache.get('uniform', False))
 
-    with torch.no_grad():
+    with torch.inference_mode():
         for start in range(0, len(data_list), batch_size):
             end   = min(start + batch_size, len(data_list))
             batch = data_list[start:end]
@@ -338,13 +451,19 @@ def tfn_batched_forward(model, data_list, geom_cache, batch_size=64):
                 rbf_b     = geom_cache['rbf'][start:end]      # (B, N, k, R)
                 gt_edge_b = geom_cache['gt_edge'][start:end]  # (B, N, k, Basis)
                 nbr_b     = geom_cache['nbr_idx'][start:end]  # (B, N, k)
-                descs = []
-                for i, pc in enumerate(batch):
-                    desc = inner._encode_single(
-                        pc,
-                        precomputed_geom=(rbf_b[i], gt_edge_b[i], nbr_b[i]))
-                    descs.append(desc.detach())
-                out = inner.rho(torch.stack(descs))
+                if hasattr(inner, '_encode_batch'):
+                    batch_tensor = torch.stack(batch)
+                    out = inner._encode_batch(
+                        batch_tensor,
+                        precomputed_geom=(rbf_b, gt_edge_b, nbr_b))
+                else:
+                    descs = []
+                    for i, pc in enumerate(batch):
+                        desc = inner._encode_single(
+                            pc,
+                            precomputed_geom=(rbf_b[i], gt_edge_b[i], nbr_b[i]))
+                        descs.append(desc.detach())
+                    out = inner.rho(torch.stack(descs))
 
             elif geom_cache is not None:
                 # Per-sample list fallback
@@ -714,6 +833,14 @@ def load_and_eval(model_name, use_gs=False):
     print(f'  class={class_name}  ckpt_type={ckpt_type}'
           f'  out={output_dim}  dim={ckpt_dim}  GS={ckpt_use_gs}')
 
+    # --- infer legacy TFN architecture whenever possible ---
+    tfn_extra = {}
+    if class_name in ['TensorFieldNetwork', 'GTTensorFieldNetwork',
+                      'GTTensorFieldNetworkV2', 'HierarchicalGTTFN',
+                      'HierarchicalTensorFieldNetwork',
+                      'OnEquivariantTensorFieldNetwork']:
+        tfn_extra = _infer_tfn_architecture(model_state)
+
     # --- instantiate and load weights ---
     try:
         if class_name == 'TFNTensorFieldNetwork':
@@ -738,6 +865,7 @@ def load_and_eval(model_name, use_gs=False):
         else:
             model_PV = build_analysis_model(
                 class_name, output_dim, n=ckpt_dim,
+                extra=tfn_extra,
                 activation=ckpt_activation, norm=ckpt_norm)
             model_PV.load_state_dict(model_state)
 
