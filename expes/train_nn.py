@@ -635,8 +635,11 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
     criterion     = nn.MSELoss()
     targets_train = torch.FloatTensor(np.hstack(PVs_train)).to(device)
     targets_test  = torch.FloatTensor(np.hstack(PVs_test)).to(device)
-    scaler        = torch.amp.GradScaler(device_type='cuda',
-                                         enabled=(device.type == 'cuda'))
+    try:
+        scaler = torch.amp.GradScaler(device_type='cuda',
+                                     enabled=(device.type == 'cuda'))
+    except TypeError:
+        scaler = torch.amp.GradScaler(enabled=(device.type == 'cuda'))
 
     early_stop = EarlyStopping(patience=ES_PATIENCE, min_delta=ES_MIN_DELTA,
                                 restore=True)
