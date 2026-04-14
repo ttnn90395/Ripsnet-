@@ -96,13 +96,13 @@ def knn_geometry(
     dist = diff.norm(dim=-1)                      # (N, N)
 
     # Mask self-distances and find k nearest
-    dist_masked = dist.clone()
-    dist_masked.fill_diagonal_(float('inf'))
+    mask = torch.eye(N, dtype=torch.bool, device=pos.device)
+    dist_masked = dist.masked_fill(mask, float('inf'))
     _, nbr_idx = dist_masked.topk(k, dim=-1, largest=False)  # (N, k)
 
     # Gather neighbor positions and compute edge vectors
-    pos_j   = pos[nbr_idx.reshape(-1)].reshape(N, k, n)     # (N, k, n)
-    diff_knn = pos.unsqueeze(1) - pos_j                      # (N, k, n)
+    pos_j = pos.gather(0, nbr_idx.unsqueeze(-1).expand(-1, -1, n))  # (N, k, n)
+    diff_knn = pos.unsqueeze(1) - pos_j                                # (N, k, n)
     dist_knn = diff_knn.norm(dim=-1)                         # (N, k)
     r_hat    = diff_knn / dist_knn.unsqueeze(-1).clamp(min=1e-8)  # (N, k, n)
 
@@ -181,9 +181,13 @@ class ResidualProjection(nn.Module):
         for sig, f_out in feats_out.items():
             key = _sig_key(sig)
             if key in self.projs and sig in feats_in:
-                f_in  = feats_in[sig]          # (N, C_in, d)
-                # Apply linear over channel dim; d is the irrep dim
-                proj  = self.projs[key](f_in.transpose(-1, -2)).transpose(-1, -2)  # (N, C_out, d)
+                f_in = feats_in[sig]
+                if f_in.ndim == 4:
+                    B, N, C_in, d = f_in.shape
+                    proj = self.projs[key](f_in.permute(0, 1, 3, 2).reshape(B * N * d, C_in))
+                    proj = proj.reshape(B, N, d, -1).permute(0, 1, 3, 2)
+                else:
+                    proj = self.projs[key](f_in.transpose(-1, -2)).transpose(-1, -2)
                 result[sig] = f_out + proj
             else:
                 result[sig] = f_out
@@ -221,11 +225,16 @@ class ChannelMixer(nn.Module):
             if key not in self.mlps:
                 out[sig] = f
                 continue
-            # f: (N, C, d) — apply MLP over C independently for each d
-            N, C, d = f.shape
-            f_t = f.permute(0, 2, 1).reshape(N*d, C)  # (N*d, C)
-            f_t = self.mlps[key](f_t)
-            out[sig] = f_t.reshape(N, d, C).permute(0, 2, 1)  # (N, C, d)
+            if f.ndim == 4:
+                B, N, C, d = f.shape
+                f_t = f.permute(0, 1, 3, 2).reshape(B * N * d, C)
+                f_t = self.mlps[key](f_t)
+                out[sig] = f_t.reshape(B, N, d, C).permute(0, 1, 3, 2)
+            else:
+                N, C, d = f.shape
+                f_t = f.permute(0, 2, 1).reshape(N * d, C)  # (N*d, C)
+                f_t = self.mlps[key](f_t)
+                out[sig] = f_t.reshape(N, d, C).permute(0, 2, 1)  # (N, C, d)
         return out
 
 
@@ -405,7 +414,8 @@ class GTTFNLayer(nn.Module):
             contracted = torch.einsum("bnje,bnjceo->bnjco", e_feat, fCG_nbr)  # (B, N, k, Ci, do)
             return torch.einsum("bnjco,bnjcd->bnod", radial, contracted)         # (B, N, Co, do)
 
-        fCG_nbr = fCG[nbr_idx.reshape(-1)].reshape(N, k, c_in, fCG.shape[2], fCG.shape[3])
+        idx = nbr_idx.view(N, k, 1, 1, 1).expand(-1, -1, c_in, fCG.shape[2], fCG.shape[3])
+        fCG_nbr = fCG.gather(0, idx)                                       # (N, k, Ci, de, do)
         contracted = torch.einsum("ije,ijceo->ijco", e_feat, fCG_nbr)      # (N, k, Ci, do)
         return torch.einsum("ijco,ijcd->iod", radial, contracted)           # (N, Co, do)
 
@@ -437,9 +447,8 @@ def knn_geometry_batch(
     diff = pos.unsqueeze(2) - pos.unsqueeze(1)                     # (B, N, N, n)
     dist = diff.norm(dim=-1)                                       # (B, N, N)
 
-    dist_masked = dist.clone()
-    idx = torch.arange(N, device=pos.device)
-    dist_masked[:, idx, idx] = float('inf')
+    mask = torch.eye(N, dtype=torch.bool, device=pos.device).unsqueeze(0).expand(B, N, N)
+    dist_masked = dist.masked_fill(mask, float('inf'))
     _, nbr_idx = dist_masked.topk(k, dim=-1, largest=False)        # (B, N, k)
 
     pos_j = pos.gather(1, nbr_idx.unsqueeze(-1).expand(-1, -1, -1, n))  # (B, N, k, n)

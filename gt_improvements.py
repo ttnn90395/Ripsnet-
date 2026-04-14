@@ -57,13 +57,13 @@ def farthest_point_sample(pos: torch.Tensor, n_samples: int) -> torch.Tensor:
     dist     = torch.full((N,), float('inf'), device=device)
 
     # Start from a random point
-    current = torch.randint(0, N, (1,), device=device).item()
+    current = torch.randint(0, N, (), device=device, dtype=torch.long)
     for i in range(n_samples):
         selected[i] = current
         current_pos = pos[current]                    # (d,)
         d2 = ((pos - current_pos) ** 2).sum(dim=-1)  # (N,)
         dist = torch.minimum(dist, d2)
-        current = dist.argmax().item()
+        current = dist.argmax(dim=0)
 
     return selected
 
