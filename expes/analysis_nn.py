@@ -305,10 +305,20 @@ def _infer_tfn_architecture(model_state):
     if layer_idxs:
         info['num_layers'] = max(layer_idxs) + 1
 
-    rho0 = prefix + 'rho.0.weight'
-    rho2 = prefix + 'rho.2.weight'
-    if rho0 in keys and rho2 in keys:
-        info['classifier_dims'] = [model_state[rho0].shape[0], model_state[rho2].shape[0]]
+    rho_keys = [k for k in keys if k.startswith(prefix + 'rho.') and k.endswith('.weight')]
+    rho_weights = []
+    for k in rho_keys:
+        try:
+            idx = int(k[len(prefix + 'rho.'):].split('.', 1)[0])
+        except ValueError:
+            continue
+        rho_weights.append((idx, model_state[k]))
+    rho_weights.sort(key=lambda x: x[0])
+    if len(rho_weights) >= 2:
+        # Infer hidden classifier dims from all rho linear layers except final output.
+        hidden_dims = [w.shape[0] for idx, w in rho_weights[:-1]]
+        if hidden_dims:
+            info['classifier_dims'] = hidden_dims
 
     if 'hidden_channels' in info and 'classifier_dims' not in info:
         hidden = info['hidden_channels']
