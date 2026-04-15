@@ -101,9 +101,9 @@ def knn_geometry(
     _, nbr_idx = dist_masked.topk(k, dim=-1, largest=False)  # (N, k)
 
     # Gather neighbor positions and compute edge vectors
-    pos_j = pos.gather(0, nbr_idx.unsqueeze(-1).expand(-1, -1, n))  # (N, k, n)
-    diff_knn = pos.unsqueeze(1) - pos_j                                # (N, k, n)
-    dist_knn = diff_knn.norm(dim=-1)                         # (N, k)
+    pos_j = pos[nbr_idx]                                        # (N, k, n)
+    diff_knn = pos.unsqueeze(1) - pos_j                         # (N, k, n)
+    dist_knn = diff_knn.norm(dim=-1)                            # (N, k)
     r_hat    = diff_knn / dist_knn.unsqueeze(-1).clamp(min=1e-8)  # (N, k, n)
 
     rbf      = rbf_encoder(dist_knn)                         # (N, k, R)
@@ -408,14 +408,12 @@ class GTTFNLayer(nn.Module):
     def _message_sparse(self, fCG, e_feat, radial, nbr_idx, N, k, c_in, c_out):
         """Sparse (N,k) message passing — gather neighbor features by index."""
         if fCG.ndim == 5:
-            idx = nbr_idx.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(
-                -1, -1, -1, c_in, fCG.shape[3], fCG.shape[4])
-            fCG_nbr = fCG.gather(1, idx)                                 # (B, N, k, Ci, de, do)
+            batch_idx = torch.arange(fCG.shape[0], device=fCG.device)[:, None, None]
+            fCG_nbr = fCG[batch_idx, nbr_idx]                               # (B, N, k, Ci, de, do)
             contracted = torch.einsum("bnje,bnjceo->bnjco", e_feat, fCG_nbr)  # (B, N, k, Ci, do)
             return torch.einsum("bnjco,bnjcd->bnod", radial, contracted)         # (B, N, Co, do)
 
-        idx = nbr_idx.view(N, k, 1, 1, 1).expand(-1, -1, c_in, fCG.shape[2], fCG.shape[3])
-        fCG_nbr = fCG.gather(0, idx)                                       # (N, k, Ci, de, do)
+        fCG_nbr = fCG[nbr_idx]                                             # (N, k, Ci, de, do)
         contracted = torch.einsum("ije,ijceo->ijco", e_feat, fCG_nbr)      # (N, k, Ci, do)
         return torch.einsum("ijco,ijcd->iod", radial, contracted)           # (N, Co, do)
 
@@ -451,9 +449,10 @@ def knn_geometry_batch(
     dist_masked = dist.masked_fill(mask, float('inf'))
     _, nbr_idx = dist_masked.topk(k, dim=-1, largest=False)        # (B, N, k)
 
-    pos_j = pos.gather(1, nbr_idx.unsqueeze(-1).expand(-1, -1, -1, n))  # (B, N, k, n)
-    diff_knn = pos.unsqueeze(2) - pos_j                                 # (B, N, k, n)
-    dist_knn = diff_knn.norm(dim=-1)                                    # (B, N, k)
+    batch_idx = torch.arange(B, device=pos.device)[:, None, None]
+    pos_j = pos[batch_idx, nbr_idx]                                   # (B, N, k, n)
+    diff_knn = pos.unsqueeze(2) - pos_j                                # (B, N, k, n)
+    dist_knn = diff_knn.norm(dim=-1)                                   # (B, N, k)
     r_hat = diff_knn / dist_knn.unsqueeze(-1).clamp(min=1e-8)           # (B, N, k, n)
 
     rbf = rbf_encoder(dist_knn)

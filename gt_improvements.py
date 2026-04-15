@@ -88,6 +88,7 @@ def ball_query(
     dist2 = (diff ** 2).sum(dim=-1)                   # (M, N)
 
     # For each center, get k nearest within radius
+    k = min(k, N)
     within = dist2 <= radius ** 2                      # (M, N) bool
     # Replace out-of-radius distances with inf
     dist2_masked = dist2.clone()
@@ -168,15 +169,16 @@ class HierPoolStage(nn.Module):
         nbr_idx   = ball_query(pos, centroids, self.radius, self.k_local)  # (M, k)
 
         # 3. Local geometry for each centroid→neighbor edge
-        pos_j      = pos[nbr_idx.reshape(-1)].reshape(M, self.k_local, pos.shape[-1])
-        diff       = centroids.unsqueeze(1) - pos_j      # (M, k, n)
-        dist       = diff.norm(dim=-1).clamp(min=1e-8)   # (M, k)
-        r_hat      = diff / dist.unsqueeze(-1)            # (M, k, n)
-        rbf        = self.rbf_enc(dist)                   # (M, k, R)
+        K = nbr_idx.shape[1]
+        pos_j      = pos[nbr_idx.reshape(-1)].reshape(M, K, pos.shape[-1])
+        diff       = centroids.unsqueeze(1) - pos_j      # (M, K, n)
+        dist       = diff.norm(dim=-1).clamp(min=1e-8)   # (M, K)
+        r_hat      = diff / dist.unsqueeze(-1)           # (M, K, n)
+        rbf        = self.rbf_enc(dist)                  # (M, K, R)
         n_dim      = pos.shape[-1]
         gt_edge    = self.gt_basis(
-            r_hat.reshape(M * self.k_local, n_dim)
-        ).reshape(M, self.k_local, -1)                   # (M, k, B)
+            r_hat.reshape(M * K, n_dim)
+        ).reshape(M, K, -1)                             # (M, K, B)
 
         # 4. Build input feats at centroid positions (gather from global feats)
         cent_feats: FeatureDict = {
@@ -194,7 +196,7 @@ class HierPoolStage(nn.Module):
         out_feats: FeatureDict = {}
         for sig, f in feats.items():
             # f: (N, C, d)
-            f_nbr    = f[nbr_idx.reshape(-1)].reshape(M, self.k_local, f.shape[1], f.shape[2])
+            f_nbr    = f[nbr_idx.reshape(-1)].reshape(M, K, f.shape[1], f.shape[2])
             # Max-pool over neighbors
             f_pooled = f_nbr.max(dim=1).values           # (M, C, d)
             out_feats[sig] = f_pooled
