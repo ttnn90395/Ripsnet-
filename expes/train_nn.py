@@ -411,6 +411,12 @@ def forward_single(model, x, mname, geom=None):
         return model(x)
     if geom is not None and mname in TFN_MODELS:
         rbf, gt_edge, nbr_idx = geom
+        # FIX: squeeze out any leading batch dim that comes from slicing a
+        # stacked geometry cache.  _encode_single expects 3-D tensors
+        # (N, k, *), not 4-D (1, N, k, *).
+        if rbf.ndim == 4:     rbf      = rbf.squeeze(0)
+        if gt_edge.ndim == 4: gt_edge  = gt_edge.squeeze(0)
+        if nbr_idx.ndim == 3: nbr_idx  = nbr_idx.squeeze(0)
         inner = getattr(model, '_inner', model)
         desc  = inner._encode_single(x, precomputed_geom=(rbf, gt_edge, nbr_idx))
         return inner.rho(desc.unsqueeze(0))
@@ -467,20 +473,29 @@ def forward_batch(model, batch_data, mname, geom_batch=None):
         if isinstance(geom_batch, dict) and geom_batch.get('uniform', False):
             descs = []
             for i, pc in enumerate(batch_data):
+                rbf     = geom_batch['rbf'][i]
+                gt_edge = geom_batch['gt_edge'][i]
+                nbr_idx = geom_batch['nbr_idx'][i]
+                # FIX: ensure geometry tensors are 3-D for _encode_single
+                if rbf.ndim == 4:     rbf     = rbf.squeeze(0)
+                if gt_edge.ndim == 4: gt_edge = gt_edge.squeeze(0)
+                if nbr_idx.ndim == 3: nbr_idx = nbr_idx.squeeze(0)
                 desc = inner._encode_single(
                     pc,
-                    precomputed_geom=(
-                        geom_batch['rbf'][i],
-                        geom_batch['gt_edge'][i],
-                        geom_batch['nbr_idx'][i],
-                    ),
+                    precomputed_geom=(rbf, gt_edge, nbr_idx),
                 )
                 descs.append(desc)
             descs_t = torch.stack(descs)
             return inner.rho(descs_t)
 
-        descs = [inner._encode_single(x, precomputed_geom=geom)
-                 for x, geom in zip(batch_data, geom_batch)]
+        descs = []
+        for x, geom in zip(batch_data, geom_batch):
+            rbf, gt_edge, nbr_idx = geom
+            # FIX: ensure geometry tensors are 3-D for _encode_single
+            if rbf.ndim == 4:     rbf     = rbf.squeeze(0)
+            if gt_edge.ndim == 4: gt_edge = gt_edge.squeeze(0)
+            if nbr_idx.ndim == 3: nbr_idx = nbr_idx.squeeze(0)
+            descs.append(inner._encode_single(x, precomputed_geom=(rbf, gt_edge, nbr_idx)))
         descs_t = torch.stack(descs)
         return inner.rho(descs_t)
 
@@ -561,7 +576,8 @@ def train_epoch(model, data, targets, optimizer, criterion, mname,
         batch_geom = _get_geom_batch(geom_cache, batch_idx)
 
         optimizer.zero_grad(set_to_none=True)
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        # FIX: use the non-deprecated torch.amp.autocast API
+        with torch.amp.autocast('cuda', enabled=use_amp):
             output = forward_batch(model, batch_data, mname,
                                    geom_batch=batch_geom)
             loss = criterion(output, batch_targets)
@@ -620,6 +636,16 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
     test_data  = prepare_data_for_model(
         mname, data_test_torch, use_gs=use_gs,
         gs_sigma=gs_sigma, augment=False)
+
+    # Sanity check: catch shape bugs before training starts
+    sample = train_data[0] if not isinstance(train_data[0], tuple) else train_data[0][0]
+    if isinstance(sample, torch.Tensor) and mname in TFN_MODELS:
+        assert sample.ndim == 2, (
+            f"Expected point cloud of shape (N, d), got {sample.shape}. "
+            f"Check _pad_to_3d and model input assumptions."
+        )
+        print(f"  Input shape check OK: {sample.shape}  "
+              f"(N={sample.shape[0]}, d={sample.shape[1]})")
 
     # Warm-up: trigger lazy param init before optimizer
     m.train()
