@@ -22,11 +22,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from gt_basis import GTSignature, GTBasis, CGCoefficients
-from models import (
-    GTTFNLayer, GTTensorFieldNetwork, GTTFN_RBFExpansion as RBFExpansion,
+from gt_tfn_layer import (
+    GTTFNLayer, GTTensorFieldNetwork, 
+    RBFExpansion,
     ChannelMixer,
+    knn_geometry, pairwise_geometry, FeatureDict, _sig_key
 )
-from gt_tfn_layer import knn_geometry, pairwise_geometry, FeatureDict, _sig_key
 
 
 # ============================================================================

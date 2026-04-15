@@ -631,8 +631,10 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
     geom_train = precompute_geometry(m, train_data, mname)
     geom_test  = precompute_geometry(m, test_data,  mname)
 
-    # Fix 3: torch.compile
-    if hasattr(torch, 'compile') and device.type == 'cuda':
+    # Fix 3: torch.compile (disabled for debugging)
+    # NOTE: torch.compile can cause graph capture errors with dynamic shapes.
+    # Disabled until reshape dimension mismatch is fixed.
+    if False and hasattr(torch, 'compile') and device.type == 'cuda':
         try:
             m = torch.compile(m, mode='reduce-overhead')
             print(f'  torch.compile enabled')
@@ -645,8 +647,22 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
     scheduler     = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=10, min_lr=1e-6)
     criterion     = nn.MSELoss()
-    targets_train = torch.FloatTensor(np.hstack(PVs_train)).to(device)
-    targets_test  = torch.FloatTensor(np.hstack(PVs_test)).to(device)
+    
+    # Flatten persistence vectors: if PVs are 3D (N, H, W), flatten to (N, H*W)
+    # Handle both 2D and 3D PV arrays
+    def flatten_pvs(pv_list):
+        """Flatten list of PV arrays and stack into (N, total_features)."""
+        flattened = []
+        for pv in pv_list:
+            if pv.ndim == 3:  # (N, H, W) → (N, H*W)
+                n_samples = pv.shape[0]
+                flattened.append(pv.reshape(n_samples, -1))
+            else:  # already (N, D)
+                flattened.append(pv)
+        return np.hstack(flattened) if flattened else np.array([])
+    
+    targets_train = torch.FloatTensor(flatten_pvs(PVs_train)).to(device)
+    targets_test  = torch.FloatTensor(flatten_pvs(PVs_test)).to(device)
     try:
         scaler = torch.amp.GradScaler(device_type='cuda',
                                      enabled=(device.type == 'cuda'))
