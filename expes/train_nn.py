@@ -64,7 +64,8 @@ N_sets_test  = len(data_test)
 PV_size = PV_params['resolution'][0] if PV_type == 'PI' else PV_params['resolution']
 dim = data_train[0].shape[1]
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+#device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cpu')
 data_train_torch = [torch.FloatTensor(data_train[i]).to(device) for i in range(len(data_train))]
 data_test_torch  = [torch.FloatTensor(data_test[i]).to(device)  for i in range(len(data_test))]
 
