@@ -318,66 +318,66 @@ def build_model_by_name(name, n=None):
     if name == 'TensorFieldNetwork':
         return TensorFieldNetwork(
             num_classes=output_dim,
-            hidden_channels=64,
-            num_layers=6,
+            hidden_channels=32,
+            num_layers=3,
             num_rbf=64,
-            cutoff=2.0,
+            cutoff=1.0,
             k_neighbors=16,
-            classifier_dims=[256, 128],
+            classifier_dims=[64, 32],
         )
     if name == 'GTTensorFieldNetwork':
         return GTTensorFieldNetwork(
             n=_n,
             num_classes=output_dim,
-            hidden_channels=64,
-            num_layers=6,
+            hidden_channels=32,
+            num_layers=3,
             num_rbf=64,
-            cutoff=2.0,
+            cutoff=1.0,
             k_neighbors=16,
-            classifier_dims=[256, 128],
+            classifier_dims=[64, 32],
             radial_hidden=128,
         )
     if name == 'GTTensorFieldNetworkV2':
         return GTTensorFieldNetworkV2(
             n=_n,
             num_classes=output_dim,
-            hidden_channels=64,
-            num_layers=6,
+            hidden_channels=32,
+            num_layers=3,
             num_rbf=64,
-            cutoff=2.0,
+            cutoff=1.0,
             k_neighbors=16,
-            classifier_dims=[256, 128],
+            classifier_dims=[64, 32],
             radial_hidden=128,
         )
     if name == 'HierarchicalGTTFN':
         return HierarchicalGTTFN(
             n=_n,
             num_classes=output_dim,
-            hidden_channels=64,
-            stage_sizes=[256, 64],
+            hidden_channels=32,
+            stage_sizes=[64, 32],
             num_rbf=64,
-            cutoff=2.0,
-            classifier_dims=[256, 128],
+            cutoff=1.0,
+            classifier_dims=[64, 32],
         )
     if name == 'HierarchicalTensorFieldNetwork':
         return HierarchicalTensorFieldNetwork(
             num_classes=output_dim,
-            hidden_channels=64,
-            stage_sizes=[256, 64],
+            hidden_channels=32,
+            stage_sizes=[64, 32],
             num_rbf=64,
-            cutoff=2.0,
-            classifier_dims=[256, 128],
+            cutoff=1.0,
+            classifier_dims=[64, 32],
         )
     if name == 'OnEquivariantTensorFieldNetwork':
         return OnEquivariantTensorFieldNetwork(
             num_classes=output_dim,
             max_order=1,
-            hidden_channels=64,
-            num_layers=6,
+            hidden_channels=32,
+            num_layers=3,
             num_rbf=64,
-            cutoff=2.0,
+            cutoff=1.0,
             k_neighbors=16,
-            classifier_dims=[256, 128],
+            classifier_dims=[64, 32],
         )
     if name == 'PointNet3D':
         return PointNet3D(output_dim=output_dim)
