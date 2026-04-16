@@ -157,14 +157,17 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
     n_dim = dim if n is None else n
     extra = extra or {}
     hidden_channels = extra.get('hidden_channels')
-    num_layers = extra.get('num_layers')
-    num_rbf = extra.get('num_rbf')
+    num_layers      = extra.get('num_layers')
+    num_rbf         = extra.get('num_rbf')
     classifier_dims = extra.get('classifier_dims')
-    radial_hidden = extra.get('radial_hidden')
-    cutoff = extra.get('cutoff', 2.0)
-    k_neighbors = extra.get('k_neighbors', 16)
+    # FIX: read radial_hidden directly from extra (inferred from state dict)
+    radial_hidden   = extra.get('radial_hidden')
+    cutoff          = extra.get('cutoff', 2.0)
+    k_neighbors     = extra.get('k_neighbors', 16)
 
-    # TFN-family models: activation/norm are internal to gt_tfn_layer.py
+    # FIX: TensorFieldNetwork does NOT accept radial_hidden in its __init__
+    # (it wraps GTTensorFieldNetworkV2 but doesn't expose that param publicly).
+    # Pass it only to the GT variants that do accept it.
     if name == 'TensorFieldNetwork':
         return TensorFieldNetwork(
             num_classes=output_dim,
@@ -174,7 +177,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
             cutoff=cutoff,
             k_neighbors=k_neighbors,
             classifier_dims=classifier_dims or [256, 128],
-            radial_hidden=radial_hidden or 128,
+            # radial_hidden intentionally NOT passed — not in TensorFieldNetwork.__init__
         )
     if name == 'GTTensorFieldNetwork':
         return GTTensorFieldNetwork(
@@ -241,8 +244,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
             classifier_dims=classifier_dims or [256, 128],
         )
 
-    # All other models accept activation and norm — BOTH must be forwarded
-    # so that legacy checkpoints (relu, norm='none') reconstruct correctly.
+    # All other models accept activation and norm
     if name == 'PointNet3D':
         return PointNet3D(output_dim=output_dim,
                           activation=activation, norm=norm)
@@ -277,64 +279,85 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
 
 
 def _infer_tfn_architecture(model_state):
-    """Infer legacy/default TFN architecture parameters from a saved state dict."""
+    """
+    Infer TFN architecture parameters directly from saved state dict shapes.
+
+    Key fixes vs the old version:
+    - radial_hidden: read from the actual first linear layer of a radial net
+      (shape [radial_hidden, num_rbf]), NOT guessed as hidden_channels * 2.
+    - classifier_dims: built from the rho linear layer OUTPUT sizes (all layers
+      except the very last one), not from a fragile index heuristic.
+    - hidden_channels: read from the gate weight shape (reliable) or from the
+      layer_norm weight (fallback).
+    """
     keys = set(model_state.keys())
     prefix = '_inner.' if any(k.startswith('_inner.') for k in keys) else ''
 
     info = {}
+
+    # ── num_rbf ──────────────────────────────────────────────────────────────
     rbf_key = prefix + 'rbf.centers'
     if rbf_key in model_state:
         info['num_rbf'] = model_state[rbf_key].shape[0]
 
+    # ── radial_hidden: read from first radial net linear layer ───────────────
+    # radial_nets have keys like:
+    #   mp_layers.0.radial_nets.(0,)x(0,)to(0,)_n3.0.weight  shape [radial_hidden, num_rbf]
+    mp_prefix = prefix + 'mp_layers.'
+    radial_key = next(
+        (k for k in keys
+         if k.startswith(mp_prefix) and 'radial_nets.' in k and k.endswith('.0.weight')),
+        None)
+    if radial_key is not None:
+        info['radial_hidden'] = model_state[radial_key].shape[0]
+
+    # ── hidden_channels: from gate weight or layer_norm weight ───────────────
     gate_key = next(
         (k for k in keys
-         if k.endswith('.gate.gates.sig_(0,)_n3.weight')
-         or k.endswith('.gate.gates.sig_(1,)_n3.weight')),
+         if 'gate.gates.' in k and k.endswith('.weight')),
         None)
     if gate_key is not None:
         info['hidden_channels'] = model_state[gate_key].shape[0]
+    else:
+        # Fallback: from layer_norm weights in the first mp_layer
+        ln_key = next(
+            (k for k in keys
+             if k.startswith(mp_prefix) and 'layer_norms.' in k and k.endswith('.weight')),
+            None)
+        if ln_key is not None:
+            info['hidden_channels'] = model_state[ln_key].shape[0]
 
+    # ── num_layers ───────────────────────────────────────────────────────────
     layer_idxs = []
-    mp_prefix = prefix + 'mp_layers.'
     for k in keys:
         if k.startswith(mp_prefix):
             rest = k[len(mp_prefix):]
-            idx = rest.split('.', 1)[0]
+            idx  = rest.split('.', 1)[0]
             if idx.isdecimal():
                 layer_idxs.append(int(idx))
     if layer_idxs:
         info['num_layers'] = max(layer_idxs) + 1
 
-    rho_keys = [k for k in keys if k.startswith(prefix + 'rho.') and k.endswith('.weight')]
-    rho_weights = []
-    for k in rho_keys:
-        try:
-            idx = int(k[len(prefix + 'rho.'):].split('.', 1)[0])
-        except ValueError:
-            continue
-        rho_weights.append((idx, model_state[k]))
-    rho_weights.sort(key=lambda x: x[0])
-    if len(rho_weights) >= 2:
-        # Infer hidden classifier dims from all rho linear layers except final output.
-        hidden_dims = [w.shape[0] for idx, w in rho_weights[:-1]]
-        if hidden_dims:
-            info['classifier_dims'] = hidden_dims
-
-    if 'hidden_channels' in info and 'classifier_dims' not in info:
-        hidden = info['hidden_channels']
-        info['classifier_dims'] = [hidden * 2, hidden]
-
-    if 'hidden_channels' in info and 'radial_hidden' not in info:
-        info['radial_hidden'] = info['hidden_channels'] * 2
-
-    if info.get('num_layers') == 4 and info.get('num_rbf') == 32 and info.get('hidden_channels') == 32:
-        info.setdefault('cutoff', 5.0)
+    # ── classifier_dims: from rho linear output sizes (all but the last) ─────
+    # rho is a Sequential: Linear, SiLU, LayerNorm, Linear, SiLU, LayerNorm, ..., Linear
+    # We want the output sizes of every Linear EXCEPT the final one.
+    rho_prefix = prefix + 'rho.'
+    rho_linear_keys = sorted(
+        [k for k in keys if k.startswith(rho_prefix) and k.endswith('.weight')],
+        key=lambda k: int(k[len(rho_prefix):].split('.', 1)[0])
+    )
+    if len(rho_linear_keys) >= 2:
+        # All hidden linear output sizes (exclude the last linear = output layer)
+        hidden_linear_keys = rho_linear_keys[:-1]
+        info['classifier_dims'] = [
+            model_state[k].shape[0] for k in hidden_linear_keys
+        ]
 
     return info
 
 
 # -------------------------------------------------------------------------
-# Gaussian smoothing  (Fix 4: batched vectorised kernel)
+# Gaussian smoothing
 # -------------------------------------------------------------------------
 
 GS_SIGMA = 0.5
@@ -361,27 +384,13 @@ def gaussian_smooth_batch(data_list: list, sigma: float = GS_SIGMA) -> list:
     return out
 
 # -------------------------------------------------------------------------
-# TFN acceleration: fully batched geometry + message passing (Fix 1b)
+# TFN geometry precomputation
 # -------------------------------------------------------------------------
 
 def precompute_geometry_batched(model_pv, class_name, data_list):
     """
-    Pre-compute k-NN geometry for all point clouds and return stacked tensors
-    ready for batched message passing.
-
-    When all point clouds have the same N (uniform dataset, always true for
-    UCR), returns a single dict with stacked (B, N, k, *) tensors so that
-    all message-passing ops run as a single batched matmul rather than a
-    Python loop over samples.
-
-    Returns
-    -------
-    dict with keys:
-        'rbf'     : (B, N, k, R)  float
-        'gt_edge' : (B, N, k, B_basis) float
-        'nbr_idx' : (B, N, k)     long
-        'uniform' : bool — True when all N are equal (batched path available)
-    OR None for non-TFN models.
+    Pre-compute k-NN geometry for all point clouds and return stacked tensors.
+    Returns dict with uniform stacked tensors or list fallback, or None.
     """
     if class_name not in TFN_MODELS:
         return None
@@ -399,29 +408,24 @@ def precompute_geometry_batched(model_pv, class_name, data_list):
         for pc in tqdm(data_list, desc=f"Precomputing geometry ({class_name})",
                        leave=False):
             rbf, gt_edge, nbr_idx = knn_geometry(pc, rbf_enc, gt_basis, k)
-            # Detach immediately — these will be reused across many forward
-            # calls and must NOT carry grad_fn into torch.no_grad() contexts
             rbfs.append(rbf.detach())
             gt_edges.append(gt_edge.detach())
             nbr_idxs.append(nbr_idx.detach())
 
-    # Check if all point clouds have the same shape → can stack
     uniform = all(r.shape == rbfs[0].shape for r in rbfs)
     if uniform:
         return {
-            'rbf':     torch.stack(rbfs),      # (B, N, k, R)
-            'gt_edge': torch.stack(gt_edges),  # (B, N, k, Basis)
-            'nbr_idx': torch.stack(nbr_idxs),  # (B, N, k)
+            'rbf':     torch.stack(rbfs),
+            'gt_edge': torch.stack(gt_edges),
+            'nbr_idx': torch.stack(nbr_idxs),
             'uniform': True,
         }
-    # Ragged fallback: keep as list of tuples
     return {
         'list':    list(zip(rbfs, gt_edges, nbr_idxs)),
         'uniform': False,
     }
 
 
-# Kept for train_nn.py compatibility (per-sample version)
 def precompute_geometry(model_pv, class_name, data_list):
     """Per-sample geometry precomputation — returns list of (rbf, gt_edge, nbr_idx)."""
     result = precompute_geometry_batched(model_pv, class_name, data_list)
@@ -436,14 +440,9 @@ def precompute_geometry(model_pv, class_name, data_list):
 
 def tfn_batched_forward(model, data_list, geom_cache, batch_size=64):
     """
-    True batched TFN inference.
-
-    When geometry is uniform (all point clouds same N, always true for UCR):
-      - Slices (B_mini, N, k, *) geometry tensors per mini-batch
-      - Uses a dedicated batched TFN path when available
-      - Avoids Python loops over points inside the hot forward path
-
-    Returns np.ndarray (N, output_dim).
+    Batched TFN inference with precomputed geometry.
+    FIX: squeeze geometry tensors to 3-D before passing to _encode_single,
+    since slicing a stacked (B,N,k,*) cache gives (1,N,k,*) not (N,k,*).
     """
     inner   = getattr(model, '_inner', model)
     results = []
@@ -457,10 +456,9 @@ def tfn_batched_forward(model, data_list, geom_cache, batch_size=64):
             batch = data_list[start:end]
 
             if is_batched_geom:
-                # Slice stacked geometry tensors — no Python copy
-                rbf_b     = geom_cache['rbf'][start:end]      # (B, N, k, R)
-                gt_edge_b = geom_cache['gt_edge'][start:end]  # (B, N, k, Basis)
-                nbr_b     = geom_cache['nbr_idx'][start:end]  # (B, N, k)
+                rbf_b     = geom_cache['rbf'][start:end]
+                gt_edge_b = geom_cache['gt_edge'][start:end]
+                nbr_b     = geom_cache['nbr_idx'][start:end]
                 if hasattr(inner, '_encode_batch'):
                     batch_tensor = torch.stack(batch)
                     out = inner._encode_batch(
@@ -469,15 +467,18 @@ def tfn_batched_forward(model, data_list, geom_cache, batch_size=64):
                 else:
                     descs = []
                     for i, pc in enumerate(batch):
+                        # FIX: squeeze batch dim so _encode_single gets (N,k,*) not (1,N,k,*)
+                        rbf_i     = rbf_b[i]     if rbf_b[i].ndim == 3     else rbf_b[i].squeeze(0)
+                        gt_edge_i = gt_edge_b[i] if gt_edge_b[i].ndim == 3 else gt_edge_b[i].squeeze(0)
+                        nbr_i     = nbr_b[i]     if nbr_b[i].ndim == 2     else nbr_b[i].squeeze(0)
                         desc = inner._encode_single(
-                            pc,
-                            precomputed_geom=(rbf_b[i], gt_edge_b[i], nbr_b[i]))
+                            pc, precomputed_geom=(rbf_i, gt_edge_i, nbr_i))
                         descs.append(desc.detach())
                     out = inner.rho(torch.stack(descs))
 
             elif geom_cache is not None:
-                # Per-sample list fallback
-                geom_b = geom_cache[start:end] if isinstance(geom_cache, list)                          else geom_cache['list'][start:end]
+                geom_b = geom_cache[start:end] if isinstance(geom_cache, list) \
+                         else geom_cache['list'][start:end]
                 descs = []
                 for pc, (rbf, gt_edge, nbr_idx) in zip(batch, geom_b):
                     desc = inner._encode_single(
@@ -526,7 +527,7 @@ def prepare_single_input(mname, x_tensor, use_gs=False, sigma=GS_SIGMA):
         return torch.FloatTensor(mat).to(device)
 
     if mname == 'ScalarInputMLP':
-        mat    = np.linalg.norm(arr[:, None, :] - arr[None, :, :], axis=-1)
+        mat = np.linalg.norm(arr[:, None, :] - arr[None, :, :], axis=-1)
         return torch.FloatTensor([[mat.mean()]]).to(device)
 
     if mname == 'MultiInputModel':
@@ -538,19 +539,19 @@ def prepare_single_input(mname, x_tensor, use_gs=False, sigma=GS_SIGMA):
 
 
 def forward_single(model, prepared_x, mname, geom=None):
-    """
-    Run model on one prepared sample.  When geom=(rbf, gt_edge, nbr_idx) is
-    provided for a TFN model, the cached geometry is used directly (Fix 1).
-    """
+    """Run model on one prepared sample with optional cached geometry."""
     if mname == 'MultiInputModel':
         pc, scalar = prepared_x
         return model([pc], scalar)
     if mname == 'ScalarInputMLP':
         return model(prepared_x)
 
-    # TFN fast path: bypass k-NN recomputation using cached geometry
     if geom is not None and mname in TFN_MODELS:
         rbf, gt_edge, nbr_idx = geom
+        # FIX: squeeze batch dim if geometry was sliced from a stacked cache
+        if rbf.ndim == 4:     rbf      = rbf.squeeze(0)
+        if gt_edge.ndim == 4: gt_edge  = gt_edge.squeeze(0)
+        if nbr_idx.ndim == 3: nbr_idx  = nbr_idx.squeeze(0)
         inner = getattr(model, '_inner', model)
         desc  = inner._encode_single(prepared_x, precomputed_geom=(rbf, gt_edge, nbr_idx))
         return inner.rho(desc.unsqueeze(0))
@@ -753,11 +754,6 @@ all_model_results = {}
 def load_and_eval(model_name, use_gs=False):
     """
     Load checkpoint, run optimised inference, classify with XGBoost.
-    All four speed fixes are applied:
-      Fix 1 – geometry precomputed once before the inference loop
-      Fix 2 – basis tensors moved to device (via GTTFNv2.to() override)
-      Fix 3 – torch.compile applied after load
-      Fix 4 – vectorised batched GS
     """
     label = model_name
     print(f'\n{"="*60}')
@@ -777,36 +773,29 @@ def load_and_eval(model_name, use_gs=False):
 
     checkpoint = torch.load(ckpt_path, map_location=device)
     if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-        model_state  = checkpoint['model_state_dict']
-        output_dim   = checkpoint.get('output_dim')
-        ckpt_type    = checkpoint.get('model_type', model_name)
-        ckpt_dim     = checkpoint.get('dim', dim)
-        ckpt_npts    = checkpoint.get('num_points', None)
-        ckpt_use_gs  = checkpoint.get('use_gs', use_gs)
-        ckpt_sigma   = checkpoint.get('gs_sigma', GS_SIGMA)
-        # Architecture metadata: read explicitly if saved, else auto-detect
-        # from the state_dict keys to handle legacy (pre-GELU) checkpoints.
+        model_state     = checkpoint['model_state_dict']
+        output_dim      = checkpoint.get('output_dim')
+        ckpt_type       = checkpoint.get('model_type', model_name)
+        ckpt_dim        = checkpoint.get('dim', dim)
+        ckpt_npts       = checkpoint.get('num_points', None)
+        ckpt_use_gs     = checkpoint.get('use_gs', use_gs)
+        ckpt_sigma      = checkpoint.get('gs_sigma', GS_SIGMA)
         ckpt_activation = checkpoint.get('activation', None)
         ckpt_norm       = checkpoint.get('norm', None)
     else:
-        model_state  = checkpoint
-        output_dim   = None
-        ckpt_type    = model_name
-        ckpt_dim     = dim
-        ckpt_npts    = None
-        ckpt_use_gs  = use_gs
-        ckpt_sigma   = GS_SIGMA
+        model_state     = checkpoint
+        output_dim      = None
+        ckpt_type       = model_name
+        ckpt_dim        = dim
+        ckpt_npts       = None
+        ckpt_use_gs     = use_gs
+        ckpt_sigma      = GS_SIGMA
         ckpt_activation = None
         ckpt_norm       = None
 
-    # ── Detect architecture from state_dict when metadata is absent ──────
-    # Legacy checkpoints (before the GELU/BN upgrade) have no BatchNorm keys.
-    # New checkpoints have keys like "phi_layers.2.running_mean" (BatchNorm)
-    # or "phi_layers.2.weight" where shape is (C,) not (C_out, C_in) (LayerNorm).
-    # Heuristic: if any key contains 'running_mean' → has BatchNorm → new arch.
+    # Detect architecture from state_dict when metadata is absent
     _has_bn = any('running_mean' in k for k in model_state)
     if ckpt_activation is None:
-        # Old checkpoints used relu; new ones use gelu
         ckpt_activation = 'gelu' if _has_bn else 'relu'
     if ckpt_norm is None:
         ckpt_norm = 'bn' if _has_bn else 'none'
@@ -814,7 +803,6 @@ def load_and_eval(model_name, use_gs=False):
     print(f'  arch: activation={ckpt_activation}  norm={ckpt_norm}  ' +
           ('(legacy ReLU checkpoint)' if not _has_bn else '(new GELU checkpoint)'))
 
-    # Resolve class name (trust ckpt_type; detect legacy TFN by key pattern)
     _state_keys    = set(model_state.keys())
     _is_old_tfn    = any(k.startswith('layers.') and '.W0' in k for k in _state_keys)
     base_ckpt_type = ckpt_type.replace('_GS', '')
@@ -843,15 +831,16 @@ def load_and_eval(model_name, use_gs=False):
     print(f'  class={class_name}  ckpt_type={ckpt_type}'
           f'  out={output_dim}  dim={ckpt_dim}  GS={ckpt_use_gs}')
 
-    # --- infer legacy TFN architecture whenever possible ---
+    # Infer architecture from state dict for TFN family
     tfn_extra = {}
     if class_name in ['TensorFieldNetwork', 'GTTensorFieldNetwork',
                       'GTTensorFieldNetworkV2', 'HierarchicalGTTFN',
                       'HierarchicalTensorFieldNetwork',
                       'OnEquivariantTensorFieldNetwork']:
         tfn_extra = _infer_tfn_architecture(model_state)
+        print(f'  inferred arch: {tfn_extra}')
 
-    # --- instantiate and load weights ---
+    # Instantiate and load weights
     try:
         if class_name == 'TFNTensorFieldNetwork':
             from models import TFNTensorFieldNetwork
@@ -879,7 +868,6 @@ def load_and_eval(model_name, use_gs=False):
                 activation=ckpt_activation, norm=ckpt_norm)
             model_PV.load_state_dict(model_state)
 
-        # Fix 2: move ALL tensors (including plain-attribute CG/GT tensors) to device
         model_PV = model_PV.to(device)
         model_PV.eval()
     except Exception as e:
@@ -887,7 +875,7 @@ def load_and_eval(model_name, use_gs=False):
         all_model_results[label] = {'error': str(e), 'use_gs': use_gs}
         return
 
-    # Fix 3: torch.compile for faster kernel execution (PyTorch >= 2.0, CUDA)
+    # torch.compile for faster kernel execution (PyTorch >= 2.0, CUDA)
     compiled_model = model_PV
     if hasattr(torch, 'compile') and device.type == 'cuda':
         try:
@@ -896,14 +884,11 @@ def load_and_eval(model_name, use_gs=False):
         except Exception as e:
             print(f'  torch.compile skipped: {e}')
 
-    # Fix 1: precompute k-NN + GT-basis geometry for TFN models (once, not per sample)
     effective_gs    = ckpt_use_gs
     effective_sigma = ckpt_sigma
 
-    # Apply GS to the full dataset before precomputing geometry (GS first, then geometry)
     if effective_gs:
         inference_data = gaussian_smooth_batch(data_sets_torch, sigma=effective_sigma)
-        # Pad 2D→3D after smoothing for TFN models
         if class_name in TFN_MODELS:
             inference_data = [
                 (torch.cat([x, x.new_zeros(x.shape[0], 1)], dim=1)
@@ -913,14 +898,12 @@ def load_and_eval(model_name, use_gs=False):
     else:
         inference_data = data_sets_torch
 
-    # Fix 1b: use batched geometry (stacked tensors) when shapes are uniform
     geom_cache = precompute_geometry_batched(model_PV, class_name, inference_data)
 
-    # --- inference ---
+    # Inference
     starttimeNN = time()
     try:
         if class_name in TFN_MODELS:
-            # Acceleration (Fix 1b): batched encode + single rho call per mini-batch
             PV_NN = tfn_batched_forward(
                 compiled_model, inference_data, geom_cache, batch_size=64)
         else:
@@ -949,7 +932,7 @@ def load_and_eval(model_name, use_gs=False):
     print(f"  NN time: {timeNN:.2f}s  "
           f"(Gudhi clean: {timeG:.2f}s  noise: {timeGn:.2f}s)")
 
-    # --- plot predicted PVs ---
+    # Plot predicted PVs
     for hidx in range(len(homdim)):
         hdim = homdim[hidx]
         plt.figure()
@@ -970,7 +953,7 @@ def load_and_eval(model_name, use_gs=False):
                     f"_predicted_PVs_h{hdim}_on_test.png")
         plt.close()
 
-    # --- XGBoost classification ---
+    # XGBoost classification
     PV_train_NN = PV_NN[:len(data_classif_train)]
     PV_test_NN  = PV_NN[len(data_classif_train):]
     try:
@@ -990,7 +973,7 @@ def load_and_eval(model_name, use_gs=False):
         all_model_results[label] = {'error': str(e), 'use_gs': effective_gs}
 
 
-# Run evaluation: raw then GS for each model
+# Run evaluation
 for base_name in models_to_test:
     load_and_eval(base_name, use_gs=False)
 
@@ -998,7 +981,7 @@ for gs_name in models_to_test_gs:
     load_and_eval(gs_name, use_gs=True)
 
 # -------------------------------------------------------------------------
-# Baseline classifiers (Gudhi clean, Gudhi noise, DTW, Euclidean)
+# Baseline classifiers
 # -------------------------------------------------------------------------
 
 PV_train_gudhi       = np.hstack(PV_gudhi)[:len(data_classif_train)]
@@ -1040,10 +1023,10 @@ train_acc_euc = model_baseline_euc.score(ts_classif_train, y_train)
 test_acc_euc  = model_baseline_euc.score(ts_classif_test,  y_test)
 XB22 = time()
 print(f"Euclidean k-NN    train={100*train_acc_euc:.2f}%  "
-      f"test={100*test_acc_euc:.2f}%  t={XB22-XB21:.2f}s")
+      f"test={100*test_acc_euc:.2f}%  t={XB22-XB21:>.2f}s")
 
 # -------------------------------------------------------------------------
-# Final summary — raw vs GS side by side
+# Final summary
 # -------------------------------------------------------------------------
 
 print('\n' + '='*75)
