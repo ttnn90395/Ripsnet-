@@ -187,6 +187,7 @@ class ResidualProjection(nn.Module):
                     proj = self.projs[key](f_in.permute(0, 1, 3, 2).reshape(B * N * d, C_in))
                     proj = proj.reshape(B, N, d, -1).permute(0, 1, 3, 2)
                 else:
+                    # f_in is (N, C, d) — apply linear over C for each of the d components
                     proj = self.projs[key](f_in.transpose(-1, -2)).transpose(-1, -2)
                 result[sig] = f_out + proj
             else:
@@ -357,13 +358,13 @@ class GTTFNLayer(nn.Module):
             if sig_in not in feats:
                 continue
             f_in  = feats[sig_in]                                    # (N, Ci, di) or (B, N, Ci, di)
-            c_in  = f_in.shape[1]
+            c_in  = f_in.shape[-2]
             c_out = self.out_types[sig_out]
             cg_t  = self.cg.get(sig_in, sig_edge, sig_out)          # (di, de, do)
             e_f   = gt_by_sig[sig_edge]                              # (N, K, de) or (B, N, K, de)
             key   = _interaction_key(sig_in, sig_edge, sig_out)
             rad   = self.radial_nets[key](rbf)                       # (..., K, Ci*Co)
-            K     = rad.shape[1]
+            K     = rad.shape[-2]
             if batch_mode:
                 rad = rad.reshape(B, N, K, c_in, c_out)
                 fCG = torch.einsum("bnci,ieo->bnceo", f_in, cg_t)  # (B, N, Ci, de, do)
@@ -586,7 +587,7 @@ class GTTensorFieldNetwork(nn.Module):
         f0_parts = [pos.norm(dim=-1, keepdim=True)]                      # (B, N, 1)
         if node_attr is not None and self.node_attr_dim > 0:
             f0_parts.append(self.attr_proj(node_attr))
-        f0 = torch.cat(f0_parts, dim=-1).unsqueeze(2)                    # (B, N, C, 1)
+        f0 = torch.cat(f0_parts, dim=-1).unsqueeze(-1)                   # (B, N, C, 1)
 
         # Reshape: need (B, N, C, d)
         f1 = (pos / pos.norm(dim=-1, keepdim=True).clamp(min=1e-8)).unsqueeze(2)  # (B, N, 1, n)
@@ -616,13 +617,13 @@ class GTTensorFieldNetwork(nn.Module):
         parts = []
         for sig in self.gt_basis.signatures:
             if sig not in feats:
-                parts.append(torch.zeros(B, N, feats[sc].shape[1], device=pos.device))
+                parts.append(torch.zeros(B, N, feats[sc].shape[2], device=pos.device))
                 continue
             f = feats[sig]
             if sig == sc:
-                parts.append(f.squeeze(-1))       # scalars already invariant
+                parts.append(f.squeeze(-1))       # (B, N, C)
             else:
-                parts.append(f.norm(dim=-1))      # norms of equivariant feats
+                parts.append(f.norm(dim=-1))      # (B, N, C)
 
         node_inv = torch.cat(parts, dim=-1)        # (B, N, inv_dim)
         descs = node_inv.max(dim=1).values         # (B, inv_dim)
@@ -643,10 +644,12 @@ class GTTensorFieldNetwork(nn.Module):
         f0_parts = [pos.norm(dim=-1, keepdim=True)]   # (N, 1)
         if node_attr is not None and self.node_attr_dim > 0:
             f0_parts.append(self.attr_proj(node_attr))
-        f0 = torch.cat(f0_parts, dim=-1).unsqueeze(1) # (N, 1+attr, 1) → unsqueeze C
+        # FIX: use unsqueeze(-1) so (N, C) → (N, C, 1) directly and correctly.
+        # The old code did unsqueeze(1) → (N, 1, C) then reshape(N, -1, 1) → (N, C, 1),
+        # which works accidentally for node_attr_dim=0 but scrambles channels otherwise.
+        f0 = torch.cat(f0_parts, dim=-1).unsqueeze(-1)  # (N, C, 1)
 
-        # Reshape: need (N, C, d)
-        f0 = f0.reshape(N, -1, 1)                     # (N, init_scalar_c, 1)
+        # (N, 1, n) — C=1 vector feature
         f1 = (pos / pos.norm(dim=-1, keepdim=True).clamp(min=1e-8)).unsqueeze(1)  # (N, 1, n)
 
         feats: FeatureDict = {sc: f0, vc: f1}
@@ -680,9 +683,9 @@ class GTTensorFieldNetwork(nn.Module):
                 continue
             f = feats[sig]
             if sig == sc:
-                parts.append(f.squeeze(-1))       # scalars already invariant
+                parts.append(f.squeeze(-1))       # (N, C)
             else:
-                parts.append(f.norm(dim=-1))      # norms of equivariant feats
+                parts.append(f.norm(dim=-1))      # (N, C)
 
         node_inv = torch.cat(parts, dim=-1)        # (N, inv_dim)
         return node_inv.max(dim=0).values          # (inv_dim,)
