@@ -921,7 +921,12 @@ def load_and_eval(model_name, use_gs=False):
                         out_np = out_np[0]
                     PV_NN_list.append(out_np)
                 except Exception as e:
-                    print(f'  WARNING: inference failed on sample {idx} – {e}')
+                    import traceback
+                    if idx == 0 or not any(True for _ in PV_NN_list):
+                        print(f'  WARNING: inference failed on sample {idx}:')
+                        traceback.print_exc()
+                    else:
+                        print(f'  WARNING: inference failed on sample {idx} – {e}')
                     PV_NN_list.append(np.zeros(output_dim, dtype=np.float32))
             PV_NN = np.vstack(PV_NN_list)
     except Exception as e:
