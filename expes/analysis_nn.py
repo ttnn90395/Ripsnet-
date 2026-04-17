@@ -160,14 +160,10 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
     num_layers      = extra.get('num_layers')
     num_rbf         = extra.get('num_rbf')
     classifier_dims = extra.get('classifier_dims')
-    # FIX: read radial_hidden directly from extra (inferred from state dict)
     radial_hidden   = extra.get('radial_hidden')
     cutoff          = extra.get('cutoff', 2.0)
     k_neighbors     = extra.get('k_neighbors', 16)
 
-    # FIX: TensorFieldNetwork does NOT accept radial_hidden in its __init__
-    # (it wraps GTTensorFieldNetworkV2 but doesn't expose that param publicly).
-    # Pass it only to the GT variants that do accept it.
     if name == 'TensorFieldNetwork':
         return TensorFieldNetwork(
             num_classes=output_dim,
@@ -177,7 +173,6 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
             cutoff=cutoff,
             k_neighbors=k_neighbors,
             classifier_dims=classifier_dims or [256, 128],
-            # radial_hidden intentionally NOT passed — not in TensorFieldNetwork.__init__
         )
     if name == 'GTTensorFieldNetwork':
         return GTTensorFieldNetwork(
@@ -244,7 +239,6 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
             classifier_dims=classifier_dims or [256, 128],
         )
 
-    # All other models accept activation and norm
     if name == 'PointNet3D':
         return PointNet3D(output_dim=output_dim,
                           activation=activation, norm=norm)
@@ -282,13 +276,10 @@ def _infer_tfn_architecture(model_state):
     """
     Infer TFN architecture parameters directly from saved state dict shapes.
 
-    Key fixes vs the old version:
-    - radial_hidden: read from the actual first linear layer of a radial net
-      (shape [radial_hidden, num_rbf]), NOT guessed as hidden_channels * 2.
-    - classifier_dims: built from the rho linear layer OUTPUT sizes (all layers
-      except the very last one), not from a fragile index heuristic.
-    - hidden_channels: read from the gate weight shape (reliable) or from the
-      layer_norm weight (fallback).
+    Fix: classifier_dims now filters to only real nn.Linear layers by checking
+    that the weight tensor is 2-D (LayerNorm weights are 1-D and were previously
+    being incorrectly counted, causing doubled classifier_dims like [64,64,32,32]
+    instead of [64,32]).
     """
     keys = set(model_state.keys())
     prefix = '_inner.' if any(k.startswith('_inner.') for k in keys) else ''
@@ -301,8 +292,6 @@ def _infer_tfn_architecture(model_state):
         info['num_rbf'] = model_state[rbf_key].shape[0]
 
     # ── radial_hidden: read from first radial net linear layer ───────────────
-    # radial_nets have keys like:
-    #   mp_layers.0.radial_nets.(0,)x(0,)to(0,)_n3.0.weight  shape [radial_hidden, num_rbf]
     mp_prefix = prefix + 'mp_layers.'
     radial_key = next(
         (k for k in keys
@@ -319,7 +308,6 @@ def _infer_tfn_architecture(model_state):
     if gate_key is not None:
         info['hidden_channels'] = model_state[gate_key].shape[0]
     else:
-        # Fallback: from layer_norm weights in the first mp_layer
         ln_key = next(
             (k for k in keys
              if k.startswith(mp_prefix) and 'layer_norms.' in k and k.endswith('.weight')),
@@ -338,12 +326,16 @@ def _infer_tfn_architecture(model_state):
     if layer_idxs:
         info['num_layers'] = max(layer_idxs) + 1
 
-    # ── classifier_dims: from rho linear output sizes (all but the last) ─────
-    # rho is a Sequential: Linear, SiLU, LayerNorm, Linear, SiLU, LayerNorm, ..., Linear
-    # We want the output sizes of every Linear EXCEPT the final one.
+    # ── classifier_dims: only real Linear layers (2-D weights), excluding final output ──
+    # LayerNorm affine weights are 1-D tensors and must be excluded.
+    # Without the ndim==2 filter they were being counted, doubling the dims
+    # (e.g. [64,64,32,32] instead of the correct [64,32]).
     rho_prefix = prefix + 'rho.'
     rho_linear_keys = sorted(
-        [k for k in keys if k.startswith(rho_prefix) and k.endswith('.weight')],
+        [k for k in keys
+         if k.startswith(rho_prefix)
+         and k.endswith('.weight')
+         and model_state[k].ndim == 2],   # LayerNorm weights are 1-D; Linear are 2-D
         key=lambda k: int(k[len(rho_prefix):].split('.', 1)[0])
     )
     if len(rho_linear_keys) >= 2:
@@ -441,8 +433,6 @@ def precompute_geometry(model_pv, class_name, data_list):
 def tfn_batched_forward(model, data_list, geom_cache, batch_size=64):
     """
     Batched TFN inference with precomputed geometry.
-    FIX: squeeze geometry tensors to 3-D before passing to _encode_single,
-    since slicing a stacked (B,N,k,*) cache gives (1,N,k,*) not (N,k,*).
     """
     inner   = getattr(model, '_inner', model)
     results = []
@@ -467,7 +457,6 @@ def tfn_batched_forward(model, data_list, geom_cache, batch_size=64):
                 else:
                     descs = []
                     for i, pc in enumerate(batch):
-                        # FIX: squeeze batch dim so _encode_single gets (N,k,*) not (1,N,k,*)
                         rbf_i     = rbf_b[i]     if rbf_b[i].ndim == 3     else rbf_b[i].squeeze(0)
                         gt_edge_i = gt_edge_b[i] if gt_edge_b[i].ndim == 3 else gt_edge_b[i].squeeze(0)
                         nbr_i     = nbr_b[i]     if nbr_b[i].ndim == 2     else nbr_b[i].squeeze(0)
@@ -548,7 +537,6 @@ def forward_single(model, prepared_x, mname, geom=None):
 
     if geom is not None and mname in TFN_MODELS:
         rbf, gt_edge, nbr_idx = geom
-        # FIX: squeeze batch dim if geometry was sliced from a stacked cache
         if rbf.ndim == 4:     rbf      = rbf.squeeze(0)
         if gt_edge.ndim == 4: gt_edge  = gt_edge.squeeze(0)
         if nbr_idx.ndim == 3: nbr_idx  = nbr_idx.squeeze(0)
@@ -793,7 +781,6 @@ def load_and_eval(model_name, use_gs=False):
         ckpt_activation = None
         ckpt_norm       = None
 
-    # Detect architecture from state_dict when metadata is absent
     _has_bn = any('running_mean' in k for k in model_state)
     if ckpt_activation is None:
         ckpt_activation = 'gelu' if _has_bn else 'relu'
@@ -831,7 +818,6 @@ def load_and_eval(model_name, use_gs=False):
     print(f'  class={class_name}  ckpt_type={ckpt_type}'
           f'  out={output_dim}  dim={ckpt_dim}  GS={ckpt_use_gs}')
 
-    # Infer architecture from state dict for TFN family
     tfn_extra = {}
     if class_name in ['TensorFieldNetwork', 'GTTensorFieldNetwork',
                       'GTTensorFieldNetworkV2', 'HierarchicalGTTFN',
@@ -840,7 +826,6 @@ def load_and_eval(model_name, use_gs=False):
         tfn_extra = _infer_tfn_architecture(model_state)
         print(f'  inferred arch: {tfn_extra}')
 
-    # Instantiate and load weights
     try:
         if class_name == 'TFNTensorFieldNetwork':
             from models import TFNTensorFieldNetwork
@@ -875,7 +860,6 @@ def load_and_eval(model_name, use_gs=False):
         all_model_results[label] = {'error': str(e), 'use_gs': use_gs}
         return
 
-    # torch.compile for faster kernel execution (PyTorch >= 2.0, CUDA)
     compiled_model = model_PV
     if hasattr(torch, 'compile') and device.type == 'cuda':
         try:
@@ -887,16 +871,19 @@ def load_and_eval(model_name, use_gs=False):
     effective_gs    = ckpt_use_gs
     effective_sigma = ckpt_sigma
 
+    # Apply GS if needed
     if effective_gs:
         inference_data = gaussian_smooth_batch(data_sets_torch, sigma=effective_sigma)
-        if class_name in TFN_MODELS:
-            inference_data = [
-                (torch.cat([x, x.new_zeros(x.shape[0], 1)], dim=1)
-                 if x.shape[1] == 2 else x)
-                for x in inference_data
-            ]
     else:
         inference_data = data_sets_torch
+
+    # Always pad to 3D for TFN models, regardless of GS flag
+    if class_name in TFN_MODELS:
+        inference_data = [
+            torch.cat([x, x.new_zeros(x.shape[0], 1)], dim=1)
+            if x.shape[1] == 2 else x
+            for x in inference_data
+        ]
 
     geom_cache = precompute_geometry_batched(model_PV, class_name, inference_data)
 
@@ -913,7 +900,20 @@ def load_and_eval(model_name, use_gs=False):
                 try:
                     prepared = prepare_single_input(class_name, x_tensor,
                                                     use_gs=False)
-                    geom = geom_cache[idx] if geom_cache is not None else None
+                    # Correctly index geom_cache regardless of its type
+                    if geom_cache is None:
+                        geom = None
+                    elif isinstance(geom_cache, dict) and geom_cache.get('uniform', False):
+                        geom = (
+                            geom_cache['rbf'][idx],
+                            geom_cache['gt_edge'][idx],
+                            geom_cache['nbr_idx'][idx],
+                        )
+                    elif isinstance(geom_cache, dict):
+                        geom = geom_cache['list'][idx]
+                    else:
+                        geom = geom_cache[idx]
+
                     out  = forward_single(compiled_model, prepared, class_name, geom=geom)
                     out_np = out.detach().cpu().numpy() if isinstance(out, torch.Tensor) \
                              else np.asarray(out)
