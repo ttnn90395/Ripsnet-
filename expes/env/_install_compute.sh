@@ -54,16 +54,16 @@ TORCH_VER="${RIPSNET_TORCH_VERSION:-2.5.1}"
 TORCH_INDEX="${RIPSNET_TORCH_INDEX:-https://download.pytorch.org/whl/cu124}"
 
 "$PY" -m pip install -U pip
-"$PY" -m pip install "torch==${TORCH_VER}" --index-url "$TORCH_INDEX"
+"$PY" -m pip install --no-user "torch==${TORCH_VER}" --index-url "$TORCH_INDEX"
 
 # Install Velour from GitHub (sklearn dep is deprecated, use env var to bypass)
-SKLEARN_ALLOW_DEPRECATED_SKLEARN_PACKAGE_INSTALL=True "$PY" -m pip install git+https://github.com/raphaeltinarrage/velour.git
+SKLEARN_ALLOW_DEPRECATED_SKLEARN_PACKAGE_INSTALL=True "$PY" -m pip install --no-user git+https://github.com/raphaeltinarrage/velour.git
 
-# Verify
-"$PY" -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
-"$PY" -c "import gudhi; print('gudhi', gudhi.__version__)"
-"$PY" -c "import velour; print('velour ok')"
-"$PY" -c "import sklearn, scipy, numpy, pandas, matplotlib, dill, xgboost; print('all deps ok')"
+# Verify (PYTHONNOUSERSITE to prevent x86_64 home site-packages from leaking in)
+PYTHONNOUSERSITE=1 "$PY" -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
+PYTHONNOUSERSITE=1 "$PY" -c "import gudhi; print('gudhi', gudhi.__version__)"
+PYTHONNOUSERSITE=1 "$PY" -c "import velour; print('velour ok')"
+PYTHONNOUSERSITE=1 "$PY" -c "import sklearn, scipy, numpy, pandas, matplotlib, dill, xgboost; print('all deps ok')"
 
 echo ""
 echo "### Done ($ARCH). Python: $PY"
