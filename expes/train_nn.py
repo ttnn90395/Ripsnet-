@@ -12,6 +12,7 @@ import gudhi.representations
 from tqdm import tqdm
 import os
 import sys
+from collections import defaultdict
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
@@ -138,15 +139,36 @@ def deep_to(module: nn.Module, target_device) -> nn.Module:
 # Fix 1: Geometry precomputation for TFN models
 # -------------------------------------------------------------------------
 
+def _geom_cache_path(dataset_name: str, model_name: str) -> str:
+    """Path for the on-disk geometry cache for a given dataset + model."""
+    os.makedirs('cache', exist_ok=True)
+    tag = f'{dataset_name}_{model_name}'
+    return f'cache/geom_{tag}.pth'
+
+
 def precompute_geometry(model, data_list, mname):
     """
     Precompute k-NN geometry for all point clouds.
+
+    Caches the result to disk so that the same dataset does not recompute
+    geometry when training a different model variant.  Cache is keyed by
+    the dataset name (global *dataset_name*) and the model name.
 
     Returns either a stacked 'uniform' geometry dict (B, N, k, *) when all
     point clouds share the same size, or a list of per-sample tuples.
     """
     if mname not in TFN_MODELS:
         return None
+
+    # ----- disk-cache lookup -----
+    cache_path = _geom_cache_path(dataset_name, mname)
+    try:
+        cached = torch.load(cache_path, map_location='cpu')
+        print(f'  Geometry cache hit → {cache_path}')
+        return cached
+    except (FileNotFoundError, RuntimeError):
+        pass
+
     try:
         from gt_tfn_layer import knn_geometry
         inner    = getattr(model, '_inner', model)
@@ -160,22 +182,28 @@ def precompute_geometry(model, data_list, mname):
     with torch.no_grad():
         for pc in tqdm(data_list, desc="Precomputing geometry", leave=False):
             rbf, gt_edge, nbr_idx = knn_geometry(pc, rbf_enc, gt_basis, k)
-            rbfs.append(rbf.detach())
-            gt_edges.append(gt_edge.detach())
-            nbr_idxs.append(nbr_idx.detach())
+            rbfs.append(rbf.detach().cpu())
+            gt_edges.append(gt_edge.detach().cpu())
+            nbr_idxs.append(nbr_idx.detach().cpu())
 
     uniform = all(r.shape == rbfs[0].shape for r in rbfs)
     if uniform:
-        return {
+        result = {
             'uniform': True,
             'rbf': torch.stack(rbfs),
             'gt_edge': torch.stack(gt_edges),
             'nbr_idx': torch.stack(nbr_idxs),
         }
-    return {
-        'uniform': False,
-        'list': list(zip(rbfs, gt_edges, nbr_idxs)),
-    }
+    else:
+        result = {
+            'uniform': False,
+            'list': list(zip(rbfs, gt_edges, nbr_idxs)),
+        }
+
+    # ----- persist to disk -----
+    torch.save(result, cache_path)
+    print(f'  Geometry cached → {cache_path}')
+    return result
 
 
 # -------------------------------------------------------------------------
@@ -204,25 +232,39 @@ def tfn_batched_forward(model, data_list, geom_cache, mname, batch_size=64):
                         batch_tensor,
                         precomputed_geom=(geom_b['rbf'], geom_b['gt_edge'], geom_b['nbr_idx']))
                 else:
-                    descs = []
-                    if isinstance(geom_b, dict) and geom_b.get('uniform', False):
-                        for i, pc in enumerate(batch):
-                            desc = inner._encode_single(
-                                pc,
-                                precomputed_geom=(
-                                    geom_b['rbf'][i],
-                                    geom_b['gt_edge'][i],
-                                    geom_b['nbr_idx'][i],
-                                ),
-                            )
-                            descs.append(desc.detach())
+                    # Non-uniform geometry → group by point-cloud size
+                    geom_list: list = (geom_b['list']
+                                       if isinstance(geom_b, dict) else geom_b)
+                    size_groups: Dict[int, List[int]] = defaultdict(list)
+                    for i, x in enumerate(batch):
+                        size_groups[x.shape[0]].append(i)
+
+                    _use_grouped = any(len(v) > 1 for v in size_groups.values())
+                    if _use_grouped and hasattr(inner, '_encode_batch'):
+                        descs = [None] * len(batch)
+                        for sz, idxs in size_groups.items():
+                            if len(idxs) == 1:
+                                i = idxs[0]
+                                descs[i] = inner._encode_single(
+                                    batch[i], precomputed_geom=geom_list[i])
+                            else:
+                                sub_batch = torch.stack([batch[i] for i in idxs])
+                                sub_rbf   = torch.stack([geom_list[i][0] for i in idxs])
+                                sub_gt    = torch.stack([geom_list[i][1] for i in idxs])
+                                sub_nbr   = torch.stack([geom_list[i][2] for i in idxs])
+                                sub_out   = inner._encode_batch(
+                                    sub_batch,
+                                    precomputed_geom=(sub_rbf, sub_gt, sub_nbr))
+                                for off, i in enumerate(idxs):
+                                    descs[i] = sub_out[off]
+                        out = inner.rho(torch.stack(descs))
                     else:
-                        for pc, geom in zip(batch, geom_b):
+                        descs = []
+                        for pc, geom in zip(batch, geom_list):
                             desc = inner._encode_single(
                                 pc, precomputed_geom=geom)
                             descs.append(desc.detach())
-                    descs_t = torch.stack(descs)
-                    out = inner.rho(descs_t)
+                        out = inner.rho(torch.stack(descs))
             else:
                 out = model(batch)
         results.append(out.detach().cpu().numpy())
@@ -269,7 +311,7 @@ def prepare_data_for_model(mname, data_list, use_gs=False,
     if use_gs:
         data_list = gaussian_smooth_batch(data_list, sigma=gs_sigma)
 
-    if mname in TFN_MODELS:
+    if mname == 'TensorFieldNetwork':
         return _pad_to_3d(data_list)
 
     if mname in ['PointNetTutorial', 'PointNet3D']:
@@ -464,40 +506,79 @@ def forward_batch(model, batch_data, mname, geom_batch=None):
 
     if geom_batch is not None and mname in TFN_MODELS:
         inner = getattr(model, '_inner', model)
-        if isinstance(geom_batch, dict) and geom_batch.get('uniform', False) and hasattr(inner, '_encode_batch'):
+
+        # ── Uniform (all same N) → fast stacked path ────────────────────
+        _is_uniform = isinstance(geom_batch, dict) and geom_batch.get('uniform', False)
+        if _is_uniform and hasattr(inner, '_encode_batch'):
             batch_tensor = torch.stack(batch_data)
             return inner._encode_batch(
                 batch_tensor,
-                precomputed_geom=(geom_batch['rbf'], geom_batch['gt_edge'], geom_batch['nbr_idx']))
+                precomputed_geom=(
+                    geom_batch['rbf'],
+                    geom_batch['gt_edge'],
+                    geom_batch['nbr_idx'],
+                ))
 
-        if isinstance(geom_batch, dict) and geom_batch.get('uniform', False):
+        if _is_uniform and not hasattr(inner, '_encode_batch'):
             descs = []
             for i, pc in enumerate(batch_data):
                 rbf     = geom_batch['rbf'][i]
                 gt_edge = geom_batch['gt_edge'][i]
                 nbr_idx = geom_batch['nbr_idx'][i]
-                # FIX: ensure geometry tensors are 3-D for _encode_single
                 if rbf.ndim == 4:     rbf     = rbf.squeeze(0)
                 if gt_edge.ndim == 4: gt_edge = gt_edge.squeeze(0)
                 if nbr_idx.ndim == 3: nbr_idx = nbr_idx.squeeze(0)
-                desc = inner._encode_single(
-                    pc,
-                    precomputed_geom=(rbf, gt_edge, nbr_idx),
-                )
-                descs.append(desc)
-            descs_t = torch.stack(descs)
-            return inner.rho(descs_t)
+                descs.append(inner._encode_single(
+                    pc, precomputed_geom=(rbf, gt_edge, nbr_idx)))
+            return inner.rho(torch.stack(descs))
 
-        descs = []
-        for x, geom in zip(batch_data, geom_batch):
-            rbf, gt_edge, nbr_idx = geom
-            # FIX: ensure geometry tensors are 3-D for _encode_single
-            if rbf.ndim == 4:     rbf     = rbf.squeeze(0)
-            if gt_edge.ndim == 4: gt_edge = gt_edge.squeeze(0)
-            if nbr_idx.ndim == 3: nbr_idx = nbr_idx.squeeze(0)
-            descs.append(inner._encode_single(x, precomputed_geom=(rbf, gt_edge, nbr_idx)))
-        descs_t = torch.stack(descs)
-        return inner.rho(descs_t)
+        # ── Non-uniform → group by point-cloud size ─────────────────────
+        geom_list: list = (geom_batch['list']
+                           if isinstance(geom_batch, dict) else geom_batch)
+
+        # Group indices by (N, k) — all samples with the same N share the
+        # same rbf/gt_edge shape and can be stacked for the batched path.
+        size_groups: Dict[int, List[int]] = defaultdict(list)
+        for i, x in enumerate(batch_data):
+            size_groups[x.shape[0]].append(i)
+
+        # Only use the grouped path when at least one group has size > 1
+        _use_grouped = any(len(v) > 1 for v in size_groups.values())
+
+        if _use_grouped:
+            descs = [None] * len(batch_data)
+            for sz, idxs in size_groups.items():
+                if len(idxs) == 1:
+                    i = idxs[0]
+                    rbf, gt_edge, nbr_idx = geom_list[i]
+                    if rbf.ndim == 4:     rbf     = rbf.squeeze(0)
+                    if gt_edge.ndim == 4: gt_edge = gt_edge.squeeze(0)
+                    if nbr_idx.ndim == 3: nbr_idx = nbr_idx.squeeze(0)
+                    descs[i] = inner._encode_single(
+                        batch_data[i], precomputed_geom=(rbf, gt_edge, nbr_idx))
+                else:
+                    # Stack the point clouds and geometry for this group
+                    sub_batch = torch.stack([batch_data[i] for i in idxs])
+                    sub_rbf   = torch.stack([geom_list[i][0] for i in idxs])
+                    sub_gt    = torch.stack([geom_list[i][1] for i in idxs])
+                    sub_nbr   = torch.stack([geom_list[i][2] for i in idxs])
+                    sub_out   = inner._encode_batch(
+                        sub_batch,
+                        precomputed_geom=(sub_rbf, sub_gt, sub_nbr))
+                    for off, i in enumerate(idxs):
+                        descs[i] = sub_out[off]
+            return inner.rho(torch.stack(descs))
+        else:
+            # All unique sizes — fall back to per-sample (no grouping overhead)
+            descs = []
+            for x, geom in zip(batch_data, geom_list):
+                rbf, gt_edge, nbr_idx = geom
+                if rbf.ndim == 4:     rbf     = rbf.squeeze(0)
+                if gt_edge.ndim == 4: gt_edge = gt_edge.squeeze(0)
+                if nbr_idx.ndim == 3: nbr_idx = nbr_idx.squeeze(0)
+                descs.append(inner._encode_single(
+                    x, precomputed_geom=(rbf, gt_edge, nbr_idx)))
+            return inner.rho(torch.stack(descs))
 
     return model(batch_data)
 

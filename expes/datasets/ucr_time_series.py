@@ -1,3 +1,4 @@
+import os
 import sys
 import dill as pck
 import pandas as pd
@@ -52,7 +53,7 @@ elif PV_type == 'PL':
 
 mode = sys.argv[19]
 
-path = "/users/eleves-a/2023/ten.nguyen-hanaoka/UCRArchive_2018/" # Input the path to your data folder
+path = os.environ.get("UCR_PATH", "/users/eleves-a/2023/ten.nguyen-hanaoka/UCRArchive_2018") + "/"
 
 X1 = np.array(pd.read_csv(path + dataset_name + "/" + dataset_name + "_TRAIN.tsv", sep="\t", header=None))
 X2 = np.array(pd.read_csv(path + dataset_name + "/" + dataset_name + "_TEST.tsv",  sep="\t", header=None))

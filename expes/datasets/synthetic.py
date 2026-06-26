@@ -124,7 +124,7 @@ for hidx in range(len(homdim)):
         PV = Landscape(**PV_params)
         PVs_params.append(PV_params)
 
-    PV_train = PV.transform(pds_train)
+    PV_train = PV.fit_transform(pds_train)
     PV_test = PV.transform(pds_test)
     PVs_train.append(PV_train)
     PVs_test.append(PV_test)

@@ -78,9 +78,15 @@ def knn_geometry(
     rbf_encoder: RBFExpansion,
     gt_basis:    GTBasis,
     k:           int,
+    chunk_size:  int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Sparse k-NN geometry.  O(N·k) memory and compute.
+    Sparse k-NN geometry.  O(N·k) memory for the result; peak memory is
+    O(min(N, chunk_size) × N) when *chunk_size* > 0, otherwise O(N²).
+
+    When *chunk_size* > 0 the N×N distance matrix is built block-by-block,
+    which reduces peak GPU memory at the cost of a small constant-factor
+    overhead.  Recommended for N > 1000.
 
     Returns
     -------
@@ -90,17 +96,31 @@ def knn_geometry(
     """
     N, n = pos.shape
     k    = min(k, N - 1)
+    dev  = pos.device
 
-    # Pairwise distances
-    diff = pos.unsqueeze(1) - pos.unsqueeze(0)   # (N, N, n)
-    dist = diff.norm(dim=-1)                      # (N, N)
+    if chunk_size <= 0 or chunk_size >= N:
+        # ── Dense (original) path — single O(N²) block ────────────────────
+        diff = pos.unsqueeze(1) - pos.unsqueeze(0)   # (N, N, n)
+        dist = diff.norm(dim=-1)                      # (N, N)
 
-    # Mask self-distances and find k nearest
-    mask = torch.eye(N, dtype=torch.bool, device=pos.device)
-    dist_masked = dist.masked_fill(mask, float('inf'))
-    _, nbr_idx = dist_masked.topk(k, dim=-1, largest=False)  # (N, k)
+        mask = torch.eye(N, dtype=torch.bool, device=dev)
+        dist_masked = dist.masked_fill(mask, float('inf'))
+        _, nbr_idx = dist_masked.topk(k, dim=-1, largest=False)
+    else:
+        # ── Chunked path — never materialises the full N×N distance matrix ─
+        nbr_idx = torch.empty(N, k, dtype=torch.long, device=dev)
+        for start in range(0, N, chunk_size):
+            end = min(start + chunk_size, N)
+            chunk = pos[start:end]                         # (C, n)
+            diff_c = chunk.unsqueeze(1) - pos.unsqueeze(0)  # (C, N, n)
+            dist_c = diff_c.norm(dim=-1)                    # (C, N)
+            # Mask self-distances
+            for i in range(start, end):
+                dist_c[i - start, i] = float('inf')
+            _, idx_c = dist_c.topk(k, dim=-1, largest=False)
+            nbr_idx[start:end] = idx_c
 
-    # Gather neighbor positions and compute edge vectors
+    # Gather neighbor positions and compute edge vectors (shared path)
     pos_j = pos[nbr_idx]                                        # (N, k, n)
     diff_knn = pos.unsqueeze(1) - pos_j                         # (N, k, n)
     dist_knn = diff_knn.norm(dim=-1)                            # (N, k)
@@ -439,18 +459,33 @@ def knn_geometry_batch(
     rbf_encoder: RBFExpansion,
     gt_basis:    GTBasis,
     k:           int,
+    chunk_size:  int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Batched sparse k-NN geometry for uniform point clouds."""
     B, N, n = pos.shape
     k = min(k, N - 1)
-    diff = pos.unsqueeze(2) - pos.unsqueeze(1)                     # (B, N, N, n)
-    dist = diff.norm(dim=-1)                                       # (B, N, N)
+    dev = pos.device
 
-    mask = torch.eye(N, dtype=torch.bool, device=pos.device).unsqueeze(0).expand(B, N, N)
-    dist_masked = dist.masked_fill(mask, float('inf'))
-    _, nbr_idx = dist_masked.topk(k, dim=-1, largest=False)        # (B, N, k)
+    if chunk_size <= 0 or chunk_size >= N:
+        diff = pos.unsqueeze(2) - pos.unsqueeze(1)                 # (B, N, N, n)
+        dist = diff.norm(dim=-1)                                   # (B, N, N)
 
-    batch_idx = torch.arange(B, device=pos.device)[:, None, None]
+        mask = torch.eye(N, dtype=torch.bool, device=dev).unsqueeze(0).expand(B, N, N)
+        dist_masked = dist.masked_fill(mask, float('inf'))
+        _, nbr_idx = dist_masked.topk(k, dim=-1, largest=False)    # (B, N, k)
+    else:
+        nbr_idx = torch.empty(B, N, k, dtype=torch.long, device=dev)
+        for start in range(0, N, chunk_size):
+            end = min(start + chunk_size, N)
+            chunk = pos[:, start:end]                              # (B, C, n)
+            diff_c = chunk.unsqueeze(2) - pos.unsqueeze(1)         # (B, C, N, n)
+            dist_c = diff_c.norm(dim=-1)                           # (B, C, N)
+            for i in range(start, end):
+                dist_c[:, i - start, i] = float('inf')
+            _, idx_c = dist_c.topk(k, dim=-1, largest=False)
+            nbr_idx[:, start:end] = idx_c
+
+    batch_idx = torch.arange(B, device=dev)[:, None, None]
     pos_j = pos[batch_idx, nbr_idx]                                   # (B, N, k, n)
     diff_knn = pos.unsqueeze(2) - pos_j                                # (B, N, k, n)
     dist_knn = diff_knn.norm(dim=-1)                                   # (B, N, k)
@@ -575,8 +610,16 @@ class GTTensorFieldNetwork(nn.Module):
         self,
         pos:       torch.Tensor,
         node_attr: Optional[torch.Tensor] = None,
-        precomputed_geom = None
+        precomputed_geom = None,
+        return_descriptors: bool = False,
     ) -> torch.Tensor:
+        """Batch-encode point clouds.
+
+        When *return_descriptors* is True the per-sample descriptors
+        (before the classifier head ``self.rho``) are returned, which
+        allows the caller to apply ``rho`` externally after collecting
+        descriptors from multiple groups.
+        """
         if pos.ndim != 3:
             raise ValueError("pos must be a batched tensor of shape (B, N, n)")
         B, N = pos.shape[0], pos.shape[1]
@@ -627,7 +670,7 @@ class GTTensorFieldNetwork(nn.Module):
 
         node_inv = torch.cat(parts, dim=-1)        # (B, N, inv_dim)
         descs = node_inv.max(dim=1).values         # (B, inv_dim)
-        return self.rho(descs)
+        return descs if return_descriptors else self.rho(descs)
 
     # ------------------------------------------------------------------
     def _encode_single(
@@ -698,11 +741,57 @@ class GTTensorFieldNetwork(nn.Module):
     ) -> torch.Tensor:
         if len(batch) == 0:
             return torch.empty(0, self.num_classes, device=next(self.parameters()).device)
-        descriptors = []
+
+        # If the batch contains precomputed geometry (from a caching
+        # caller e.g. train_nn.py), fall back to per-sample encoding.
+        # Otherwise try the grouped-batch path.
+        descriptors = self._encode_grouped_batch(batch, node_attrs)
+        return self.rho(descriptors)
+
+    # ------------------------------------------------------------------
+    def _encode_grouped_batch(
+        self,
+        batch:      List[torch.Tensor],
+        node_attrs: Optional[List[torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        """Group variable-length point clouds by size and encode each
+        subgroup with the batched path (``_encode_batch``).  Reverts to
+        per-sample ``_encode_single`` when every sample has a unique size."""
+        # Group indices by point-cloud size
+        size_to_idx: Dict[int, List[int]] = {}
         for i, pc in enumerate(batch):
-            attr = node_attrs[i] if node_attrs is not None else None
-            descriptors.append(self._encode_single(pc, attr))
-        return self.rho(torch.stack(descriptors))
+            sz = pc.shape[0]
+            size_to_idx.setdefault(sz, []).append(i)
+
+        # Only worthwhile when at least one size appears more than once
+        has_groups = any(len(v) > 1 for v in size_to_idx.values())
+        if not has_groups:
+            descriptors = []
+            for i, pc in enumerate(batch):
+                attr = node_attrs[i] if node_attrs is not None else None
+                descriptors.append(self._encode_single(pc, attr))
+            return torch.stack(descriptors)
+
+        # Build output buffer and fill per group
+        device = batch[0].device
+        descriptors = [None] * len(batch)
+        for sz, idxs in size_to_idx.items():
+            if len(idxs) == 1:
+                # single sample with this size — use fast single path
+                i = idxs[0]
+                attr = node_attrs[i] if node_attrs is not None else None
+                descriptors[i] = self._encode_single(batch[i], attr)
+            else:
+                # multiple samples — stack and use batched path
+                sub_batch = torch.stack([batch[i] for i in idxs])
+                sub_attrs = None
+                if node_attrs is not None:
+                    sub_attrs = torch.stack([node_attrs[i] for i in idxs])
+                descs = self._encode_batch(sub_batch, sub_attrs,
+                                           return_descriptors=True)
+                for off, i in enumerate(idxs):
+                    descriptors[i] = descs[off]
+        return torch.stack(descriptors)
 
 
 # ============================================================================

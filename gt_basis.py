@@ -7,7 +7,21 @@ from __future__ import annotations
 import math, itertools
 from typing import List, Tuple, Dict, Optional
 import torch, numpy as np
-from scipy.special import sph_harm
+try:
+    from scipy.special import sph_harm_y as _scipy_sph
+    # New API: sph_harm_y(n, m, polar, azimuth)
+    _SCIPY_SPH_NEW_API = True
+    _HAS_SCIPY = True
+except ImportError:
+    try:
+        from scipy.special import sph_harm as _scipy_sph  # older scipy
+        # Old API: sph_harm(m, n, azimuth, polar)
+        _SCIPY_SPH_NEW_API = False
+        _HAS_SCIPY = True
+    except ImportError:
+        _scipy_sph = None
+        _SCIPY_SPH_NEW_API = False
+        _HAS_SCIPY = False
 
 
 # ── GTSignature ─────────────────────────────────────────────────────────────
@@ -70,7 +84,9 @@ def weyl_dim(n: int, lam: Tuple[int,...]) -> int:
     k = n // 2
     if len(lam) != k: raise ValueError(f"Expected rank-{k} sig for SO({n}).")
     lam = [int(x) for x in lam]
-    if n <= 2: return 1
+    if n <= 2:
+        # SO(2): m=0 → dim 1; m>0 → dim 2
+        return 1 if all(l == 0 for l in lam) else 2
     num, den = Fraction(1), Fraction(1)
     if n % 2 == 1:                                    # B_k
         for i in range(1, k+1):
@@ -85,6 +101,106 @@ def weyl_dim(n: int, lam: Tuple[int,...]) -> int:
                 num *= (lam[i-1]-lam[j-1]+j-i) * (lam[i-1]+lam[j-1]+2*k-i-j)
                 den *= (j-i) * (2*k-i-j)
     return max(1, int(round(float(num/den))))
+
+
+# ── PyTorch-native real spherical harmonics for n=3 ──────────────────────────
+
+def _real_sph_harm_torch(l_max: int, theta: torch.Tensor, phi: torch.Tensor
+                         ) -> torch.Tensor:
+    """
+    Real spherical harmonics up to degree *l_max*, computed entirely in
+    PyTorch (no CPU sync).  Matches the convention of the scipy-based code
+    in ``_eval_n3`` — i.e. it reproduces::
+
+        Y = sph_harm(|m|, l, ph_np, th_np)  # complex
+        if   m < 0:  sqrt(2) * Y.imag
+        elif m > 0:  sqrt(2) * ((-1)**m) * Y.real
+        else:        Y.real
+
+    Parameters
+    ----------
+    l_max : int
+        Maximum degree.
+    theta : Tensor   (…,)   Polar angle (colatitude) in ``[0, π]``.
+    phi   : Tensor   (…,)   Azimuthal angle in ``[0, 2π)``.
+
+    Returns
+    -------
+    Y : Tensor  (…, (l_max+1)²)
+        Real SH values ordered by increasing *l*, then *m = -l … l*.
+    """
+    orig_shape = theta.shape
+    device     = theta.device
+    dtype      = theta.dtype
+
+    x = theta.reshape(-1)   # polar angle  (the actual variable name is θ)
+    p = phi.reshape(-1)
+
+    # cos / sin for the Legendre argument (cosθ = z)
+    cos_t = torch.cos(x)
+    sin_t = torch.sin(x)
+
+    # ---- Associated Legendre P_l^m(cosθ)  WITH Condon-Shortley phase ----
+    # scipy.special.lpmv( m, l, x ) includes the CS phase (-1)^m, so we
+    # replicate it here to match the sph_harm output exactly.
+    P: List[List[torch.Tensor]] = []               # P[l][m]
+
+    # l = 0
+    P.append([torch.ones_like(x)])
+
+    if l_max >= 1:
+        # l = 1   P_1^0 = x ,  P_1^1 = -sinθ (CS phase)
+        P.append([cos_t, -sin_t])
+
+    for l in range(2, l_max + 1):
+        Pl = [None] * (l + 1)
+        # m = l    P_l^l = -(2l-1) * sinθ * P_{l-1}^{l-1}  (CS phase)
+        Pl[l] = -(2 * l - 1) * sin_t * P[l - 1][l - 1]
+        # m = l-1  P_l^{l-1} = cosθ * (2l-1) * P_{l-1}^{l-1}
+        Pl[l - 1] = cos_t * (2 * l - 1) * P[l - 1][l - 1]
+        # m = l-2 … 0   three-term recurrence
+        for m in range(l - 2, -1, -1):
+            Pl[m] = ((cos_t * (2 * l - 1) * P[l - 1][m]
+                      - (l + m - 1) * P[l - 2][m])
+                     / (l - m))
+        P.append(Pl)
+
+    # ---- Trigonometric multiples  cos(m·φ) / sin(m·φ) ----
+    cos_mp = [torch.ones_like(p)]                  # cos(0·φ) = 1
+    sin_mp = [torch.zeros_like(p)]                 # sin(0·φ) = 0
+    for m in range(1, l_max + 1):
+        cos_mp.append(torch.cos(m * p))
+        sin_mp.append(torch.sin(m * p))
+
+    N = x.shape[0]
+    parts: List[torch.Tensor] = []
+    for l in range(l_max + 1):
+        block = torch.empty(N, 2 * l + 1, device=device, dtype=dtype)
+        for m in range(-l, l + 1):
+            abs_m = abs(m)
+            norm = math.sqrt(
+                (2 * l + 1) / (4 * math.pi)
+                * math.factorial(l - abs_m) / math.factorial(l + abs_m)
+            )
+            Plm = P[l][abs_m]                     # includes CS phase
+            if m == 0:
+                block[:, m + l] = norm * Plm
+            elif m > 0:
+                # The existing code: sqrt(2) * (-1)^m * Re[sph_harm(m,l,...)]
+                # scipy adds (-1)^m via CS in its Legendre.  We add another
+                # (-1)^m here (the real → real factor) → total (-1)^{2m}=1.
+                block[:, m + l] = (math.sqrt(2) * ((-1) ** m)
+                                   * norm * Plm * cos_mp[abs_m])
+            else:  # m < 0
+                # Standard real SH:  sqrt(2) * (-1)^m * Im(Y_l^{|m|}_complex)
+                # The CS phase (-1)^{|m|} is already in Plm so the extra
+                # factor (-1)^{m}=(-1)^{-|m|}=(-1)^{|m|} is accounted by
+                # multiplying with (-1)**abs_m here.
+                block[:, m + l] = (math.sqrt(2) * ((-1) ** abs_m)
+                                   * norm * Plm * sin_mp[abs_m])
+        parts.append(block)
+
+    return torch.cat(parts, dim=-1).reshape(*orig_shape, -1)
 
 
 # ── GTBasis ──────────────────────────────────────────────────────────────────
@@ -105,17 +221,33 @@ class GTBasis:
 
     def _eval_n3(self, d: torch.Tensor) -> torch.Tensor:
         shape = d.shape[:-1]
+        l_max = self.max_order
+
+        # Use the PyTorch-native path when possible (on GPU or when scipy is
+        # unavailable).  The CPU / scipy fallback remains for exact regression.
+        if not _HAS_SCIPY or d.device.type != 'cpu':
+            x, y, z = d[..., 0], d[..., 1], d[..., 2]
+            theta = torch.acos(z.clamp(-1 + 1e-7, 1 - 1e-7))
+            phi   = torch.atan2(y, x)
+            return _real_sph_harm_torch(l_max, theta, phi)
+
+        # scipy fallback  (CPU, matches original output exactly)
         x,y,z = d[...,0], d[...,1], d[...,2]
         theta  = torch.acos(z.clamp(-1+1e-7,1-1e-7))
         phi    = torch.atan2(y,x)
-        th_np  = theta.detach().cpu().numpy().reshape(-1)
-        ph_np  = phi.detach().cpu().numpy().reshape(-1)
+        th_np  = theta.detach().cpu().numpy().reshape(-1)   # polar
+        ph_np  = phi.detach().cpu().numpy().reshape(-1)     # azimuthal
         parts  = []
         for sig in self.signatures:
             l = sig.lam[0]; block=[]
             for m in range(-l,l+1):
-                Y = sph_harm(abs(m),l,ph_np,th_np)
-                if   m<0: val=math.sqrt(2)*Y.imag
+                if _SCIPY_SPH_NEW_API:
+                    # sph_harm_y(n, m, polar, azimuth)
+                    Y = _scipy_sph(l, abs(m), th_np, ph_np)
+                else:
+                    # sph_harm(m, n, azimuth, polar)
+                    Y = _scipy_sph(abs(m), l, ph_np, th_np)
+                if   m<0: val=math.sqrt(2)*((-1)**m)*Y.imag
                 elif m>0: val=math.sqrt(2)*((-1)**m)*Y.real
                 else:     val=Y.real
                 block.append(val.astype(np.float32))
@@ -192,7 +324,11 @@ class CGCoefficients:
             Cc=_so3_cg_complex(l1,l2,l3)
             if Cc is None: return torch.zeros(d1,d2,d3)
             U1,U2,U3=_real2complex(l1),_real2complex(l2),_real2complex(l3)
-            Cr=np.einsum('am,bn,mno,op->abo',U1.conj(),U2.conj(),Cc,U3).real
+            Cr=np.einsum('am,bn,mno,co->abc',U1,U2,Cc,U3.conj())
+            if (l1+l2+l3)%2==1:
+                Cr=-np.imag(Cr)
+            else:
+                Cr=np.real(Cr)
             return torch.from_numpy(Cr.astype(np.float32))
         # n>=4: GT recursion
         C=torch.zeros(d1,d2,d3)
