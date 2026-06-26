@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --time=48:00:00
+#SBATCH --time=23:00:00
 #SBATCH --export=ALL
 #SBATCH --output=logs/ucr_%A_%a.out
 #SBATCH --error=logs/ucr_%A_%a.err
