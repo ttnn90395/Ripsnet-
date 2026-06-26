@@ -55,6 +55,8 @@ TORCH_INDEX="${RIPSNET_TORCH_INDEX:-https://download.pytorch.org/whl/cu124}"
 
 "$PY" -m pip install -U pip
 "$PY" -m pip install --no-user "torch==${TORCH_VER}" --index-url "$TORCH_INDEX"
+# mpmath is needed by sympy (torch dep) but not bundled on aarch64
+"$PY" -m pip install --no-user mpmath
 
 # Install Velour from GitHub (sklearn dep is deprecated, use env var to bypass)
 SKLEARN_ALLOW_DEPRECATED_SKLEARN_PACKAGE_INSTALL=True "$PY" -m pip install --no-user git+https://github.com/raphaeltinarrage/velour.git
