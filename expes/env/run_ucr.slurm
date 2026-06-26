@@ -31,6 +31,8 @@ export UCR_PATH="${UCR_PATH:-/hs/work0/home/users/${USER}/data/UCRArchive_2018}"
 cd "$REPO_DIR/expes"
 mkdir -p logs
 
+export PYTHONNOUSERSITE=1
+
 source "$CONDA_PREFIX/etc/profile.d/conda.sh"
 conda activate "$ENV_NAME"
 

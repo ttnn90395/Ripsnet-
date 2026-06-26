@@ -30,6 +30,9 @@ IDENTIFIER="try${SLURM_ARRAY_TASK_ID}"
 cd "$REPO_DIR/expes"
 mkdir -p logs
 
+# Prevent x86_64 home site-packages from leaking in on aarch64
+export PYTHONNOUSERSITE=1
+
 # Activate conda
 source "$CONDA_PREFIX/etc/profile.d/conda.sh"
 conda activate "$ENV_NAME"
