@@ -56,8 +56,8 @@ TORCH_INDEX="${RIPSNET_TORCH_INDEX:-https://download.pytorch.org/whl/cu124}"
 "$PY" -m pip install -U pip
 "$PY" -m pip install "torch==${TORCH_VER}" --index-url "$TORCH_INDEX"
 
-# Install Velour from GitHub
-"$PY" -m pip install git+https://github.com/raphaeltinarrage/velour.git
+# Install Velour from GitHub (sklearn dep is deprecated, use env var to bypass)
+SKLEARN_ALLOW_DEPRECATED_SKLEARN_PACKAGE_INSTALL=True "$PY" -m pip install git+https://github.com/raphaeltinarrage/velour.git
 
 # Verify
 "$PY" -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
