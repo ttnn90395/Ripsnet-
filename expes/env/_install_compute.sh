@@ -35,7 +35,7 @@ if [[ ! -x "$PREFIX/bin/python" ]]; then
     URL="https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh"
   fi
   _tmp="/tmp/miniforge3-${ARCH}.$$.sh"
-  wget -q -O "$_tmp" "$URL"
+  /usr/bin/curl -fsSL -o "$_tmp" "$URL"
   bash "$_tmp" -b -p "$PREFIX"
   rm -f "$_tmp"
 fi
