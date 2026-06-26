@@ -163,7 +163,7 @@ def precompute_geometry(model, data_list, mname):
     # ----- disk-cache lookup -----
     cache_path = _geom_cache_path(dataset_name, mname)
     try:
-        cached = torch.load(cache_path, map_location='cpu')
+        cached = torch.load(cache_path, map_location=device)
         print(f'  Geometry cache hit → {cache_path}')
         return cached
     except (FileNotFoundError, RuntimeError):
@@ -182,9 +182,9 @@ def precompute_geometry(model, data_list, mname):
     with torch.no_grad():
         for pc in tqdm(data_list, desc="Precomputing geometry", leave=False):
             rbf, gt_edge, nbr_idx = knn_geometry(pc, rbf_enc, gt_basis, k)
-            rbfs.append(rbf.detach().cpu())
-            gt_edges.append(gt_edge.detach().cpu())
-            nbr_idxs.append(nbr_idx.detach().cpu())
+            rbfs.append(rbf.detach())
+            gt_edges.append(gt_edge.detach())
+            nbr_idxs.append(nbr_idx.detach())
 
     uniform = all(r.shape == rbfs[0].shape for r in rbfs)
     if uniform:
@@ -452,7 +452,7 @@ def forward_single(model, x, mname, geom=None):
     if mname == 'ScalarInputMLP':
         return model(x)
     if geom is not None and mname in TFN_MODELS:
-        rbf, gt_edge, nbr_idx = geom
+        rbf, gt_edge, nbr_idx = [t.to(x.device) if isinstance(t, torch.Tensor) else t for t in geom]
         # FIX: squeeze out any leading batch dim that comes from slicing a
         # stacked geometry cache.  _encode_single expects 3-D tensors
         # (N, k, *), not 4-D (1, N, k, *).
