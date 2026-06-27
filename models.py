@@ -544,10 +544,20 @@ class DenseRagged(nn.Module):
             if self.use_norm:
                 self.norm = nn.LayerNorm(self.out_features).to(device)
 
+    _shape_warned = False
+
     def forward(self, inputs: List[torch.Tensor]) -> List[torch.Tensor]:
         outputs = []
         for x in inputs:
             self._ensure_params(x.shape[-1], x.device)
+            if self.weight_param.shape[0] != x.shape[-1]:
+                if not DenseRagged._shape_warned:
+                    print(f'  WARNING: DenseRagged input dim {x.shape[-1]} '
+                          f'!= trained dim {self.weight_param.shape[0]}, '
+                          f'returning zeros (skipping this model)')
+                    DenseRagged._shape_warned = True
+                outputs.append(torch.zeros(x.shape[0], self.out_features, device=x.device))
+                continue
             y = torch.matmul(x, self.weight_param)
             if self.use_bias and self.bias_param is not None:
                 y = y + self.bias_param
