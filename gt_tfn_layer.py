@@ -448,6 +448,12 @@ class GTTFNLayer(nn.Module):
             contracted = torch.einsum("bnje,bnjceo->bnjco", e_feat, fCG_nbr)  # (B, N, k, Ci, do)
             return torch.einsum("bnjco,bnjcd->bnod", radial, contracted)         # (B, N, Co, do)
 
+        # SINGLE path guard for OOB nbr_idx
+        if nbr_idx.max() >= fCG.shape[0] or nbr_idx.min() < 0:
+            print(f"[D] _message_sparse (single) OOB: nbr_idx max={nbr_idx.max().item()}, "
+                  f"min={nbr_idx.min().item()}, fCG.shape={fCG.shape}, "
+                  f"N={N}, k={k}, c_in={c_in}, c_out={c_out}")
+            nbr_idx = nbr_idx.clamp(0, fCG.shape[0] - 1)
         fCG_nbr = fCG[nbr_idx]                                             # (N, k, Ci, de, do)
         contracted = torch.einsum("ije,ijceo->ijco", e_feat, fCG_nbr)      # (N, k, Ci, do)
         return torch.einsum("ijco,ijcd->iod", radial, contracted)           # (N, Co, do)
