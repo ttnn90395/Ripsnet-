@@ -98,6 +98,10 @@ def knn_geometry(
     k    = min(k, N - 1)
     dev  = pos.device
 
+    # Guard against NaN/Inf input
+    if not torch.isfinite(pos).all():
+        raise RuntimeError(f"knn_geometry: pos contains NaN/Inf (shape={pos.shape})")
+
     if chunk_size <= 0 or chunk_size >= N:
         # ── Dense (original) path — single O(N²) block ────────────────────
         diff = pos.unsqueeze(1) - pos.unsqueeze(0)   # (N, N, n)
@@ -466,6 +470,10 @@ def knn_geometry_batch(
     k = min(k, N - 1)
     dev = pos.device
 
+    # Guard against NaN/Inf input
+    if not torch.isfinite(pos).all():
+        raise RuntimeError(f"knn_geometry_batch: pos contains NaN/Inf (shape={pos.shape})")
+
     if chunk_size <= 0 or chunk_size >= N:
         diff = pos.unsqueeze(2) - pos.unsqueeze(1)                 # (B, N, N, n)
         dist = diff.norm(dim=-1)                                   # (B, N, N)
@@ -633,7 +641,9 @@ class GTTensorFieldNetwork(nn.Module):
         f0 = torch.cat(f0_parts, dim=-1).unsqueeze(-1)                   # (B, N, C, 1)
 
         # Reshape: need (B, N, C, d)
-        f1 = (pos / pos.norm(dim=-1, keepdim=True).clamp(min=1e-8)).unsqueeze(2)  # (B, N, 1, n)
+        pos_norm = pos.norm(dim=-1, keepdim=True)
+        pos_safe = pos / pos_norm.where(pos_norm > 0, torch.ones_like(pos_norm))
+        f1 = pos_safe.unsqueeze(2)  # (B, N, 1, n)
         feats: FeatureDict = {sc: f0, vc: f1}
 
         if precomputed_geom is not None:
@@ -693,7 +703,9 @@ class GTTensorFieldNetwork(nn.Module):
         f0 = torch.cat(f0_parts, dim=-1).unsqueeze(-1)  # (N, C, 1)
 
         # (N, 1, n) — C=1 vector feature
-        f1 = (pos / pos.norm(dim=-1, keepdim=True).clamp(min=1e-8)).unsqueeze(1)  # (N, 1, n)
+        pos_norm = pos.norm(dim=-1, keepdim=True)
+        pos_safe = pos / pos_norm.where(pos_norm > 0, torch.ones_like(pos_norm))
+        f1 = pos_safe.unsqueeze(1)  # (N, 1, n)
 
         feats: FeatureDict = {sc: f0, vc: f1}
 

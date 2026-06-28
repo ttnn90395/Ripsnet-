@@ -804,6 +804,7 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
     tr_loss = val_loss = 0.0
 
     use_amp = device.type == 'cuda'
+    torch.autograd.set_detect_anomaly(True)
     for epoch in tqdm(range(num_epochs), desc=f"Epochs ({label})"):
         tr_loss  = train_epoch(
             m, train_data, targets_train, optimizer, criterion, mname,
@@ -861,12 +862,35 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
 # Entry point
 # -------------------------------------------------------------------------
 
+def _recover_cuda():
+    """After a CUDA assert, the GPU context is corrupted.
+    Empty cache and attempt to clear the error state so subsequent
+    operations can proceed without cascading failures."""
+    if device.type != 'cuda':
+        return
+    torch.cuda.empty_cache()
+    try:
+        torch.cuda.synchronize()
+    except RuntimeError:
+        pass
+    # Dummy op to flush the CUDA error state
+    try:
+        torch.zeros(1, device=device) + 1
+    except RuntimeError:
+        pass
+
 def run_both(mname):
     res = {}
     for use_gs in [False, True]:
         tag = '_GS' if use_gs else ''
         try:
             res[mname + tag] = train_single_model(mname, use_gs=use_gs)
+        except RuntimeError as e:
+            err_str = str(e)
+            print(f'ERROR training {mname}{tag}: {e}')
+            if 'device-side assert' in err_str or 'illegal memory' in err_str:
+                _recover_cuda()
+            res[mname + tag] = {'error': err_str}
         except Exception as e:
             print(f'ERROR training {mname}{tag}: {e}')
             res[mname + tag] = {'error': str(e)}
