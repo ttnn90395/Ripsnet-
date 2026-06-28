@@ -13,6 +13,7 @@ from tqdm import tqdm
 import os
 import sys
 import json
+import traceback
 from collections import defaultdict
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT_DIR not in sys.path:
@@ -888,22 +889,20 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
 # -------------------------------------------------------------------------
 
 def _recover_cuda():
-    """After a CUDA assert, the GPU context is corrupted.
-    Synchronise first to surface any pending async error (caught
-    silently), then empty cache so subsequent ops can proceed."""
+    """After a CUDA assert the GPU context is permanently dead.
+    Catch and suppress any pending error so the script can continue
+    gracefully to the next model (which will also fail, but the
+    traceback from run_both will show the root cause)."""
     if device.type != 'cuda':
         return
-    # 1. synchronise — surfaces the pending async CUDA assert
     try:
         torch.cuda.synchronize()
     except RuntimeError:
         pass
-    # 2. dummy op to flush the error state completely
     try:
         torch.zeros(1, device=device) + 1
     except RuntimeError:
         pass
-    # 3. now empty cache — no pending error to surface
     try:
         torch.cuda.empty_cache()
     except RuntimeError:
@@ -917,11 +916,13 @@ def run_both(mname):
             res[mname + tag] = train_single_model(mname, use_gs=use_gs)
         except RuntimeError as e:
             err_str = str(e)
+            traceback.print_exc()
             print(f'ERROR training {mname}{tag}: {e}')
             if 'device-side assert' in err_str or 'illegal memory' in err_str:
                 _recover_cuda()
             res[mname + tag] = {'error': err_str}
         except Exception as e:
+            traceback.print_exc()
             print(f'ERROR training {mname}{tag}: {e}')
             res[mname + tag] = {'error': str(e)}
     return res
