@@ -148,20 +148,23 @@ def deep_to(module: nn.Module, target_device) -> nn.Module:
 # Fix 1: Geometry precomputation for TFN models
 # -------------------------------------------------------------------------
 
-def _geom_cache_path(dataset_name: str, model_name: str) -> str:
+def _geom_cache_path(dataset_name: str, model_name: str,
+                     tag: str = '') -> str:
     """Path for the on-disk geometry cache for a given dataset + model."""
     os.makedirs('cache', exist_ok=True)
-    tag = f'{dataset_name}_{model_name}'
-    return f'cache/geom_{tag}.pth'
+    suffix = f'_{tag}' if tag else ''
+    return f'cache/geom_{dataset_name}_{model_name}{suffix}.pth'
 
 
-def precompute_geometry(model, data_list, mname):
+def precompute_geometry(model, data_list, mname, tag=''):
     """
     Precompute k-NN geometry for all point clouds.
 
     Caches the result to disk so that the same dataset does not recompute
     geometry when training a different model variant.  Cache is keyed by
-    the dataset name (global *dataset_name*) and the model name.
+    the dataset name (global *dataset_name*), the model name and an
+    optional *tag* (e.g. ``'train'`` / ``'test'``) so that different data
+    splits do not share a cache entry.
 
     Returns either a stacked 'uniform' geometry dict (B, N, k, *) when all
     point clouds share the same size, or a list of per-sample tuples.
@@ -170,7 +173,7 @@ def precompute_geometry(model, data_list, mname):
         return None
 
     # ----- disk-cache lookup -----
-    cache_path = _geom_cache_path(dataset_name, mname)
+    cache_path = _geom_cache_path(dataset_name, mname, tag=tag)
     try:
         cached = torch.load(cache_path, map_location=device)
         print(f'  Geometry cache hit → {cache_path}')
@@ -774,8 +777,9 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
     m = deep_to(m, device)
 
     # Fix 1: precompute geometry for TFN models
-    geom_train = precompute_geometry(m, train_data, mname)
-    geom_test  = precompute_geometry(m, test_data,  mname)
+    gs_tag = 'GS' if use_gs else 'raw'
+    geom_train = precompute_geometry(m, train_data, mname, tag=f'train_{gs_tag}')
+    geom_test  = precompute_geometry(m, test_data,  mname, tag=f'test_{gs_tag}')
 
     # Fix 3: torch.compile (disabled for debugging)
     # NOTE: torch.compile can cause graph capture errors with dynamic shapes.
