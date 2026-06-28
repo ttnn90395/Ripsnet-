@@ -653,6 +653,13 @@ class EarlyStopping:
 # Train / evaluate loops
 # -------------------------------------------------------------------------
 
+def _has_nan_grad(model):
+    """Return True if any parameter has NaN/Inf gradients."""
+    for p in model.parameters():
+        if p.grad is not None and not torch.isfinite(p.grad).all():
+            return True
+    return False
+
 def get_target(targets, i):
     return torch.FloatTensor(targets[i:i + 1]).to(device)
 
@@ -664,6 +671,7 @@ def train_epoch(model, data, targets, optimizer, criterion, mname,
     total_loss = 0.0
     n = len(data)
     perm = np.random.permutation(n)
+    skipped = 0
     for start in range(0, n, batch_size):
         batch_idx = perm[start:start + batch_size]
         batch_data = [data[i] for i in batch_idx]
@@ -677,18 +685,34 @@ def train_epoch(model, data, targets, optimizer, criterion, mname,
                                    geom_batch=batch_geom)
             loss = criterion(output, batch_targets)
 
+        # Skip batch if loss is NaN/Inf (prevents gradient corruption)
+        if not torch.isfinite(loss):
+            skipped += 1
+            continue
+
         if scaler is not None:
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
+            # NaN gradient guard: skip step if any gradient is NaN/Inf
+            if _has_nan_grad(model):
+                skipped += 1
+                scaler.update()
+                continue
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             scaler.step(optimizer)
             scaler.update()
         else:
             loss.backward()
+            # NaN gradient guard
+            if _has_nan_grad(model):
+                skipped += 1
+                continue
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             optimizer.step()
 
         total_loss += loss.item() * len(batch_data)
+    if skipped:
+        print(f'  [train_epoch] skipped {skipped}/{n // batch_size + 1} batches')
     return total_loss / n
 
 
@@ -803,8 +827,9 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
     log_every = max(1, num_epochs // 100)
     tr_loss = val_loss = 0.0
 
-    use_amp = device.type == 'cuda'
-    torch.autograd.set_detect_anomaly(True)
+    # TFN custom ops (einsum, CG tensor products) can overflow FP16 under AMP.
+    # Disable AMP for TFN models; other models benefit from FP16 speedup.
+    use_amp = device.type == 'cuda' and mname not in TFN_MODELS
     for epoch in tqdm(range(num_epochs), desc=f"Epochs ({label})"):
         tr_loss  = train_epoch(
             m, train_data, targets_train, optimizer, criterion, mname,
@@ -864,18 +889,23 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
 
 def _recover_cuda():
     """After a CUDA assert, the GPU context is corrupted.
-    Empty cache and attempt to clear the error state so subsequent
-    operations can proceed without cascading failures."""
+    Synchronise first to surface any pending async error (caught
+    silently), then empty cache so subsequent ops can proceed."""
     if device.type != 'cuda':
         return
-    torch.cuda.empty_cache()
+    # 1. synchronise — surfaces the pending async CUDA assert
     try:
         torch.cuda.synchronize()
     except RuntimeError:
         pass
-    # Dummy op to flush the CUDA error state
+    # 2. dummy op to flush the error state completely
     try:
         torch.zeros(1, device=device) + 1
+    except RuntimeError:
+        pass
+    # 3. now empty cache — no pending error to surface
+    try:
+        torch.cuda.empty_cache()
     except RuntimeError:
         pass
 

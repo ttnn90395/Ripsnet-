@@ -33,6 +33,9 @@ conda activate "$ENV_NAME"
 
 export LD_LIBRARY_PATH="$CONDA_PREFIX/envs/$ENV_NAME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
+export CUDA_LAUNCH_BLOCKING=1
+export TORCH_USE_CUDA_DSA=1
+
 echo "=== $(date) Starting UCR split: task $SLURM_ARRAY_TASK_ID ==="
 echo "Host: $(hostname)  Arch: $(uname -m)"
 python -c "import torch; print('GPU:', torch.cuda.is_available(), 'Count:', torch.cuda.device_count())"
