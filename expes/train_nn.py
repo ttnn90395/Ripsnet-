@@ -12,6 +12,7 @@ import gudhi.representations
 from tqdm import tqdm
 import os
 import sys
+import json
 from collections import defaultdict
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT_DIR not in sys.path:
@@ -48,9 +49,16 @@ num_epochs   = int(sys.argv[4])
 PV_type      = sys.argv[5]
 mode         = sys.argv[6]
 batch_size   = int(sys.argv[7]) if len(sys.argv) > 7 else 32
+hparams_json = os.environ.get('TFN_HPARAMS', '{}')
+model_hparams = json.loads(hparams_json) if hparams_json else {}
+model_tag = os.environ.get('TFN_MODEL_TAG', '')
 
 print(sys.argv)
 print(f'Batch size: {batch_size}')
+if model_hparams:
+    print(f'Model hparams: {model_hparams}')
+if model_tag:
+    print(f'Model tag: {model_tag}')
 
 data = pck.load(open('datasets/' + dataset_name + ".pkl", 'rb'))
 data_train = data["data_train"]
@@ -285,9 +293,10 @@ def _pad_to_3d(data_list):
     return out
 
 
-def augment_point_cloud(pc, sigma=0.01, clip=0.05):
+def augment_point_cloud(pc, sigma=0.02, clip=0.1):
     if pc.ndim != 2 or pc.shape[1] not in (2, 3):
         return pc
+    # Random rotation
     if pc.shape[1] == 2:
         theta = float(torch.rand(1, device=pc.device) * 2 * np.pi)
         c, s = np.cos(theta), np.sin(theta)
@@ -299,6 +308,10 @@ def augment_point_cloud(pc, sigma=0.01, clip=0.05):
         if torch.det(q) < 0:
             q[:, 0] = -q[:, 0]
         pc = pc @ q
+    # Random scaling (new)
+    scale = 1.0 + (torch.rand(1, device=pc.device) - 0.5) * 0.2
+    pc = pc * scale
+    # Random jitter
     noise = torch.randn_like(pc) * sigma
     noise = noise.clamp(-clip, clip)
     return pc + noise
@@ -353,52 +366,53 @@ def prepare_data_for_model(mname, data_list, use_gs=False,
     return data_list
 
 
-def build_model_by_name(name, n=None):
+def build_model_by_name(name, n=None, hparams=None):
     _n    = dim if n is None else n
     _npts = data_train_torch[0].shape[0] if data_train_torch else 128
+    hp = {} if hparams is None else hparams
     if name == 'TensorFieldNetwork':
         return TensorFieldNetwork(
             num_classes=output_dim,
-            hidden_channels=32,
-            num_layers=3,
-            num_rbf=64,
-            cutoff=1.0,
-            k_neighbors=16,
-            classifier_dims=[64, 32],
+            hidden_channels=hp.get('hidden_channels', 32),
+            num_layers=hp.get('num_layers', 3),
+            num_rbf=hp.get('num_rbf', 64),
+            cutoff=hp.get('cutoff', 1.0),
+            k_neighbors=hp.get('k_neighbors', min(16, _npts // 10 + 1)),
+            classifier_dims=hp.get('classifier_dims', [64, 32]),
         )
     if name == 'GTTensorFieldNetwork':
         return GTTensorFieldNetwork(
             n=_n,
             num_classes=output_dim,
-            hidden_channels=32,
-            num_layers=3,
-            num_rbf=64,
-            cutoff=1.0,
-            k_neighbors=16,
-            classifier_dims=[64, 32],
-            radial_hidden=128,
+            hidden_channels=hp.get('hidden_channels', 32),
+            num_layers=hp.get('num_layers', 3),
+            num_rbf=hp.get('num_rbf', 64),
+            cutoff=hp.get('cutoff', 1.0),
+            k_neighbors=hp.get('k_neighbors', min(16, _npts // 10 + 1)),
+            classifier_dims=hp.get('classifier_dims', [64, 32]),
+            radial_hidden=hp.get('radial_hidden', 128),
         )
     if name == 'GTTensorFieldNetworkV2':
         return GTTensorFieldNetworkV2(
             n=_n,
             num_classes=output_dim,
-            hidden_channels=32,
-            num_layers=3,
-            num_rbf=64,
-            cutoff=1.0,
-            k_neighbors=16,
-            classifier_dims=[64, 32],
-            radial_hidden=128,
+            hidden_channels=hp.get('hidden_channels', 32),
+            num_layers=hp.get('num_layers', 3),
+            num_rbf=hp.get('num_rbf', 64),
+            cutoff=hp.get('cutoff', 1.0),
+            k_neighbors=hp.get('k_neighbors', min(16, _npts // 10 + 1)),
+            classifier_dims=hp.get('classifier_dims', [64, 32]),
+            radial_hidden=hp.get('radial_hidden', 128),
         )
     if name == 'HierarchicalGTTFN':
         return HierarchicalGTTFN(
             n=_n,
             num_classes=output_dim,
-            hidden_channels=32,
-            stage_sizes=[64, 32],
-            num_rbf=64,
-            cutoff=1.0,
-            classifier_dims=[64, 32],
+            hidden_channels=hp.get('hidden_channels', 32),
+            stage_sizes=hp.get('stage_sizes', [64, 32]),
+            num_rbf=hp.get('num_rbf', 64),
+            cutoff=hp.get('cutoff', 1.0),
+            classifier_dims=hp.get('classifier_dims', [64, 32]),
         )
     if name == 'HierarchicalTensorFieldNetwork':
         return HierarchicalTensorFieldNetwork(
@@ -709,7 +723,7 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
     label = f'{mname}{tag}'
     print(f'\n=== Training {label} (gs={use_gs}) ===')
 
-    m = deep_to(build_model_by_name(mname, n=dim), device)
+    m = deep_to(build_model_by_name(mname, n=dim, hparams=model_hparams), device)
 
     train_data = prepare_data_for_model(
         mname, data_train_torch, use_gs=use_gs,
@@ -748,11 +762,18 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
         except Exception as e:
             print(f'  torch.compile skipped: {e}')
 
+    hparam_lr = model_hparams.get('lr', None)
+    effective_lr = hparam_lr if hparam_lr is not None else optim_lr
     optimizer     = optimizer_class(
-        m.parameters(), lr=optim_lr, weight_decay=1e-5)
-    # LR scheduler: reduce on plateau for stable convergence
-    scheduler     = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=10, min_lr=1e-6)
+        m.parameters(), lr=effective_lr, weight_decay=1e-5)
+    # LR scheduler: cosine annealing or reduce on plateau
+    lr_schedule = model_hparams.get('lr_schedule', 'plateau')
+    if lr_schedule == 'cosine':
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=num_epochs, eta_min=1e-6)
+    else:
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.5, patience=10, min_lr=1e-6)
     criterion     = nn.MSELoss()
     
     # Flatten persistence vectors: if PVs are 3D (N, H, W), flatten to (N, H*W)
@@ -792,7 +813,10 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
             m, test_data, targets_test, criterion, mname,
             geom_cache=geom_test, batch_size=batch_size)
 
-        scheduler.step(val_loss)
+        if lr_schedule == 'cosine':
+            scheduler.step()
+        else:
+            scheduler.step(val_loss)
 
         if (epoch + 1) % log_every == 0 or epoch == 0:
             lr_now = optimizer.param_groups[0]['lr']
@@ -811,7 +835,9 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
         base_m = m._orig_mod if hasattr(m, '_orig_mod') else m
         extra['num_points'] = base_m._phi_inp_dim
 
-    ckpt_path  = f'models/{label}.pth'
+    ckpt_dir = f'models/{model_tag}' if model_tag else 'models'
+    os.makedirs(ckpt_dir, exist_ok=True)
+    ckpt_path  = f'{ckpt_dir}/{label}.pth'
     base_m     = m._orig_mod if hasattr(m, '_orig_mod') else m
     torch.save({
         'model_state_dict': base_m.state_dict(),

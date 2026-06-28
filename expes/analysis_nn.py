@@ -71,12 +71,16 @@ print(sys.argv)
 
 def find_checkpoint(mname):
     script_dir = os.path.dirname(os.path.abspath(__file__))
+    model_tag = os.environ.get('TFN_MODEL_TAG', '')
     candidate_dirs = [
+        f'models/{model_tag}' if model_tag else 'models',
         'models',
+        os.path.join(script_dir, f'models/{model_tag}') if model_tag else '',
         os.path.join(script_dir, 'models'),
         os.path.join(script_dir, '..', 'models'),
         os.path.join(script_dir, '..', '..', 'models'),
     ]
+    candidate_dirs = [d for d in candidate_dirs if d]
     for d in candidate_dirs:
         for ext in ('.pth', '.pt'):
             p = os.path.join(d, mname + ext)
