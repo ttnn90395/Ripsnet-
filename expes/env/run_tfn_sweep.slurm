@@ -25,6 +25,7 @@ cd "$REPO_DIR/expes"
 mkdir -p logs
 
 export PYTHONNOUSERSITE=1
+export PYTHONUNBUFFERED=1
 source "$CONDA_PREFIX/etc/profile.d/conda.sh"
 conda activate "$ENV_NAME"
 export LD_LIBRARY_PATH="$CONDA_PREFIX/envs/$ENV_NAME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"

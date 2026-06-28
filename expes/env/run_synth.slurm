@@ -32,6 +32,7 @@ mkdir -p logs
 
 # Prevent x86_64 home site-packages from leaking in on aarch64
 export PYTHONNOUSERSITE=1
+export PYTHONUNBUFFERED=1
 
 # Activate conda
 source "$CONDA_PREFIX/etc/profile.d/conda.sh"

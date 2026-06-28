@@ -32,6 +32,7 @@ cd "$REPO_DIR/expes"
 mkdir -p logs
 
 export PYTHONNOUSERSITE=1
+export PYTHONUNBUFFERED=1
 
 source "$CONDA_PREFIX/etc/profile.d/conda.sh"
 conda activate "$ENV_NAME"
