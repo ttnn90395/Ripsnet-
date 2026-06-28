@@ -197,6 +197,29 @@ class GTTensorFieldNetwork(_GTTensorFieldNetworkBase):
     def forward(self, batch, node_attrs=None):
         return _tfn_forward(self, batch, node_attrs, _GTTensorFieldNetworkBase)
 
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
+        device = None
+        if args:
+            first = args[0]
+            if isinstance(first, (str, torch.device)):
+                device = torch.device(first)
+        if 'device' in kwargs:
+            device = torch.device(kwargs['device'])
+        if device is not None:
+            _move_basis_tensors(self, device)
+        return self
+
+    def cuda(self, device=None):
+        super().cuda(device)
+        _move_basis_tensors(self, torch.device('cuda', device or 0))
+        return self
+
+    def cpu(self):
+        super().cpu()
+        _move_basis_tensors(self, torch.device('cpu'))
+        return self
+
 
 # HierarchicalGTTFN defined at the bottom after the lazy gt_improvements import.
 

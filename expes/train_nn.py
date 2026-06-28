@@ -32,7 +32,7 @@ MODEL_NAMES = [
     'HierarchicalGTTFN', 'HierarchicalTensorFieldNetwork',
     'OnEquivariantTensorFieldNetwork', 'PointNet3D',
     'ScalarDistanceDeepSet', 'PointNetTutorial', 'ScalarInputMLP', 'MultiInputModel',
-    'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
+    'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
 ]
 
 TFN_MODELS = {
@@ -482,7 +482,8 @@ def forward_single(model, x, mname, geom=None):
         return inner.rho(desc.unsqueeze(0))
     if mname in [
         'TensorFieldNetwork', 'GTTensorFieldNetwork', 'GTTensorFieldNetworkV2',
-        'HierarchicalGTTFN', 'PointNet3D', 'PointNetTutorial',
+        'HierarchicalGTTFN', 'HierarchicalTensorFieldNetwork',
+        'OnEquivariantTensorFieldNetwork', 'PointNet3D', 'PointNetTutorial',
         'DistanceMatrixRaggedModel', 'ScalarDistanceDeepSet',
         'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel',
     ]:
@@ -834,7 +835,8 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
 
     # TFN custom ops (einsum, CG tensor products) can overflow FP16 under AMP.
     # Disable AMP for TFN models; other models benefit from FP16 speedup.
-    use_amp = device.type == 'cuda' and mname not in TFN_MODELS
+    use_amp = device.type == 'cuda' and mname not in TFN_MODELS \
+              and mname not in ('ScalarDistanceDeepSet',)
     for epoch in tqdm(range(num_epochs), desc=f"Epochs ({label})"):
         tr_loss  = train_epoch(
             m, train_data, targets_train, optimizer, criterion, mname,

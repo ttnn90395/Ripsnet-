@@ -43,7 +43,7 @@ MODEL_NAMES = [
     'HierarchicalGTTFN', 'HierarchicalTensorFieldNetwork',
     'OnEquivariantTensorFieldNetwork', 'PointNet3D',
     'ScalarDistanceDeepSet', 'PointNetTutorial', 'ScalarInputMLP', 'MultiInputModel',
-    'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
+    'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
 ]
 
 TFN_MODELS = {
@@ -540,7 +540,7 @@ def forward_single(model, prepared_x, mname, geom=None):
         return model(prepared_x)
 
     if geom is not None and mname in TFN_MODELS:
-        rbf, gt_edge, nbr_idx = geom
+        rbf, gt_edge, nbr_idx = [t.to(prepared_x.device) if isinstance(t, torch.Tensor) else t for t in geom]
         if rbf.ndim == 4:     rbf      = rbf.squeeze(0)
         if gt_edge.ndim == 4: gt_edge  = gt_edge.squeeze(0)
         if nbr_idx.ndim == 3: nbr_idx  = nbr_idx.squeeze(0)
@@ -550,7 +550,8 @@ def forward_single(model, prepared_x, mname, geom=None):
 
     if mname in [
         'TensorFieldNetwork', 'GTTensorFieldNetwork', 'GTTensorFieldNetworkV2',
-        'HierarchicalGTTFN', 'PointNet3D', 'PointNetTutorial',
+        'HierarchicalGTTFN', 'HierarchicalTensorFieldNetwork',
+        'OnEquivariantTensorFieldNetwork', 'PointNet3D', 'PointNetTutorial',
         'DistanceMatrixRaggedModel', 'ScalarDistanceDeepSet',
         'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel',
     ]:
