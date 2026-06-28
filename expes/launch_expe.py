@@ -11,12 +11,19 @@ data = sys.argv[3] # 'generate' or 'precomputed'
 train_nn = sys.argv[4] # 'train' or 'pretrained'
 identifier = sys.argv[5] # run1
 
+# Optional: split datasets across tasks (e.g., for Slurm array jobs)
+task_total = int(sys.argv[6]) if len(sys.argv) > 6 else 1
+task_id    = int(sys.argv[7]) if len(sys.argv) > 7 else 0
+
 if expes == 'ucr':
 
     data_summary_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "datasets", "DataSummary.csv")
     F = np.array(pd.read_csv(data_summary_path, sep=",", header=0, index_col=0))
     datasets = ['ChlorineConcentration', 'ProximalPhalanxTW', 'Plane', 'GunPoint', 'PhalangesOutlinesCorrect', 'SonyAIBORobotSurface2', 'ProximalPhalanxOutlineAgeGroup', 'ECG5000', 'ECG200', 'MedicalImages', 'PowerCons', 'DistalPhalanxOutlineCorrect', 'ItalyPowerDemand', 'MiddlePhalanxOutlineAgeGroup', 'SonyAIBORobotSurface1', 'UMD', 'TwoLeadECG', 'MiddlePhalanxOutlineCorrect', 'GunPointOldVersusYoung', 'MiddlePhalanxTW', 'CBF']
     good_idxs = np.argwhere([F[:,1][d] in datasets for d in range(len(F[:,1]))]).ravel()
+
+    # Keep only this task's share of datasets
+    good_idxs = [d for i, d in enumerate(good_idxs) if i % task_total == task_id]
 
     for idx_data in good_idxs:
 
