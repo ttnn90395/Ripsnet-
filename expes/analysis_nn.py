@@ -36,6 +36,7 @@ from models import (
     OnEquivariantTensorFieldNetwork, PointNet3D,
     ScalarDistanceDeepSet, PointNetTutorial, ScalarInputMLP, MultiInputModel,
     DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,
+    AttentionTensorFieldNetwork, StochasticTensorFieldNetwork,
     _move_basis_tensors,
 )
 
@@ -45,11 +46,14 @@ MODEL_NAMES = [
     'OnEquivariantTensorFieldNetwork', 'PointNet3D',
     'ScalarDistanceDeepSet', 'PointNetTutorial', 'ScalarInputMLP', 'MultiInputModel',
     'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
+    'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
 ]
 
 TFN_MODELS = {
     'TensorFieldNetwork', 'GTTensorFieldNetwork',
     'GTTensorFieldNetworkV2', 'HierarchicalGTTFN',
+    'HierarchicalTensorFieldNetwork', 'OnEquivariantTensorFieldNetwork',
+    'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
 }
 
 # -------------------------------------------------------------------------
@@ -244,6 +248,31 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
             classifier_dims=classifier_dims or [256, 128],
         )
 
+    if name == 'AttentionTensorFieldNetwork':
+        return AttentionTensorFieldNetwork(
+            num_classes=output_dim,
+            max_order=extra.get('max_order', 1),
+            hidden_channels=hidden_channels or 64,
+            num_layers=num_layers or 6,
+            num_heads=extra.get('num_heads', 4),
+            num_rbf=num_rbf or 64,
+            cutoff=cutoff,
+            k_neighbors=k_neighbors,
+            classifier_dims=classifier_dims or [256, 128],
+            radial_hidden=radial_hidden or 64,
+        )
+    if name == 'StochasticTensorFieldNetwork':
+        return StochasticTensorFieldNetwork(
+            num_classes=output_dim,
+            num_mixtures=extra.get('num_mixtures', 3),
+            max_order=extra.get('max_order', 1),
+            hidden_channels=hidden_channels or 64,
+            num_layers=num_layers or 6,
+            num_rbf=num_rbf or 64,
+            cutoff=cutoff,
+            k_neighbors=k_neighbors,
+            encoder_dims=extra.get('encoder_dims', [256, 128]),
+        )
     if name == 'PointNet3D':
         return PointNet3D(output_dim=output_dim,
                           activation=activation, norm=norm)
@@ -582,6 +611,7 @@ def forward_single(model, prepared_x, mname, geom=None, stage_geom=None):
         'OnEquivariantTensorFieldNetwork', 'PointNet3D', 'PointNetTutorial',
         'DistanceMatrixRaggedModel', 'ScalarDistanceDeepSet',
         'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel',
+        'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
     ]:
         return model([prepared_x])
     return model(prepared_x.unsqueeze(0))
@@ -855,7 +885,9 @@ def load_and_eval(model_name, use_gs=False):
     if class_name in ['TensorFieldNetwork', 'GTTensorFieldNetwork',
                       'GTTensorFieldNetworkV2', 'HierarchicalGTTFN',
                       'HierarchicalTensorFieldNetwork',
-                      'OnEquivariantTensorFieldNetwork']:
+                      'OnEquivariantTensorFieldNetwork',
+                      'AttentionTensorFieldNetwork',
+                      'StochasticTensorFieldNetwork']:
         tfn_extra = _infer_tfn_architecture(model_state)
         print(f'  inferred arch: {tfn_extra}')
 

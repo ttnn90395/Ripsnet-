@@ -26,6 +26,7 @@ from models import (
     OnEquivariantTensorFieldNetwork, PointNet3D,
     ScalarDistanceDeepSet, PointNetTutorial, ScalarInputMLP, MultiInputModel,
     DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,
+    AttentionTensorFieldNetwork, StochasticTensorFieldNetwork,
     _move_basis_tensors,
 )
 
@@ -35,12 +36,18 @@ MODEL_NAMES = [
     'OnEquivariantTensorFieldNetwork', 'PointNet3D',
     'ScalarDistanceDeepSet', 'PointNetTutorial', 'ScalarInputMLP', 'MultiInputModel',
     'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
+    'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
+    # FIXME: GraphMambaTensorFieldNetwork has a selective-scan bug in the
+    # GTMambaLayer (msg tensor lacks k-neighbor dim for per-step iteration).
+    # Removed from training until the scan logic is rewritten.
+    # 'GraphMambaTensorFieldNetwork',
 ]
 
 TFN_MODELS = {
     'TensorFieldNetwork', 'GTTensorFieldNetwork',
     'GTTensorFieldNetworkV2', 'HierarchicalGTTFN',
     'HierarchicalTensorFieldNetwork', 'OnEquivariantTensorFieldNetwork',
+    'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
 }
 
 os.makedirs('models', exist_ok=True)
@@ -487,6 +494,31 @@ def build_model_by_name(name, n=None, hparams=None):
             k_neighbors=hp.get('k_neighbors', 16),
             classifier_dims=hp.get('classifier_dims', [64, 32]),
         )
+    if name == 'AttentionTensorFieldNetwork':
+        return AttentionTensorFieldNetwork(
+            num_classes=output_dim,
+            max_order=hp.get('max_order', 1),
+            hidden_channels=hp.get('hidden_channels', 32),
+            num_layers=hp.get('num_layers', 3),
+            num_heads=hp.get('num_heads', 4),
+            num_rbf=hp.get('num_rbf', 64),
+            cutoff=hp.get('cutoff', 1.0),
+            k_neighbors=hp.get('k_neighbors', min(16, _npts // 10 + 1)),
+            classifier_dims=hp.get('classifier_dims', [64, 32]),
+            radial_hidden=hp.get('radial_hidden', 64),
+        )
+    if name == 'StochasticTensorFieldNetwork':
+        return StochasticTensorFieldNetwork(
+            num_classes=output_dim,
+            num_mixtures=hp.get('num_mixtures', 3),
+            max_order=hp.get('max_order', 1),
+            hidden_channels=hp.get('hidden_channels', 32),
+            num_layers=hp.get('num_layers', 3),
+            num_rbf=hp.get('num_rbf', 64),
+            cutoff=hp.get('cutoff', 1.0),
+            k_neighbors=hp.get('k_neighbors', min(16, _npts // 10 + 1)),
+            encoder_dims=hp.get('encoder_dims', [256, 128]),
+        )
     if name == 'PointNet3D':
         return PointNet3D(output_dim=output_dim)
     if name == 'ScalarDistanceDeepSet':
@@ -536,6 +568,7 @@ def forward_single(model, x, mname, geom=None):
         'OnEquivariantTensorFieldNetwork', 'PointNet3D', 'PointNetTutorial',
         'DistanceMatrixRaggedModel', 'ScalarDistanceDeepSet',
         'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel',
+        'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
     ]:
         return model([x])
     return model(x.unsqueeze(0))

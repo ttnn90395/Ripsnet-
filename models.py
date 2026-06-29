@@ -704,11 +704,15 @@ class DistanceMatrixRaggedModel(nn.Module):
 # ---------------------------------------------------------------------------
 
 def _load_gt_improvements():
-    """Import HierarchicalGTTFN, OnEquivariantWrapper and GTTFNEncoder."""
+    """Import all models from gt_improvements and wrap with device-aware forward."""
     from gt_improvements import (
         HierarchicalGTTFN as _HierarchicalGTTFNBase,
         OnEquivariantWrapper as _OnEquivariantWrapperBase,
         GTTFNEncoder as _GTTFNEncoderBase,
+        GTTensorFieldNetworkWithAttention as _GTTFNWABase,
+        EquivariantSetTransformer as _EquivariantSetTransformerBase,
+        StochasticEquivariantTFN as _StochasticEquivariantTFNBase,
+        EquivariantGraphMambaNetwork as _EquivariantGraphMambaBase,
     )
 
     class HierarchicalGTTFN(_HierarchicalGTTFNBase):
@@ -725,10 +729,42 @@ def _load_gt_improvements():
                 _move_basis_tensors(self, batch[0].device)
             return _GTTFNEncoderBase.forward(self, batch, node_attrs)
 
-    return HierarchicalGTTFN, _OnEquivariantWrapperBase, GTTFNEncoder
+    class GTTensorFieldNetworkWithAttention(_GTTFNWABase):
+        """GT-TFN with multi-head cross-attention, device-aware."""
+        def forward(self, batch, node_attrs=None):
+            if batch:
+                _move_basis_tensors(self, batch[0].device)
+            return _GTTFNWABase.forward(self, batch, node_attrs)
+
+    class EquivariantSetTransformer(_EquivariantSetTransformerBase):
+        """Equivariant set transformer, device-aware."""
+        def forward(self, context_batch, query_batch):
+            if context_batch:
+                _move_basis_tensors(self, context_batch[0].device)
+            return _EquivariantSetTransformerBase.forward(self, context_batch, query_batch)
+
+    class StochasticEquivariantTFN(_StochasticEquivariantTFNBase):
+        """Stochastic equivariant TFN, device-aware."""
+        def forward(self, batch, node_attrs=None, return_dist=False):
+            if batch:
+                _move_basis_tensors(self, batch[0].device)
+            return _StochasticEquivariantTFNBase.forward(self, batch, node_attrs, return_dist)
+
+    class EquivariantGraphMambaNetwork(_EquivariantGraphMambaBase):
+        """Equivariant Graph Mamba network, device-aware."""
+        def forward(self, batch, node_attrs=None, precomputed_geom=None):
+            if batch:
+                _move_basis_tensors(self, batch[0].device)
+            return _EquivariantGraphMambaBase.forward(self, batch, node_attrs, precomputed_geom)
+
+    return (HierarchicalGTTFN, _OnEquivariantWrapperBase, GTTFNEncoder,
+            GTTensorFieldNetworkWithAttention, EquivariantSetTransformer,
+            StochasticEquivariantTFN, EquivariantGraphMambaNetwork)
 
 
-HierarchicalGTTFN, OnEquivariantWrapper, GTTFNEncoder = _load_gt_improvements()
+(HierarchicalGTTFN, OnEquivariantWrapper, GTTFNEncoder,
+ GTTensorFieldNetworkWithAttention, EquivariantSetTransformer,
+ StochasticEquivariantTFN, EquivariantGraphMambaNetwork) = _load_gt_improvements()
 
 
 class HierarchicalTensorFieldNetwork(nn.Module):
@@ -825,6 +861,208 @@ class OnEquivariantTensorFieldNetwork(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# New TFN-derived model wrappers
+# ---------------------------------------------------------------------------
+
+class AttentionTensorFieldNetwork(nn.Module):
+    """GT-TFN with multi-head cross-attention message passing."""
+
+    def __init__(
+        self,
+        num_classes: int,
+        max_order: int = 1,
+        hidden_channels: int = 32,
+        num_layers: int = 4,
+        num_heads: int = 4,
+        num_rbf: int = 32,
+        cutoff: float = 5.0,
+        k_neighbors: int = 16,
+        classifier_dims: Optional[List[int]] = None,
+        radial_hidden: int = 64,
+    ):
+        super().__init__()
+        if classifier_dims is None:
+            classifier_dims = [128, 64]
+        self._inner = GTTensorFieldNetworkWithAttention(
+            n=3, num_classes=num_classes,
+            max_order=max_order,
+            hidden_channels=hidden_channels,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            num_rbf=num_rbf,
+            cutoff=cutoff,
+            k_neighbors=k_neighbors,
+            classifier_dims=classifier_dims,
+            radial_hidden=radial_hidden,
+        )
+
+    def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
+        return self._inner(batch)
+
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
+        self._inner.to(*args, **kwargs)
+        return self
+
+    def cuda(self, device=None):
+        super().cuda(device)
+        self._inner.cuda(device)
+        return self
+
+    def cpu(self):
+        super().cpu()
+        self._inner.cpu()
+        return self
+
+
+class StochasticTensorFieldNetwork(nn.Module):
+    """Stochastic equivariant TFN with Gaussian mixture output."""
+
+    def __init__(
+        self,
+        num_classes: int,
+        num_mixtures: int = 3,
+        max_order: int = 1,
+        hidden_channels: int = 32,
+        num_layers: int = 4,
+        num_rbf: int = 32,
+        cutoff: float = 5.0,
+        k_neighbors: int = 16,
+        encoder_dims: Optional[List[int]] = None,
+    ):
+        super().__init__()
+        if encoder_dims is None:
+            encoder_dims = [256, 128]
+        self._inner = StochasticEquivariantTFN(
+            n=3, num_classes=num_classes,
+            num_mixtures=num_mixtures,
+            max_order=max_order,
+            hidden_channels=hidden_channels,
+            num_layers=num_layers,
+            num_rbf=num_rbf,
+            cutoff=cutoff,
+            k_neighbors=k_neighbors,
+            encoder_dims=encoder_dims,
+        )
+
+    def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
+        return self._inner(batch)
+
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
+        self._inner.to(*args, **kwargs)
+        return self
+
+    def cuda(self, device=None):
+        super().cuda(device)
+        self._inner.cuda(device)
+        return self
+
+    def cpu(self):
+        super().cpu()
+        self._inner.cpu()
+        return self
+
+
+class SetTransformerTensorFieldNetwork(nn.Module):
+    """Equivariant set transformer for PL/PI prediction."""
+
+    def __init__(
+        self,
+        num_classes: int,
+        embedding_dim: int = 128,
+        max_order: int = 1,
+        hidden_channels: int = 32,
+        num_layers: int = 4,
+        num_heads: int = 4,
+        num_rbf: int = 32,
+        cutoff: float = 5.0,
+        k_neighbors: int = 16,
+        decoder_dims: Optional[List[int]] = None,
+    ):
+        super().__init__()
+        if decoder_dims is None:
+            decoder_dims = [128, 64]
+        self._inner = EquivariantSetTransformer(
+            n=3, num_classes=num_classes,
+            embedding_dim=embedding_dim,
+            max_order=max_order,
+            hidden_channels=hidden_channels,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            num_rbf=num_rbf,
+            cutoff=cutoff,
+            k_neighbors=k_neighbors,
+            decoder_dims=decoder_dims,
+        )
+
+    def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
+        return self._inner(batch)
+
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
+        self._inner.to(*args, **kwargs)
+        return self
+
+    def cuda(self, device=None):
+        super().cuda(device)
+        self._inner.cuda(device)
+        return self
+
+    def cpu(self):
+        super().cpu()
+        self._inner.cpu()
+        return self
+
+
+class GraphMambaTensorFieldNetwork(nn.Module):
+    """Equivariant Graph Mamba network with state-space layers."""
+
+    def __init__(
+        self,
+        num_classes: int,
+        max_order: int = 1,
+        hidden_channels: int = 32,
+        num_layers: int = 4,
+        num_rbf: int = 32,
+        cutoff: float = 5.0,
+        k_neighbors: int = 16,
+        classifier_dims: Optional[List[int]] = None,
+    ):
+        super().__init__()
+        if classifier_dims is None:
+            classifier_dims = [128, 64]
+        self._inner = EquivariantGraphMambaNetwork(
+            n=3, num_classes=num_classes,
+            max_order=max_order,
+            hidden_channels=hidden_channels,
+            num_layers=num_layers,
+            num_rbf=num_rbf,
+            cutoff=cutoff,
+            k_neighbors=k_neighbors,
+            classifier_dims=classifier_dims,
+        )
+
+    def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
+        return self._inner(batch)
+
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
+        self._inner.to(*args, **kwargs)
+        return self
+
+    def cuda(self, device=None):
+        super().cuda(device)
+        self._inner.cuda(device)
+        return self
+
+    def cpu(self):
+        super().cpu()
+        self._inner.cpu()
+        return self
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -844,6 +1082,15 @@ __all__ = [
     'OnEquivariantTensorFieldNetwork',
     'GTTFNEncoder',
     'PointNet3D',
+    # New TFN-derived models
+    'GTTensorFieldNetworkWithAttention',
+    'AttentionTensorFieldNetwork',
+    'EquivariantSetTransformer',
+    'SetTransformerTensorFieldNetwork',
+    'StochasticEquivariantTFN',
+    'StochasticTensorFieldNetwork',
+    'EquivariantGraphMambaNetwork',
+    'GraphMambaTensorFieldNetwork',
     # Notebook / ragged models
     'ScalarDistanceDeepSet',
     'PointNetTutorial',
