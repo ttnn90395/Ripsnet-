@@ -5,8 +5,9 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --time=23:00:00
 #SBATCH --export=ALL
-#SBATCH --output=/hs/work0/home/users/${USER}/exp/ripsnet/Ripsnet-/expes/logs/small_%x_%j_%a.out
-#SBATCH --error=/hs/work0/home/users/${USER}/exp/ripsnet/Ripsnet-/expes/logs/small_%x_%j_%a.err
+#SBATCH --gres=gpu:1
+#SBATCH --output=logs/small_%x_%j_%a.out
+#SBATCH --error=logs/small_%x_%j_%a.err
 #SBATCH --array=0-20
 
 set -euo pipefail
