@@ -6,8 +6,8 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --time=23:00:00
 #SBATCH --export=ALL
-#SBATCH --output=${REPO_DIR:-/hs/work0/home/users/${USER}/exp/ripsnet/Ripsnet-}/expes/logs/ucr_split_%A_%a.out
-#SBATCH --error=${REPO_DIR:-/hs/work0/home/users/${USER}/exp/ripsnet/Ripsnet-}/expes/logs/ucr_split_%A_%a.err
+#SBATCH --output=logs/ucr_split_%A_%a.out
+#SBATCH --error=logs/ucr_split_%A_%a.err
 #SBATCH --array=0-20
 
 # Restructured UCR experiment: 21 array tasks, one per dataset.
