@@ -13,6 +13,7 @@ from tqdm import tqdm
 import os
 import sys
 import json
+import hashlib
 import traceback
 from collections import defaultdict
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -150,10 +151,19 @@ def deep_to(module: nn.Module, target_device) -> nn.Module:
 
 def _geom_cache_path(dataset_name: str, model_name: str,
                      tag: str = '') -> str:
-    """Path for the on-disk geometry cache for a given dataset + model."""
+    """Path for the on-disk geometry cache for a given dataset + model.
+
+    The cache key includes a hash of geometry-relevant hyperparameters
+    (num_rbf, k_neighbors, max_order) to prevent stale cache collisions
+    when hparams change.
+    """
     os.makedirs('cache', exist_ok=True)
     suffix = f'_{tag}' if tag else ''
-    return f'cache/geom_{dataset_name}_{model_name}{suffix}.pth'
+    geom_keys = ('num_rbf', 'k_neighbors', 'max_order')
+    hparam_str = json.dumps(
+        {k: model_hparams.get(k) for k in geom_keys}, sort_keys=True)
+    hparam_hash = hashlib.md5(hparam_str.encode()).hexdigest()[:8]
+    return f'cache/geom_{dataset_name}_{model_name}{suffix}_{hparam_hash}.pth'
 
 
 def precompute_geometry(model, data_list, mname, tag=''):
@@ -407,6 +417,7 @@ def build_model_by_name(name, n=None, hparams=None):
     if name == 'TensorFieldNetwork':
         return TensorFieldNetwork(
             num_classes=output_dim,
+            max_order=hp.get('max_order', 1),
             hidden_channels=hp.get('hidden_channels', 32),
             num_layers=hp.get('num_layers', 3),
             num_rbf=hp.get('num_rbf', 64),
@@ -418,6 +429,7 @@ def build_model_by_name(name, n=None, hparams=None):
         return GTTensorFieldNetwork(
             n=_n,
             num_classes=output_dim,
+            max_order=hp.get('max_order', 1),
             hidden_channels=hp.get('hidden_channels', 32),
             num_layers=hp.get('num_layers', 3),
             num_rbf=hp.get('num_rbf', 64),
@@ -430,6 +442,7 @@ def build_model_by_name(name, n=None, hparams=None):
         return GTTensorFieldNetworkV2(
             n=_n,
             num_classes=output_dim,
+            max_order=hp.get('max_order', 1),
             hidden_channels=hp.get('hidden_channels', 32),
             num_layers=hp.get('num_layers', 3),
             num_rbf=hp.get('num_rbf', 64),
@@ -442,6 +455,7 @@ def build_model_by_name(name, n=None, hparams=None):
         return HierarchicalGTTFN(
             n=_n,
             num_classes=output_dim,
+            max_order=hp.get('max_order', 1),
             hidden_channels=hp.get('hidden_channels', 32),
             stage_sizes=hp.get('stage_sizes', [64, 32]),
             num_rbf=hp.get('num_rbf', 64),
@@ -451,22 +465,25 @@ def build_model_by_name(name, n=None, hparams=None):
     if name == 'HierarchicalTensorFieldNetwork':
         return HierarchicalTensorFieldNetwork(
             num_classes=output_dim,
-            hidden_channels=32,
-            stage_sizes=[64, 32],
-            num_rbf=64,
-            cutoff=1.0,
-            classifier_dims=[64, 32],
+            max_order=hp.get('max_order', 1),
+            hidden_channels=hp.get('hidden_channels', 32),
+            stage_sizes=hp.get('stage_sizes', [64, 32]),
+            num_rbf=hp.get('num_rbf', 64),
+            cutoff=hp.get('cutoff', 1.0),
+            k_local=hp.get('k_neighbors', 16),
+            k_global=hp.get('k_neighbors', 16),
+            classifier_dims=hp.get('classifier_dims', [64, 32]),
         )
     if name == 'OnEquivariantTensorFieldNetwork':
         return OnEquivariantTensorFieldNetwork(
             num_classes=output_dim,
-            max_order=1,
-            hidden_channels=32,
-            num_layers=3,
-            num_rbf=64,
-            cutoff=1.0,
-            k_neighbors=16,
-            classifier_dims=[64, 32],
+            max_order=hp.get('max_order', 1),
+            hidden_channels=hp.get('hidden_channels', 32),
+            num_layers=hp.get('num_layers', 3),
+            num_rbf=hp.get('num_rbf', 64),
+            cutoff=hp.get('cutoff', 1.0),
+            k_neighbors=hp.get('k_neighbors', 16),
+            classifier_dims=hp.get('classifier_dims', [64, 32]),
         )
     if name == 'PointNet3D':
         return PointNet3D(output_dim=output_dim)
