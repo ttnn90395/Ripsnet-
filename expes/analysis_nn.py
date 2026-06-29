@@ -36,6 +36,7 @@ from models import (
     OnEquivariantTensorFieldNetwork, PointNet3D,
     ScalarDistanceDeepSet, PointNetTutorial, ScalarInputMLP, MultiInputModel,
     DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,
+    _move_basis_tensors,
 )
 
 MODEL_NAMES = [
@@ -569,6 +570,7 @@ def forward_single(model, prepared_x, mname, geom=None, stage_geom=None):
         if gt_edge.ndim == 4: gt_edge  = gt_edge.squeeze(0)
         if nbr_idx.ndim == 3: nbr_idx  = nbr_idx.squeeze(0)
         inner = getattr(model, '_inner', model)
+        _move_basis_tensors(inner, next(inner.parameters()).device)
         desc  = inner._encode_single(
             prepared_x, precomputed_geom=(rbf, gt_edge, nbr_idx),
             precomputed_stage_geom=stage_geom)

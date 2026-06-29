@@ -26,6 +26,7 @@ from models import (
     OnEquivariantTensorFieldNetwork, PointNet3D,
     ScalarDistanceDeepSet, PointNetTutorial, ScalarInputMLP, MultiInputModel,
     DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,
+    _move_basis_tensors,
 )
 
 MODEL_NAMES = [
@@ -526,6 +527,7 @@ def forward_single(model, x, mname, geom=None):
         if gt_edge.ndim == 4: gt_edge  = gt_edge.squeeze(0)
         if nbr_idx.ndim == 3: nbr_idx  = nbr_idx.squeeze(0)
         inner = getattr(model, '_inner', model)
+        _move_basis_tensors(inner, next(inner.parameters()).device)
         desc  = inner._encode_single(x, precomputed_geom=(rbf, gt_edge, nbr_idx))
         return inner.rho(desc.unsqueeze(0))
     if mname in [
@@ -583,6 +585,7 @@ def forward_batch(model, batch_data, mname, geom_batch=None, hier_batch=None):
 
     if geom_batch is not None and mname in TFN_MODELS:
         inner = getattr(model, '_inner', model)
+        _move_basis_tensors(inner, next(inner.parameters()).device)
 
         # Extract hier from uniform dict if present
         _hier_dict = None
