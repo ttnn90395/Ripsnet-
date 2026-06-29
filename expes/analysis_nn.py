@@ -399,7 +399,10 @@ def precompute_geometry_batched(model_pv, class_name, data_list):
     except AttributeError:
         return None
 
+    is_hier = hasattr(inner, 'precompute_hierarchical_geometry')
+
     rbfs, gt_edges, nbr_idxs = [], [], []
+    hier_geoms = [] if is_hier else None
     with torch.no_grad():
         for pc in tqdm(data_list, desc=f"Precomputing geometry ({class_name})",
                        leave=False):
@@ -407,19 +410,29 @@ def precompute_geometry_batched(model_pv, class_name, data_list):
             rbfs.append(rbf.detach())
             gt_edges.append(gt_edge.detach())
             nbr_idxs.append(nbr_idx.detach())
+            if is_hier:
+                hier_geoms.append(inner.precompute_hierarchical_geometry(pc))
 
     uniform = all(r.shape == rbfs[0].shape for r in rbfs)
     if uniform:
-        return {
+        result = {
             'rbf':     torch.stack(rbfs),
             'gt_edge': torch.stack(gt_edges),
             'nbr_idx': torch.stack(nbr_idxs),
             'uniform': True,
         }
-    return {
+        if is_hier:
+            result['hier'] = [[{k: v.detach().cpu() for k, v in sg.items()}
+                               for sg in hg] for hg in hier_geoms]
+        return result
+    result = {
         'list':    list(zip(rbfs, gt_edges, nbr_idxs)),
         'uniform': False,
     }
+    if is_hier:
+        result['hier'] = [[{k: v.detach().cpu() for k, v in sg.items()}
+                           for sg in hg] for hg in hier_geoms]
+    return result
 
 
 def precompute_geometry(model_pv, class_name, data_list):
@@ -443,6 +456,13 @@ def tfn_batched_forward(model, data_list, geom_cache, batch_size=64):
 
     is_batched_geom = (
         isinstance(geom_cache, dict) and geom_cache.get('uniform', False))
+    has_hier = isinstance(geom_cache, dict) and 'hier' in geom_cache
+
+    def _get_stage_geom(i):
+        """Return per-sample hierarchical stage geometry if cached."""
+        if not has_hier:
+            return None
+        return geom_cache['hier'][i]
 
     with torch.inference_mode():
         for start in range(0, len(data_list), batch_size):
@@ -461,11 +481,13 @@ def tfn_batched_forward(model, data_list, geom_cache, batch_size=64):
                 else:
                     descs = []
                     for i, pc in enumerate(batch):
+                        idx = start + i
                         rbf_i     = rbf_b[i]     if rbf_b[i].ndim == 3     else rbf_b[i].squeeze(0)
                         gt_edge_i = gt_edge_b[i] if gt_edge_b[i].ndim == 3 else gt_edge_b[i].squeeze(0)
                         nbr_i     = nbr_b[i]     if nbr_b[i].ndim == 2     else nbr_b[i].squeeze(0)
                         desc = inner._encode_single(
-                            pc, precomputed_geom=(rbf_i, gt_edge_i, nbr_i))
+                            pc, precomputed_geom=(rbf_i, gt_edge_i, nbr_i),
+                            precomputed_stage_geom=_get_stage_geom(idx))
                         descs.append(desc.detach())
                     out = inner.rho(torch.stack(descs))
 
@@ -473,9 +495,11 @@ def tfn_batched_forward(model, data_list, geom_cache, batch_size=64):
                 geom_b = geom_cache[start:end] if isinstance(geom_cache, list) \
                          else geom_cache['list'][start:end]
                 descs = []
-                for pc, (rbf, gt_edge, nbr_idx) in zip(batch, geom_b):
+                for i, (pc, (rbf, gt_edge, nbr_idx)) in enumerate(zip(batch, geom_b)):
+                    idx = start + i
                     desc = inner._encode_single(
-                        pc, precomputed_geom=(rbf, gt_edge, nbr_idx))
+                        pc, precomputed_geom=(rbf, gt_edge, nbr_idx),
+                        precomputed_stage_geom=_get_stage_geom(idx))
                     descs.append(desc.detach())
                 out = inner.rho(torch.stack(descs))
 
@@ -531,7 +555,7 @@ def prepare_single_input(mname, x_tensor, use_gs=False, sigma=GS_SIGMA):
     return x_tensor
 
 
-def forward_single(model, prepared_x, mname, geom=None):
+def forward_single(model, prepared_x, mname, geom=None, stage_geom=None):
     """Run model on one prepared sample with optional cached geometry."""
     if mname == 'MultiInputModel':
         pc, scalar = prepared_x
@@ -545,7 +569,9 @@ def forward_single(model, prepared_x, mname, geom=None):
         if gt_edge.ndim == 4: gt_edge  = gt_edge.squeeze(0)
         if nbr_idx.ndim == 3: nbr_idx  = nbr_idx.squeeze(0)
         inner = getattr(model, '_inner', model)
-        desc  = inner._encode_single(prepared_x, precomputed_geom=(rbf, gt_edge, nbr_idx))
+        desc  = inner._encode_single(
+            prepared_x, precomputed_geom=(rbf, gt_edge, nbr_idx),
+            precomputed_stage_geom=stage_geom)
         return inner.rho(desc.unsqueeze(0))
 
     if mname in [
@@ -908,18 +934,22 @@ def load_and_eval(model_name, use_gs=False):
                     # Correctly index geom_cache regardless of its type
                     if geom_cache is None:
                         geom = None
+                        stage_geom = None
                     elif isinstance(geom_cache, dict) and geom_cache.get('uniform', False):
                         geom = (
                             geom_cache['rbf'][idx],
                             geom_cache['gt_edge'][idx],
                             geom_cache['nbr_idx'][idx],
                         )
+                        stage_geom = geom_cache['hier'][idx] if 'hier' in geom_cache else None
                     elif isinstance(geom_cache, dict):
                         geom = geom_cache['list'][idx]
+                        stage_geom = geom_cache['hier'][idx] if 'hier' in geom_cache else None
                     else:
                         geom = geom_cache[idx]
+                        stage_geom = None
 
-                    out  = forward_single(compiled_model, prepared, class_name, geom=geom)
+                    out  = forward_single(compiled_model, prepared, class_name, geom=geom, stage_geom=stage_geom)
                     out_np = out.detach().cpu().numpy() if isinstance(out, torch.Tensor) \
                              else np.asarray(out)
                     if out_np.ndim > 1 and out_np.shape[0] == 1:

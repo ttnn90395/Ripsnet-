@@ -166,6 +166,9 @@ def precompute_geometry(model, data_list, mname, tag=''):
     optional *tag* (e.g. ``'train'`` / ``'test'``) so that different data
     splits do not share a cache entry.
 
+    For hierarchical models (``HierarchicalGTTFN``) the per-stage geometry
+    (FPS, ball query, per-stage k-NN) is also precomputed and cached.
+
     Returns either a stacked 'uniform' geometry dict (B, N, k, *) when all
     point clouds share the same size, or a list of per-sample tuples.
     """
@@ -190,27 +193,48 @@ def precompute_geometry(model, data_list, mname, tag=''):
     except AttributeError:
         return None
 
+    is_hier = hasattr(inner, 'precompute_hierarchical_geometry')
+
     rbfs, gt_edges, nbr_idxs = [], [], []
+    hier_geoms = [] if is_hier else None
     with torch.no_grad():
         for pc in tqdm(data_list, desc="Precomputing geometry", leave=False):
             rbf, gt_edge, nbr_idx = knn_geometry(pc, rbf_enc, gt_basis, k)
             rbfs.append(rbf.detach())
             gt_edges.append(gt_edge.detach())
             nbr_idxs.append(nbr_idx.detach())
+            if is_hier:
+                hier_geoms.append(inner.precompute_hierarchical_geometry(pc))
 
-    uniform = all(r.shape == rbfs[0].shape for r in rbfs)
-    if uniform:
-        result = {
-            'uniform': True,
-            'rbf': torch.stack(rbfs),
-            'gt_edge': torch.stack(gt_edges),
-            'nbr_idx': torch.stack(nbr_idxs),
-        }
-    else:
+    # ---- include hierarchical per-stage geometry in the cache ----
+    if is_hier:
+        # Move tensors to CPU for storage
+        hier_cpu = []
+        for hg in hier_geoms:
+            stage_cpu = []
+            for sg in hg:
+                cpu_sg = {k: v.detach().cpu() for k, v in sg.items()}
+                stage_cpu.append(cpu_sg)
+            hier_cpu.append(stage_cpu)
         result = {
             'uniform': False,
             'list': list(zip(rbfs, gt_edges, nbr_idxs)),
+            'hier': hier_cpu,
         }
+    else:
+        uniform = all(r.shape == rbfs[0].shape for r in rbfs)
+        if uniform:
+            result = {
+                'uniform': True,
+                'rbf': torch.stack(rbfs),
+                'gt_edge': torch.stack(gt_edges),
+                'nbr_idx': torch.stack(nbr_idxs),
+            }
+        else:
+            result = {
+                'uniform': False,
+                'list': list(zip(rbfs, gt_edges, nbr_idxs)),
+            }
 
     # ----- persist to disk -----
     torch.save(result, cache_path)
@@ -236,6 +260,9 @@ def tfn_batched_forward(model, data_list, geom_cache, mname, batch_size=64):
         batch    = data_list[start:start + batch_size]
         batch_idx = range(start, min(start + batch_size, len(data_list)))
         geom_b   = _get_geom_batch(geom_cache, batch_idx) if geom_cache else None
+        hier_b   = None
+        if geom_b is not None and isinstance(geom_b, tuple) and len(geom_b) == 2:
+            geom_b, hier_b = geom_b
         with torch.inference_mode():
             if geom_b is not None:
                 if isinstance(geom_b, dict) and geom_b.get('uniform', False) and hasattr(inner, '_encode_batch'):
@@ -244,7 +271,6 @@ def tfn_batched_forward(model, data_list, geom_cache, mname, batch_size=64):
                         batch_tensor,
                         precomputed_geom=(geom_b['rbf'], geom_b['gt_edge'], geom_b['nbr_idx']))
                 else:
-                    # Non-uniform geometry → group by point-cloud size
                     geom_list: list = (geom_b['list']
                                        if isinstance(geom_b, dict) else geom_b)
                     size_groups: Dict[int, List[int]] = defaultdict(list)
@@ -257,8 +283,10 @@ def tfn_batched_forward(model, data_list, geom_cache, mname, batch_size=64):
                         for sz, idxs in size_groups.items():
                             if len(idxs) == 1:
                                 i = idxs[0]
+                                stage_i = hier_b[i] if hier_b is not None else None
                                 descs[i] = inner._encode_single(
-                                    batch[i], precomputed_geom=geom_list[i])
+                                    batch[i], precomputed_geom=geom_list[i],
+                                    precomputed_stage_geom=stage_i)
                             else:
                                 sub_batch = torch.stack([batch[i] for i in idxs])
                                 sub_rbf   = torch.stack([geom_list[i][0] for i in idxs])
@@ -272,9 +300,11 @@ def tfn_batched_forward(model, data_list, geom_cache, mname, batch_size=64):
                         out = inner.rho(torch.stack(descs))
                     else:
                         descs = []
-                        for pc, geom in zip(batch, geom_list):
+                        for i, (pc, geom) in enumerate(zip(batch, geom_list)):
+                            stage_i = hier_b[i] if hier_b is not None else None
                             desc = inner._encode_single(
-                                pc, precomputed_geom=geom)
+                                pc, precomputed_geom=geom,
+                                precomputed_stage_geom=stage_i)
                             descs.append(desc.detach())
                         out = inner.rho(torch.stack(descs))
             else:
@@ -497,18 +527,24 @@ def _get_geom_batch(geom_cache, batch_idx):
     if isinstance(batch_idx, range):
         batch_idx = list(batch_idx)
     if isinstance(geom_cache, dict) and geom_cache.get('uniform', False):
-        return {
+        out = {
             'uniform': True,
             'rbf': geom_cache['rbf'][batch_idx],
             'gt_edge': geom_cache['gt_edge'][batch_idx],
             'nbr_idx': geom_cache['nbr_idx'][batch_idx],
         }
+        if 'hier' in geom_cache:
+            out['hier'] = [geom_cache['hier'][i] for i in batch_idx]
+        return out
     if isinstance(geom_cache, dict):
-        return [geom_cache['list'][i] for i in batch_idx]
+        out = [geom_cache['list'][i] for i in batch_idx]
+        if 'hier' in geom_cache:
+            return (out, [geom_cache['hier'][i] for i in batch_idx])
+        return out
     return [geom_cache[i] for i in batch_idx]
 
 
-def forward_batch(model, batch_data, mname, geom_batch=None):
+def forward_batch(model, batch_data, mname, geom_batch=None, hier_batch=None):
     """Forward a mini-batch of samples through the model."""
     if len(batch_data) == 0:
         return torch.empty(0, output_dim, device=device)
@@ -523,8 +559,19 @@ def forward_batch(model, batch_data, mname, geom_batch=None):
             batch_data = torch.cat([x.reshape(1, -1) for x in batch_data], dim=0)
         return model(batch_data)
 
+    # Unpack hierarchical geometry from tuple when present
+    if geom_batch is not None and isinstance(geom_batch, tuple) and len(geom_batch) == 2:
+        geom_batch, hier_batch = geom_batch
+
     if geom_batch is not None and mname in TFN_MODELS:
         inner = getattr(model, '_inner', model)
+
+        # Extract hier from uniform dict if present
+        _hier_dict = None
+        if isinstance(geom_batch, dict) and 'hier' in geom_batch:
+            _hier_dict = geom_batch.pop('hier')
+            if hier_batch is None:
+                hier_batch = _hier_dict
 
         # ── Uniform (all same N) → fast stacked path ────────────────────
         _is_uniform = isinstance(geom_batch, dict) and geom_batch.get('uniform', False)
@@ -547,21 +594,20 @@ def forward_batch(model, batch_data, mname, geom_batch=None):
                 if rbf.ndim == 4:     rbf     = rbf.squeeze(0)
                 if gt_edge.ndim == 4: gt_edge = gt_edge.squeeze(0)
                 if nbr_idx.ndim == 3: nbr_idx = nbr_idx.squeeze(0)
+                stage_i = hier_batch[i] if hier_batch is not None else None
                 descs.append(inner._encode_single(
-                    pc, precomputed_geom=(rbf, gt_edge, nbr_idx)))
+                    pc, precomputed_geom=(rbf, gt_edge, nbr_idx),
+                    precomputed_stage_geom=stage_i))
             return inner.rho(torch.stack(descs))
 
         # ── Non-uniform → group by point-cloud size ─────────────────────
         geom_list: list = (geom_batch['list']
                            if isinstance(geom_batch, dict) else geom_batch)
 
-        # Group indices by (N, k) — all samples with the same N share the
-        # same rbf/gt_edge shape and can be stacked for the batched path.
         size_groups: Dict[int, List[int]] = defaultdict(list)
         for i, x in enumerate(batch_data):
             size_groups[x.shape[0]].append(i)
 
-        # Only use the grouped path when at least one group has size > 1
         _use_grouped = any(len(v) > 1 for v in size_groups.values())
 
         if _use_grouped:
@@ -573,10 +619,11 @@ def forward_batch(model, batch_data, mname, geom_batch=None):
                     if rbf.ndim == 4:     rbf     = rbf.squeeze(0)
                     if gt_edge.ndim == 4: gt_edge = gt_edge.squeeze(0)
                     if nbr_idx.ndim == 3: nbr_idx = nbr_idx.squeeze(0)
+                    stage_i = hier_batch[i] if hier_batch is not None else None
                     descs[i] = inner._encode_single(
-                        batch_data[i], precomputed_geom=(rbf, gt_edge, nbr_idx))
+                        batch_data[i], precomputed_geom=(rbf, gt_edge, nbr_idx),
+                        precomputed_stage_geom=stage_i)
                 else:
-                    # Stack the point clouds and geometry for this group
                     sub_batch = torch.stack([batch_data[i] for i in idxs])
                     sub_rbf   = torch.stack([geom_list[i][0] for i in idxs])
                     sub_gt    = torch.stack([geom_list[i][1] for i in idxs])
@@ -588,15 +635,16 @@ def forward_batch(model, batch_data, mname, geom_batch=None):
                         descs[i] = sub_out[off]
             return inner.rho(torch.stack(descs))
         else:
-            # All unique sizes — fall back to per-sample (no grouping overhead)
             descs = []
-            for x, geom in zip(batch_data, geom_list):
+            for i, (x, geom) in enumerate(zip(batch_data, geom_list)):
                 rbf, gt_edge, nbr_idx = geom
                 if rbf.ndim == 4:     rbf     = rbf.squeeze(0)
                 if gt_edge.ndim == 4: gt_edge = gt_edge.squeeze(0)
                 if nbr_idx.ndim == 3: nbr_idx = nbr_idx.squeeze(0)
+                stage_i = hier_batch[i] if hier_batch is not None else None
                 descs.append(inner._encode_single(
-                    x, precomputed_geom=(rbf, gt_edge, nbr_idx)))
+                    x, precomputed_geom=(rbf, gt_edge, nbr_idx),
+                    precomputed_stage_geom=stage_i))
             return inner.rho(torch.stack(descs))
 
     return model(batch_data)

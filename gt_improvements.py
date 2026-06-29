@@ -150,61 +150,91 @@ class HierPoolStage(nn.Module):
         self.mixer   = ChannelMixer(feat_types)
         self.gt_basis = gt_basis
 
+    def precompute_geometry(self, pos: torch.Tensor) -> dict:
+        """
+        Precompute all geometry-dependent tensors for this pool stage.
+
+        Returns a dict with keys: cent_idx, centroids, nbr_idx, rbf, gt_edge.
+        These depend only on *pos* and can be cached across training epochs.
+        """
+        N = pos.shape[0]
+        M = min(self.n_centroids, N)
+        dev = pos.device
+
+        cent_idx  = farthest_point_sample(pos, M)
+        centroids = pos[cent_idx]
+
+        nbr_idx   = ball_query(pos, centroids, self.radius, self.k_local)
+
+        K = nbr_idx.shape[1]
+        pos_j      = pos[nbr_idx.reshape(-1)].reshape(M, K, pos.shape[-1])
+        diff       = centroids.unsqueeze(1) - pos_j
+        dist       = diff.norm(dim=-1).clamp(min=1e-8)
+        r_hat      = diff / dist.unsqueeze(-1)
+        rbf        = self.rbf_enc(dist)
+        n_dim      = pos.shape[-1]
+        gt_edge    = self.gt_basis(
+            r_hat.reshape(M * K, n_dim)
+        ).reshape(M, K, -1)
+
+        return {
+            'cent_idx':  cent_idx,
+            'centroids': centroids,
+            'nbr_idx':   nbr_idx,
+            'rbf':       rbf,
+            'gt_edge':   gt_edge,
+        }
+
     def forward(
         self,
         pos:   torch.Tensor,   # (N, n)
         feats: FeatureDict,    # {sig: (N, C, d)}
+        precomputed: Optional[dict] = None,
     ) -> Tuple[torch.Tensor, FeatureDict]:
         """
         Returns (centroids (M, n), pooled feats {sig: (M, C, d)}).
+
+        When *precomputed* is provided (from ``precompute_geometry``), the
+        expensive FPS / ball-query / edge-tensor computation is skipped.
         """
-        N     = pos.shape[0]
-        M     = min(self.n_centroids, N)
-        dev   = pos.device
+        if precomputed is not None:
+            cent_idx  = precomputed['cent_idx']
+            centroids = precomputed['centroids']
+            nbr_idx   = precomputed['nbr_idx']
+            rbf       = precomputed['rbf']
+            gt_edge   = precomputed['gt_edge']
+        else:
+            N     = pos.shape[0]
+            M     = min(self.n_centroids, N)
+            dev   = pos.device
 
-        # 1. Sample centroids
-        cent_idx  = farthest_point_sample(pos, M)        # (M,)
-        centroids = pos[cent_idx]                         # (M, n)
+            cent_idx  = farthest_point_sample(pos, M)
+            centroids = pos[cent_idx]
 
-        # 2. Ball query
-        nbr_idx   = ball_query(pos, centroids, self.radius, self.k_local)  # (M, k)
+            nbr_idx   = ball_query(pos, centroids, self.radius, self.k_local)
 
-        # 3. Local geometry for each centroid→neighbor edge
+            K = nbr_idx.shape[1]
+            pos_j      = pos[nbr_idx.reshape(-1)].reshape(M, K, pos.shape[-1])
+            diff       = centroids.unsqueeze(1) - pos_j
+            dist       = diff.norm(dim=-1).clamp(min=1e-8)
+            r_hat      = diff / dist.unsqueeze(-1)
+            rbf        = self.rbf_enc(dist)
+            n_dim      = pos.shape[-1]
+            gt_edge    = self.gt_basis(
+                r_hat.reshape(M * K, n_dim)
+            ).reshape(M, K, -1)
+
         K = nbr_idx.shape[1]
-        pos_j      = pos[nbr_idx.reshape(-1)].reshape(M, K, pos.shape[-1])
-        diff       = centroids.unsqueeze(1) - pos_j      # (M, K, n)
-        dist       = diff.norm(dim=-1).clamp(min=1e-8)   # (M, K)
-        r_hat      = diff / dist.unsqueeze(-1)           # (M, K, n)
-        rbf        = self.rbf_enc(dist)                  # (M, K, R)
-        n_dim      = pos.shape[-1]
-        gt_edge    = self.gt_basis(
-            r_hat.reshape(M * K, n_dim)
-        ).reshape(M, K, -1)                             # (M, K, B)
 
-        # 4. Build input feats at centroid positions (gather from global feats)
-        cent_feats: FeatureDict = {
-            sig: f[cent_idx] for sig, f in feats.items()
-        }
-
-        # Also gather nbr_idx into centroid-local indexing for sparse layer.
-        # The layer needs nbr_idx into the "node buffer" that holds all features,
-        # but in HierPool the node buffer is the full N-point cloud.
-        # We remap: local_nbr_idx[i,j] = nbr_idx[i,j] (already global)
-        # and we pass a "global feats" dict to the layer — handled by sparse _message.
-
-        # We use a simpler approach: manually gather neighbor features, run
-        # a single local aggregation without the standard layer API.
+        # Feature aggregation: max-pool over neighbors
         out_feats: FeatureDict = {}
         for sig, f in feats.items():
-            # f: (N, C, d)
-            f_nbr    = f[nbr_idx.reshape(-1)].reshape(M, K, f.shape[1], f.shape[2])
-            # Max-pool over neighbors
-            f_pooled = f_nbr.max(dim=1).values           # (M, C, d)
+            f_nbr    = f[nbr_idx.reshape(-1)].reshape(
+                centroids.shape[0], K, f.shape[1], f.shape[2])
+            f_pooled = f_nbr.max(dim=1).values
             out_feats[sig] = f_pooled
 
-        # Apply channel mixer
         out_feats = self.mixer(out_feats)
-
         return centroids, out_feats
 
 
@@ -254,6 +284,7 @@ class HierarchicalGTTFN(nn.Module):
         self.num_classes  = num_classes
         self.node_attr_dim = node_attr_dim
         self.k_global     = k_global
+        self.k_neighbors = k_global  # alias for precompute_geometry caching
 
         self.gt_basis = GTBasis(n=n, max_order=max_order)
         self.cg       = CGCoefficients(n=n, max_order=max_order)
@@ -319,11 +350,39 @@ class HierarchicalGTTFN(nn.Module):
         self._all_sigs   = all_sigs
         self._hidden_types = hidden_types
 
+    def precompute_hierarchical_geometry(self, pos: torch.Tensor) -> List[dict]:
+        """
+        Precompute all geometry for every hierarchical stage.
+
+        Returns a list of dicts (one per pool stage) with keys for both the
+        pool aggregation (``cent_idx``, ``centroids``, ``nbr_idx``, ``rbf``,
+        ``gt_edge``) and the post-pool message-passing (``post_rbf``,
+        ``post_gt``, ``post_nbr``).
+        """
+        stage_geom = []
+        cur_pos = pos
+        for pool in self.pool_stages:
+            sg = pool.precompute_geometry(cur_pos)
+
+            centroids = sg['centroids']
+            if centroids.shape[0] > self.k_global:
+                pr, pg, pn = knn_geometry(
+                    centroids, self.rbf, self.gt_basis, self.k_global)
+                sg['post_rbf'] = pr
+                sg['post_gt']  = pg
+                sg['post_nbr'] = pn
+
+            stage_geom.append(sg)
+            cur_pos = centroids
+        return stage_geom
+
     # ------------------------------------------------------------------
     def _encode_single(
         self,
         pos:       torch.Tensor,
         node_attr: Optional[torch.Tensor] = None,
+        precomputed_geom: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,
+        precomputed_stage_geom: Optional[List[dict]] = None,
     ) -> torch.Tensor:
         N  = pos.shape[0]
         sc = self._scalar_sig
@@ -338,22 +397,32 @@ class HierarchicalGTTFN(nn.Module):
 
         feats: FeatureDict = {sc: f0, vc: f1}
 
-        # Initial full-resolution k-NN layers
-        rbf_g, gt_g, nbr_g = knn_geometry(pos, self.rbf, self.gt_basis, self.k_global)
+        # Initial full-resolution k-NN layers (use cached geometry if available)
+        if precomputed_geom is not None:
+            rbf_g, gt_g, nbr_g = precomputed_geom
+        else:
+            rbf_g, gt_g, nbr_g = knn_geometry(pos, self.rbf, self.gt_basis, self.k_global)
         for layer in self.init_layers:
             feats = layer(feats, rbf_g, gt_g, nbr_g, sparse=True)
         feats = self.init_mixer(feats)
 
         # Hierarchical pool stages
         cur_pos = pos
-        for pool, mp_layers, mixer in zip(self.pool_stages, self.stage_layers, self.stage_mixers):
-            cur_pos, feats = pool(cur_pos, feats)
+        for s, (pool, mp_layers, mixer) in enumerate(
+            zip(self.pool_stages, self.stage_layers, self.stage_mixers)
+        ):
+            stage_geom = precomputed_stage_geom[s] if precomputed_stage_geom is not None else None
+            cur_pos, feats = pool(cur_pos, feats, precomputed=stage_geom)
             M = cur_pos.shape[0]
             if M > self.k_global:
-                rbf_s, gt_s, nbr_s = knn_geometry(cur_pos, self.rbf, self.gt_basis, self.k_global)
+                if stage_geom is not None and 'post_rbf' in stage_geom:
+                    rbf_s, gt_s, nbr_s = (
+                        stage_geom['post_rbf'], stage_geom['post_gt'], stage_geom['post_nbr'])
+                else:
+                    rbf_s, gt_s, nbr_s = knn_geometry(
+                        cur_pos, self.rbf, self.gt_basis, self.k_global)
                 for layer in mp_layers:
                     feats = layer(feats, rbf_s, gt_s, nbr_s, sparse=True)
-            # else skip layers for tiny remaining point sets
             feats = mixer(feats)
 
         # Invariant readout + global pool
@@ -374,13 +443,18 @@ class HierarchicalGTTFN(nn.Module):
         self,
         batch:      List[torch.Tensor],
         node_attrs: Optional[List[torch.Tensor]] = None,
+        precomputed_geom: Optional[List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = None,
+        precomputed_stage_geom: Optional[List[List[dict]]] = None,
     ) -> torch.Tensor:
         if len(batch) == 0:
             return torch.empty(0, self.num_classes, device=next(self.parameters()).device)
         descs = []
         for i, pc in enumerate(batch):
             attr = node_attrs[i] if node_attrs is not None else None
-            descs.append(self._encode_single(pc, attr))
+            geom_i    = precomputed_geom[i] if precomputed_geom is not None else None
+            stage_i   = precomputed_stage_geom[i] if precomputed_stage_geom is not None else None
+            descs.append(self._encode_single(
+                pc, attr, precomputed_geom=geom_i, precomputed_stage_geom=stage_i))
         return self.rho(torch.stack(descs))
 
 
