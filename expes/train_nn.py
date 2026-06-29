@@ -623,7 +623,7 @@ def forward_batch(model, batch_data, mname, geom_batch=None, hier_batch=None):
                     descs[i] = inner._encode_single(
                         batch_data[i], precomputed_geom=(rbf, gt_edge, nbr_idx),
                         precomputed_stage_geom=stage_i)
-                else:
+                elif hasattr(inner, '_encode_batch'):
                     sub_batch = torch.stack([batch_data[i] for i in idxs])
                     sub_rbf   = torch.stack([geom_list[i][0] for i in idxs])
                     sub_gt    = torch.stack([geom_list[i][1] for i in idxs])
@@ -633,6 +633,16 @@ def forward_batch(model, batch_data, mname, geom_batch=None, hier_batch=None):
                         precomputed_geom=(sub_rbf, sub_gt, sub_nbr))
                     for off, i in enumerate(idxs):
                         descs[i] = sub_out[off]
+                else:
+                    for i in idxs:
+                        rbf, gt_edge, nbr_idx = geom_list[i]
+                        if rbf.ndim == 4:     rbf     = rbf.squeeze(0)
+                        if gt_edge.ndim == 4: gt_edge = gt_edge.squeeze(0)
+                        if nbr_idx.ndim == 3: nbr_idx = nbr_idx.squeeze(0)
+                        stage_i = hier_batch[i] if hier_batch is not None else None
+                        descs[i] = inner._encode_single(
+                            batch_data[i], precomputed_geom=(rbf, gt_edge, nbr_idx),
+                            precomputed_stage_geom=stage_i)
             return inner.rho(torch.stack(descs))
         else:
             descs = []
