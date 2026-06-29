@@ -39,6 +39,7 @@ MODEL_NAMES = [
 TFN_MODELS = {
     'TensorFieldNetwork', 'GTTensorFieldNetwork',
     'GTTensorFieldNetworkV2', 'HierarchicalGTTFN',
+    'HierarchicalTensorFieldNetwork', 'OnEquivariantTensorFieldNetwork',
 }
 
 os.makedirs('models', exist_ok=True)
