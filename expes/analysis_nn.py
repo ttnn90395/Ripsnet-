@@ -170,7 +170,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
     num_rbf         = extra.get('num_rbf')
     classifier_dims = extra.get('classifier_dims')
     radial_hidden   = extra.get('radial_hidden')
-    cutoff          = extra.get('cutoff', 2.0)
+    cutoff          = extra.get('cutoff', 1.0)
     k_neighbors     = extra.get('k_neighbors', 16)
 
     if name == 'TensorFieldNetwork':
@@ -853,9 +853,7 @@ def load_and_eval(model_name, use_gs=False):
         ckpt_sigma      = checkpoint.get('gs_sigma', GS_SIGMA)
         ckpt_activation = checkpoint.get('activation', None)
         ckpt_norm       = checkpoint.get('norm', None)
-        ckpt_max_order  = checkpoint.get('max_order')
     else:
-        ckpt_max_order = None
         model_state     = checkpoint
         output_dim      = None
         ckpt_type       = model_name
@@ -910,11 +908,21 @@ def load_and_eval(model_name, use_gs=False):
                       'OnEquivariantTensorFieldNetwork',
                       'AttentionTensorFieldNetwork',
                       'StochasticTensorFieldNetwork']:
-        tfn_extra = _infer_tfn_architecture(model_state)
-        # Prefer saved metadata over inference (more reliable)
-        if ckpt_max_order is not None:
-            tfn_extra['max_order'] = ckpt_max_order
-        print(f'  inferred arch: {tfn_extra}')
+        # Prefer saved metadata from checkpoint (new checkpoints include these)
+        saved_hp_keys = ['hidden_channels', 'num_layers', 'num_rbf', 'cutoff',
+                         'k_neighbors', 'max_order', 'num_heads', 'radial_hidden',
+                         'num_mixtures', 'encoder_dims', 'stage_sizes', 'stage_radii',
+                         'k_local', 'k_global', 'num_layers_per_stage',
+                         'classifier_dims']
+        for k in saved_hp_keys:
+            v = checkpoint.get(k) if isinstance(checkpoint, dict) else None
+            if v is not None:
+                tfn_extra[k] = v
+        # Fall back to shape-inference for old checkpoints missing these keys
+        if not any(k in tfn_extra for k in ('hidden_channels', 'num_layers', 'classifier_dims')):
+            inferred = _infer_tfn_architecture(model_state)
+            tfn_extra = {**inferred, **tfn_extra}
+        print(f'  model arch: {tfn_extra}')
 
     try:
         if class_name == 'TFNTensorFieldNetwork':

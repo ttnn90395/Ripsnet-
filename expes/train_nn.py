@@ -1005,11 +1005,26 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
         base_m = m._orig_mod if hasattr(m, '_orig_mod') else m
         extra['num_points'] = base_m._phi_inp_dim
 
-    # Save max_order for TFN models (needed by analysis to rebuild architecture)
+    # Save all architecture-relevant hyperparams so analysis can rebuild the
+    # exact model without having to infer shapes from the state dict.
     base_m = m._orig_mod if hasattr(m, '_orig_mod') else m
-    tfn_max_order = getattr(base_m, 'max_order', None)
-    if tfn_max_order is not None:
-        extra['max_order'] = tfn_max_order
+    for attr in ('hidden_channels', 'num_layers', 'num_rbf', 'cutoff',
+                 'k_neighbors', 'max_order', 'num_heads', 'radial_hidden',
+                 'num_mixtures', 'k_local', 'k_global',
+                 'num_layers_per_stage'):
+        val = getattr(base_m, attr, None)
+        if val is not None:
+            extra[attr] = val
+    if hasattr(base_m, 'classifier_dims'):
+        extra['classifier_dims'] = base_m.classifier_dims
+    elif hasattr(base_m, '_inner') and hasattr(base_m._inner, 'classifier_dims'):
+        extra['classifier_dims'] = base_m._inner.classifier_dims
+    if hasattr(base_m, 'encoder_dims'):
+        extra['encoder_dims'] = base_m.encoder_dims
+    if hasattr(base_m, 'stage_sizes'):
+        extra['stage_sizes'] = base_m.stage_sizes
+    if hasattr(base_m, 'stage_radii'):
+        extra['stage_radii'] = base_m.stage_radii
 
     ckpt_dir = f'models/{model_tag}' if model_tag else 'models'
     os.makedirs(ckpt_dir, exist_ok=True)
