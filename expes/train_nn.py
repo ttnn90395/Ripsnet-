@@ -227,18 +227,18 @@ def precompute_geometry(model, data_list, mname, tag=''):
 
     # ---- include hierarchical per-stage geometry in the cache ----
     if is_hier:
-        # Move tensors to CPU for storage
-        hier_cpu = []
+        # Keep hierarchical data on the same device as the geometry tensors.
+        # torch.save handles device serialisation transparently; storing on
+        # CPU here would create a device mismatch when the non-hierarchical
+        # tensors (rbf, gt_edge, nbr_idx) are on CUDA.
+        hier_tensors = []
         for hg in hier_geoms:
-            stage_cpu = []
-            for sg in hg:
-                cpu_sg = {k: v.detach().cpu() for k, v in sg.items()}
-                stage_cpu.append(cpu_sg)
-            hier_cpu.append(stage_cpu)
+            stage_tensors = [{k: v.detach() for k, v in sg.items()} for sg in hg]
+            hier_tensors.append(stage_tensors)
         result = {
             'uniform': False,
             'list': list(zip(rbfs, gt_edges, nbr_idxs)),
-            'hier': hier_cpu,
+            'hier': hier_tensors,
         }
     else:
         uniform = all(r.shape == rbfs[0].shape for r in rbfs)
@@ -282,6 +282,14 @@ def tfn_batched_forward(model, data_list, geom_cache, mname, batch_size=64):
         hier_b   = None
         if geom_b is not None and isinstance(geom_b, tuple) and len(geom_b) == 2:
             geom_b, hier_b = geom_b
+        # Ensure hierarchical stage geometry lives on the model device
+        model_device = next(inner.parameters()).device
+        if hier_b is not None:
+            hier_b = [
+                [{k: v.to(model_device) for k, v in sg.items()} for sg in hg]
+                for hg in hier_b
+            ]
+
         with torch.inference_mode():
             if geom_b is not None:
                 if isinstance(geom_b, dict) and geom_b.get('uniform', False) and hasattr(inner, '_encode_batch'):
@@ -618,7 +626,8 @@ def forward_batch(model, batch_data, mname, geom_batch=None, hier_batch=None):
 
     if geom_batch is not None and mname in TFN_MODELS:
         inner = getattr(model, '_inner', model)
-        _move_basis_tensors(inner, next(inner.parameters()).device)
+        model_device = next(inner.parameters()).device
+        _move_basis_tensors(inner, model_device)
 
         # Extract hier from uniform dict if present
         _hier_dict = None
@@ -626,6 +635,14 @@ def forward_batch(model, batch_data, mname, geom_batch=None, hier_batch=None):
             _hier_dict = geom_batch.pop('hier')
             if hier_batch is None:
                 hier_batch = _hier_dict
+
+        # Hierarchical stage geometry may have been cached on a different
+        # device (e.g. CPU); move it to the model device now.
+        if hier_batch is not None:
+            hier_batch = [
+                [{k: v.to(model_device) for k, v in sg.items()} for sg in hg]
+                for hg in hier_batch
+            ]
 
         # ── Uniform (all same N) → fast stacked path ────────────────────
         _is_uniform = isinstance(geom_batch, dict) and geom_batch.get('uniform', False)

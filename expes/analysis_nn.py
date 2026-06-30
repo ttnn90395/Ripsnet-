@@ -452,7 +452,7 @@ def precompute_geometry_batched(model_pv, class_name, data_list):
             'uniform': True,
         }
         if is_hier:
-            result['hier'] = [[{k: v.detach().cpu() for k, v in sg.items()}
+            result['hier'] = [[{k: v.detach() for k, v in sg.items()}
                                for sg in hg] for hg in hier_geoms]
         return result
     result = {
@@ -460,7 +460,7 @@ def precompute_geometry_batched(model_pv, class_name, data_list):
         'uniform': False,
     }
     if is_hier:
-        result['hier'] = [[{k: v.detach().cpu() for k, v in sg.items()}
+        result['hier'] = [[{k: v.detach() for k, v in sg.items()}
                            for sg in hg] for hg in hier_geoms]
     return result
 
@@ -481,7 +481,8 @@ def tfn_batched_forward(model, data_list, geom_cache, batch_size=64):
     """
     Batched TFN inference with precomputed geometry.
     """
-    inner   = getattr(model, '_inner', model)
+    inner       = getattr(model, '_inner', model)
+    inner_device = next(inner.parameters()).device
     results = []
 
     is_batched_geom = (
@@ -492,7 +493,8 @@ def tfn_batched_forward(model, data_list, geom_cache, batch_size=64):
         """Return per-sample hierarchical stage geometry if cached."""
         if not has_hier:
             return None
-        return geom_cache['hier'][i]
+        sg = geom_cache['hier'][i]
+        return {k: v.to(inner_device) for k, v in sg.items()}
 
     with torch.inference_mode():
         for start in range(0, len(data_list), batch_size):
@@ -599,7 +601,10 @@ def forward_single(model, prepared_x, mname, geom=None, stage_geom=None):
         if gt_edge.ndim == 4: gt_edge  = gt_edge.squeeze(0)
         if nbr_idx.ndim == 3: nbr_idx  = nbr_idx.squeeze(0)
         inner = getattr(model, '_inner', model)
-        _move_basis_tensors(inner, next(inner.parameters()).device)
+        model_device = next(inner.parameters()).device
+        _move_basis_tensors(inner, model_device)
+        if stage_geom is not None:
+            stage_geom = {k: v.to(model_device) for k, v in stage_geom.items()}
         desc  = inner._encode_single(
             prepared_x, precomputed_geom=(rbf, gt_edge, nbr_idx),
             precomputed_stage_geom=stage_geom)

@@ -1131,6 +1131,35 @@ class EquivariantSetTransformer(nn.Module):
 # StochasticEquivariantTFN  —  uncertainty-aware equivariant model
 # ============================================================================
 
+class _StochasticMixtureHead(nn.Module):
+    """Head used as ``.rho`` by the training/analysis harness.
+
+    Takes invariant descriptors ``(B, D)`` and returns the weighted mixture
+    mean prediction ``(B, num_classes)``.
+    """
+    def __init__(
+        self,
+        encoder_mlp:   nn.Module,
+        mu_net:        nn.Module,
+        logit_net:     nn.Module,
+        num_mixtures:  int,
+        num_classes:   int,
+    ):
+        super().__init__()
+        self.encoder_mlp  = encoder_mlp
+        self.mu_net       = mu_net
+        self.logit_net    = logit_net
+        self.num_mixtures = num_mixtures
+        self.num_classes  = num_classes
+
+    def forward(self, desc: torch.Tensor) -> torch.Tensor:
+        h = self.encoder_mlp(desc)
+        mu     = self.mu_net(h).reshape(-1, self.num_mixtures, self.num_classes)
+        logits = self.logit_net(h)
+        weights = F.softmax(logits, dim=-1)
+        return (weights.unsqueeze(-1) * mu).sum(dim=1)
+
+
 class StochasticEquivariantTFN(nn.Module):
     """
     Uncertainty-aware equivariant model that outputs a Gaussian mixture
@@ -1230,6 +1259,13 @@ class StochasticEquivariantTFN(nn.Module):
         self.mu_net    = nn.Linear(d, num_mixtures * num_classes)
         self.logvar_net = nn.Linear(d, num_mixtures * num_classes)
         self.logit_net  = nn.Linear(d, num_mixtures)
+
+        # rho head: used by the training/analysis harness (forward_single/batch).
+        # Encodes invariant descriptors → weighted mixture mean prediction.
+        self.rho = _StochasticMixtureHead(
+            self.encoder_mlp, self.mu_net, self.logit_net,
+            num_mixtures, num_classes,
+        )
 
         self._scalar_sig = scalar_sig
         self._vector_sig = vector_sig
