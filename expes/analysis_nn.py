@@ -239,7 +239,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
     if name == 'OnEquivariantTensorFieldNetwork':
         return OnEquivariantTensorFieldNetwork(
             num_classes=output_dim,
-            max_order=extra.get('max_order', 1),
+            max_order=extra.get('max_order', 0),
             hidden_channels=hidden_channels or 64,
             num_layers=num_layers or 6,
             num_rbf=num_rbf or 64,
@@ -251,7 +251,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
     if name == 'AttentionTensorFieldNetwork':
         return AttentionTensorFieldNetwork(
             num_classes=output_dim,
-            max_order=extra.get('max_order', 1),
+            max_order=extra.get('max_order', 0),
             hidden_channels=hidden_channels or 64,
             num_layers=num_layers or 6,
             num_heads=extra.get('num_heads', 4),
@@ -265,7 +265,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
         return StochasticTensorFieldNetwork(
             num_classes=output_dim,
             num_mixtures=extra.get('num_mixtures', 3),
-            max_order=extra.get('max_order', 1),
+            max_order=extra.get('max_order', 0),
             hidden_channels=hidden_channels or 64,
             num_layers=num_layers or 6,
             num_rbf=num_rbf or 64,
@@ -369,7 +369,8 @@ def _infer_tfn_architecture(model_state):
         [k for k in keys
          if k.startswith(rho_prefix)
          and k.endswith('.weight')
-         and model_state[k].ndim == 2],   # LayerNorm weights are 1-D; Linear are 2-D
+         and model_state[k].ndim == 2   # LayerNorm weights are 1-D; Linear are 2-D
+         and k[len(rho_prefix):].split('.', 1)[0].isdecimal()],
         key=lambda k: int(k[len(rho_prefix):].split('.', 1)[0])
     )
     if len(rho_linear_keys) >= 2:

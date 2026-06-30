@@ -220,12 +220,11 @@ class TensorFieldNetwork(nn.Module):
             in_f0, in_f1 = hidden_f0, hidden_f1
         self.layers = nn.ModuleList(layers)
 
-        rho, in_d = [], hidden_f0 + hidden_f1
-        for d in classifier_dims:
-            rho += [nn.Linear(in_d, d), nn.ReLU()]
-            in_d = d
-        rho.append(nn.Linear(in_d, num_classes))
-        self.rho = nn.Sequential(*rho)
+        inv_dim = hidden_f0 + hidden_f1
+        self.rho = nn.Sequential(
+            nn.Linear(inv_dim, 64), nn.SiLU(), nn.LayerNorm(64),
+            nn.Linear(64, num_classes),
+        )
 
     def _encode_single(self, pos: torch.Tensor) -> torch.Tensor:
         f0 = pos.norm(dim=-1, keepdim=True)
@@ -244,7 +243,7 @@ class TensorFieldNetwork(nn.Module):
             else:
                 f0, f1 = layer(pos, f0, f1, rbf, r_hat, mask)
 
-        return torch.cat([f0, f1.norm(dim=-1)], dim=-1).max(dim=0).values
+        return torch.cat([f0, f1.norm(dim=-1)], dim=-1).sum(dim=0)
 
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
         if not batch:

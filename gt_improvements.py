@@ -339,13 +339,10 @@ class HierarchicalGTTFN(nn.Module):
 
         # Invariant readout
         inv_dim = hidden_channels * len(all_sigs)
-        rho = []
-        d   = inv_dim
-        for h in classifier_dims:
-            rho += [nn.Linear(d, h), nn.SiLU(), nn.LayerNorm(h)]
-            d = h
-        rho.append(nn.Linear(d, num_classes))
-        self.rho = nn.Sequential(*rho)
+        self.rho = nn.Sequential(
+            nn.Linear(inv_dim, 64), nn.SiLU(), nn.LayerNorm(64),
+            nn.Linear(64, num_classes),
+        )
 
         self._scalar_sig = scalar_sig
         self._vector_sig = vector_sig
@@ -438,7 +435,7 @@ class HierarchicalGTTFN(nn.Module):
             parts.append(f.squeeze(-1) if sig == sc else f.norm(dim=-1))
 
         node_inv = torch.cat(parts, dim=-1)        # (M, inv_dim)
-        return node_inv.max(dim=0).values
+        return node_inv.sum(dim=0)
 
     # ------------------------------------------------------------------
     def forward(
@@ -835,13 +832,10 @@ class GTTensorFieldNetworkWithAttention(nn.Module):
             in_types = hidden_types
 
         inv_dim = hidden_channels * len(all_sigs)
-        rho = []
-        d   = inv_dim
-        for h in classifier_dims:
-            rho += [nn.Linear(d, h), nn.SiLU(), nn.LayerNorm(h)]
-            d    = h
-        rho.append(nn.Linear(d, num_classes))
-        self.rho = nn.Sequential(*rho)
+        self.rho = nn.Sequential(
+            nn.Linear(inv_dim, 64), nn.SiLU(), nn.LayerNorm(64),
+            nn.Linear(64, num_classes),
+        )
 
         self._scalar_sig = scalar_sig
         self._vector_sig = vector_sig
@@ -903,7 +897,7 @@ class GTTensorFieldNetworkWithAttention(nn.Module):
                 parts.append(f.norm(dim=-1))
 
         node_inv = torch.cat(parts, dim=-1)
-        descs = node_inv.max(dim=1).values
+        descs = node_inv.sum(dim=1)
         return descs if return_descriptors else self.rho(descs)
 
     # ------------------------------------------------------------------
@@ -957,7 +951,7 @@ class GTTensorFieldNetworkWithAttention(nn.Module):
                 parts.append(f.norm(dim=-1))
 
         node_inv = torch.cat(parts, dim=-1)
-        return node_inv.max(dim=0).values
+        return node_inv.sum(dim=0)
 
     # ------------------------------------------------------------------
     def forward(
@@ -1313,7 +1307,7 @@ class StochasticEquivariantTFN(nn.Module):
             parts.append(f.squeeze(-1) if sig == sc else f.norm(dim=-1))
 
         node_inv = torch.cat(parts, dim=-1)
-        return node_inv.max(dim=0).values
+        return node_inv.sum(dim=0)
 
     # ------------------------------------------------------------------
     def _encode_single(
@@ -1603,13 +1597,10 @@ class EquivariantGraphMambaNetwork(nn.Module):
         self.channel_mixer = ChannelMixer(hidden_types) if use_channel_mix else None
 
         inv_dim = hidden_channels * len(all_sigs)
-        rho = []
-        d   = inv_dim
-        for h in classifier_dims:
-            rho += [nn.Linear(d, h), nn.SiLU(), nn.LayerNorm(h)]
-            d = h
-        rho.append(nn.Linear(d, num_classes))
-        self.rho = nn.Sequential(*rho)
+        self.rho = nn.Sequential(
+            nn.Linear(inv_dim, 64), nn.SiLU(), nn.LayerNorm(64),
+            nn.Linear(64, num_classes),
+        )
 
         self._scalar_sig = scalar_sig
         self._vector_sig = vector_sig
@@ -1648,7 +1639,7 @@ class EquivariantGraphMambaNetwork(nn.Module):
             parts.append(f.squeeze(-1) if sig == sc else f.norm(dim=-1))
 
         node_inv = torch.cat(parts, dim=-1)
-        return node_inv.max(dim=0).values
+        return node_inv.sum(dim=0)
 
     # ------------------------------------------------------------------
     def forward(

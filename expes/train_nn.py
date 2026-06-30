@@ -430,66 +430,74 @@ def prepare_data_for_model(mname, data_list, use_gs=False,
 def build_model_by_name(name, n=None, hparams=None):
     _n    = dim if n is None else n
     _npts = data_train_torch[0].shape[0] if data_train_torch else 128
+    if _npts < 50:
+        _hc, _nl, _cd = 4, 1, [8]
+    elif _npts < 150:
+        _hc, _nl, _cd = 8, 1, [16]
+    elif _npts < 300:
+        _hc, _nl, _cd = 16, 2, [32, 16]
+    else:
+        _hc, _nl, _cd = 32, 3, [64, 32]
     hp = {} if hparams is None else hparams
     if name == 'TensorFieldNetwork':
         return TensorFieldNetwork(
             num_classes=output_dim,
-            max_order=hp.get('max_order', 1),
-            hidden_channels=hp.get('hidden_channels', 32),
-            num_layers=hp.get('num_layers', 3),
+            max_order=hp.get('max_order', 0),
+            hidden_channels=hp.get('hidden_channels', _hc),
+            num_layers=hp.get('num_layers', _nl),
             num_rbf=hp.get('num_rbf', 64),
             cutoff=hp.get('cutoff', 1.0),
             k_neighbors=hp.get('k_neighbors', min(16, _npts // 10 + 1)),
-            classifier_dims=hp.get('classifier_dims', [64, 32]),
+            classifier_dims=hp.get('classifier_dims', _cd),
         )
     if name == 'GTTensorFieldNetwork':
         return GTTensorFieldNetwork(
             n=_n,
             num_classes=output_dim,
-            max_order=hp.get('max_order', 1),
-            hidden_channels=hp.get('hidden_channels', 32),
-            num_layers=hp.get('num_layers', 3),
+            max_order=hp.get('max_order', 0),
+            hidden_channels=hp.get('hidden_channels', _hc),
+            num_layers=hp.get('num_layers', _nl),
             num_rbf=hp.get('num_rbf', 64),
             cutoff=hp.get('cutoff', 1.0),
             k_neighbors=hp.get('k_neighbors', min(16, _npts // 10 + 1)),
-            classifier_dims=hp.get('classifier_dims', [64, 32]),
+            classifier_dims=hp.get('classifier_dims', _cd),
             radial_hidden=hp.get('radial_hidden', 128),
         )
     if name == 'GTTensorFieldNetworkV2':
         return GTTensorFieldNetworkV2(
             n=_n,
             num_classes=output_dim,
-            max_order=hp.get('max_order', 1),
-            hidden_channels=hp.get('hidden_channels', 32),
-            num_layers=hp.get('num_layers', 3),
+            max_order=hp.get('max_order', 0),
+            hidden_channels=hp.get('hidden_channels', _hc),
+            num_layers=hp.get('num_layers', _nl),
             num_rbf=hp.get('num_rbf', 64),
             cutoff=hp.get('cutoff', 1.0),
             k_neighbors=hp.get('k_neighbors', min(16, _npts // 10 + 1)),
-            classifier_dims=hp.get('classifier_dims', [64, 32]),
+            classifier_dims=hp.get('classifier_dims', _cd),
             radial_hidden=hp.get('radial_hidden', 128),
         )
     if name == 'HierarchicalGTTFN':
         return HierarchicalGTTFN(
             n=_n,
             num_classes=output_dim,
-            max_order=hp.get('max_order', 1),
-            hidden_channels=hp.get('hidden_channels', 32),
+            max_order=hp.get('max_order', 0),
+            hidden_channels=hp.get('hidden_channels', _hc),
             stage_sizes=hp.get('stage_sizes', [64, 32]),
             num_rbf=hp.get('num_rbf', 64),
             cutoff=hp.get('cutoff', 1.0),
-            classifier_dims=hp.get('classifier_dims', [64, 32]),
+            classifier_dims=hp.get('classifier_dims', _cd),
         )
     if name == 'HierarchicalTensorFieldNetwork':
         return HierarchicalTensorFieldNetwork(
             num_classes=output_dim,
-            max_order=hp.get('max_order', 1),
-            hidden_channels=hp.get('hidden_channels', 32),
+            max_order=hp.get('max_order', 0),
+            hidden_channels=hp.get('hidden_channels', _hc),
             stage_sizes=hp.get('stage_sizes', [64, 32]),
             num_rbf=hp.get('num_rbf', 64),
             cutoff=hp.get('cutoff', 1.0),
             k_local=hp.get('k_neighbors', 16),
             k_global=hp.get('k_neighbors', 16),
-            classifier_dims=hp.get('classifier_dims', [64, 32]),
+            classifier_dims=hp.get('classifier_dims', _cd),
         )
     if name == 'OnEquivariantTensorFieldNetwork':
         return OnEquivariantTensorFieldNetwork(
@@ -519,9 +527,9 @@ def build_model_by_name(name, n=None, hparams=None):
         return StochasticTensorFieldNetwork(
             num_classes=output_dim,
             num_mixtures=hp.get('num_mixtures', 3),
-            max_order=hp.get('max_order', 1),
-            hidden_channels=hp.get('hidden_channels', 32),
-            num_layers=hp.get('num_layers', 3),
+            max_order=hp.get('max_order', 0),
+            hidden_channels=hp.get('hidden_channels', _hc),
+            num_layers=hp.get('num_layers', _nl),
             num_rbf=hp.get('num_rbf', 64),
             cutoff=hp.get('cutoff', 1.0),
             k_neighbors=hp.get('k_neighbors', min(16, _npts // 10 + 1)),

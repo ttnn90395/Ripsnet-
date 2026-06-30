@@ -594,7 +594,6 @@ class GTTensorFieldNetwork(nn.Module):
         scalar_sig = GTSignature.scalar(n)
         vector_sig = GTSignature.vector(n)
 
-        # Initial scalar channels: ||pos|| + optional node attributes
         init_scalar_c = 1 + node_attr_dim
         self.node_attr_dim = node_attr_dim
         if node_attr_dim > 0:
@@ -622,13 +621,10 @@ class GTTensorFieldNetwork(nn.Module):
         # Invariant readout: scalars + norms of all other types
         inv_dim = hidden_channels * len(all_sigs)
 
-        rho = []
-        d   = inv_dim
-        for h in classifier_dims:
-            rho += [nn.Linear(d, h), nn.SiLU(), nn.LayerNorm(h)]
-            d    = h
-        rho.append(nn.Linear(d, num_classes))
-        self.rho = nn.Sequential(*rho)
+        self.rho = nn.Sequential(
+            nn.Linear(inv_dim, 64), nn.SiLU(), nn.LayerNorm(64),
+            nn.Linear(64, num_classes),
+        )
 
         self._scalar_sig = scalar_sig
         self._vector_sig = vector_sig
@@ -666,6 +662,7 @@ class GTTensorFieldNetwork(nn.Module):
         f1 = pos_safe.unsqueeze(2)  # (B, N, 1, n)
         feats: FeatureDict = {sc: f0, vc: f1}
 
+        # Need to re-read precomputed_geom after extracting rbf for f0_parts
         if precomputed_geom is not None:
             rbf, gt_edge, nbr_idx = precomputed_geom
             use_sparse = True
@@ -699,7 +696,7 @@ class GTTensorFieldNetwork(nn.Module):
                 parts.append(f.norm(dim=-1))      # (B, N, C)
 
         node_inv = torch.cat(parts, dim=-1)        # (B, N, inv_dim)
-        descs = node_inv.max(dim=1).values         # (B, inv_dim)
+        descs = node_inv.sum(dim=1)                 # (B, inv_dim)
         return descs if return_descriptors else self.rho(descs)
 
     # ------------------------------------------------------------------
@@ -714,12 +711,9 @@ class GTTensorFieldNetwork(nn.Module):
         vc = self._vector_sig
 
         # Initial features
-        f0_parts = [pos.norm(dim=-1, keepdim=True)]   # (N, 1)
+        f0_parts = [pos.norm(dim=-1, keepdim=True)]
         if node_attr is not None and self.node_attr_dim > 0:
             f0_parts.append(self.attr_proj(node_attr))
-        # FIX: use unsqueeze(-1) so (N, C) → (N, C, 1) directly and correctly.
-        # The old code did unsqueeze(1) → (N, 1, C) then reshape(N, -1, 1) → (N, C, 1),
-        # which works accidentally for node_attr_dim=0 but scrambles channels otherwise.
         f0 = torch.cat(f0_parts, dim=-1).unsqueeze(-1)  # (N, C, 1)
 
         # (N, 1, n) — C=1 vector feature
@@ -763,7 +757,7 @@ class GTTensorFieldNetwork(nn.Module):
                 parts.append(f.norm(dim=-1))      # (N, C)
 
         node_inv = torch.cat(parts, dim=-1)        # (N, inv_dim)
-        return node_inv.max(dim=0).values          # (inv_dim,)
+        return node_inv.sum(dim=0)                 # (inv_dim,)
 
     # ------------------------------------------------------------------
     def forward(
