@@ -22,6 +22,9 @@ export UCR_PATH="${UCR_PATH:-/hs/work0/home/users/${USER}/data/UCRArchive_2018}"
 # Smaller model hyperparams
 export TFN_HPARAMS='{"hidden_channels":16,"k_neighbors":8,"num_layers":2,"num_rbf":32,"max_order":0,"classifier_dims":[32,16]}'
 
+# Isolate checkpoints per task to avoid concurrent overwrite by parallel jobs
+export TFN_MODEL_TAG="task_${SLURM_ARRAY_TASK_ID}"
+
 cd "$REPO_DIR/expes"
 mkdir -p logs
 

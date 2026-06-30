@@ -809,6 +809,8 @@ class HierarchicalTensorFieldNetwork(nn.Module):
         )
 
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
+        if batch:
+            _move_basis_tensors(self._inner, batch[0].device)
         return self._inner(batch)
 
     def to(self, *args, **kwargs):

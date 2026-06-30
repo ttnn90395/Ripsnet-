@@ -1280,6 +1280,23 @@ class StochasticEquivariantTFN(nn.Module):
         return node_inv.max(dim=0).values
 
     # ------------------------------------------------------------------
+    def _encode_single(
+        self,
+        pos:                    torch.Tensor,
+        node_attr:              Optional[torch.Tensor] = None,
+        precomputed_geom:       Optional[Tuple] = None,
+        precomputed_stage_geom: Optional[List] = None,
+    ) -> torch.Tensor:
+        """Encode a single point cloud into an invariant descriptor.
+
+        Delegates to ``_encode_features`` for the actual computation;
+        ``precomputed_stage_geom`` is accepted for API compatibility with
+        hierarchical TFN models but is ignored (StochasticEquivariantTFN
+        has no hierarchical pooling stages).
+        """
+        return self._encode_features(pos, node_attr, precomputed_geom)
+
+    # ------------------------------------------------------------------
     def forward(
         self,
         batch:      List[torch.Tensor],
