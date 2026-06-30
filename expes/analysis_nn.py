@@ -37,6 +37,7 @@ from models import (
     ScalarDistanceDeepSet, PointNetTutorial, ScalarInputMLP, MultiInputModel,
     DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,
     AttentionTensorFieldNetwork, StochasticTensorFieldNetwork,
+    CrossAttentionTensorFieldNetwork,
     _move_basis_tensors,
 )
 
@@ -47,6 +48,7 @@ MODEL_NAMES = [
     'ScalarDistanceDeepSet', 'PointNetTutorial', 'ScalarInputMLP', 'MultiInputModel',
     'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
     'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
+    'CrossAttentionTensorFieldNetwork',
 ]
 
 TFN_MODELS = {
@@ -54,6 +56,7 @@ TFN_MODELS = {
     'GTTensorFieldNetworkV2', 'HierarchicalGTTFN',
     'HierarchicalTensorFieldNetwork', 'OnEquivariantTensorFieldNetwork',
     'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
+    'CrossAttentionTensorFieldNetwork',
 }
 
 # -------------------------------------------------------------------------
@@ -95,12 +98,44 @@ def find_checkpoint(mname):
         f"No checkpoint found for model '{mname}'. Searched: {candidate_dirs}")
 
 
+# -------------------------------------------------------------------------
+# Per-dataset hyperparameter overrides (mirrors train_nn.py)
+# -------------------------------------------------------------------------
+DATASET_HPARAMS = {
+    'SonyAIBORobotSurface2':      {'max_order': 2, 'hidden_channels': 16, 'num_layers': 3},
+    'MiddlePhalanxOutlineCorrect': {'max_order': 1, 'hidden_channels': 8},
+    'PowerCons':                   {'max_order': 1, 'hidden_channels': 16},
+    'ProximalPhalanxTW':           {'max_order': 1, 'hidden_channels': 8},
+    'ECG5000':                     {'max_order': 1, 'hidden_channels': 16},
+    'CBF':                         {'max_order': 1, 'hidden_channels': 8},
+    'ItalyPowerDemand':            {'max_order': 1, 'hidden_channels': 8},
+    'TwoLeadECG':                  {'max_order': 1, 'hidden_channels': 8},
+}
+
+# -------------------------------------------------------------------------
+# Selective GS (mirrors train_nn.py)
+# -------------------------------------------------------------------------
+GS_USE_MODELS = {
+    'GTTensorFieldNetworkV2',
+    'HierarchicalTensorFieldNetwork',
+}
+GS_SKIP_MODELS = {
+    'StochasticTensorFieldNetwork',
+    'TensorFieldNetwork',
+}
+
 if requested_model == 'all':
     models_to_test    = MODEL_NAMES[:]
-    models_to_test_gs = [m + '_GS' for m in MODEL_NAMES]
+    models_to_test_gs = []
+    for m in MODEL_NAMES:
+        if m not in GS_SKIP_MODELS:
+            models_to_test_gs.append(m + '_GS')
 elif requested_model in MODEL_NAMES:
     models_to_test    = [requested_model]
-    models_to_test_gs = [requested_model + '_GS']
+    if requested_model not in GS_SKIP_MODELS:
+        models_to_test_gs = [requested_model + '_GS']
+    else:
+        models_to_test_gs = []
 elif os.path.isfile(requested_model):
     models_to_test    = [os.path.splitext(os.path.basename(requested_model))[0]]
     models_to_test_gs = []
@@ -123,7 +158,7 @@ else:
     models_to_test_gs = []
 
 if 'models_to_test_gs' not in dir():
-    models_to_test_gs = [m + '_GS' for m in models_to_test]
+    models_to_test_gs = [m + '_GS' for m in models_to_test if m not in GS_SKIP_MODELS]
 
 print('models_to_test (raw):', models_to_test)
 print('models_to_test (GS) :', models_to_test_gs)
@@ -277,6 +312,22 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
             cutoff=cutoff,
             k_neighbors=k_neighbors,
             encoder_dims=extra.get('encoder_dims', [256, 128]),
+        )
+    if name == 'CrossAttentionTensorFieldNetwork':
+        return CrossAttentionTensorFieldNetwork(
+            num_classes=output_dim,
+            n=n_dim,
+            max_order=extra.get('max_order', 1),
+            hidden_channels=hidden_channels or 64,
+            num_layers=num_layers or 6,
+            num_heads=extra.get('num_heads', 4),
+            transformer_layers=extra.get('transformer_layers', 2),
+            num_rbf=num_rbf or 64,
+            cutoff=cutoff,
+            k_neighbors=k_neighbors,
+            classifier_dims=classifier_dims or [256, 128],
+            radial_hidden=radial_hidden or 64,
+            dropout=extra.get('dropout', 0.1),
         )
     if name == 'PointNet3D':
         return PointNet3D(output_dim=output_dim,
@@ -917,12 +968,14 @@ def load_and_eval(model_name, use_gs=False):
                       'HierarchicalTensorFieldNetwork',
                       'OnEquivariantTensorFieldNetwork',
                       'AttentionTensorFieldNetwork',
-                      'StochasticTensorFieldNetwork']:
+                      'StochasticTensorFieldNetwork',
+                      'CrossAttentionTensorFieldNetwork']:
         # Prefer saved metadata from checkpoint (new checkpoints include these)
         saved_hp_keys = ['hidden_channels', 'num_layers', 'num_rbf', 'cutoff',
                          'k_neighbors', 'max_order', 'num_heads', 'radial_hidden',
                          'num_mixtures', 'encoder_dims', 'stage_sizes', 'stage_radii',
                          'k_local', 'k_global', 'num_layers_per_stage',
+                         'transformer_layers', 'dropout',
                          'classifier_dims']
         for k in saved_hp_keys:
             v = checkpoint.get(k) if isinstance(checkpoint, dict) else None

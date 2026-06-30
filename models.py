@@ -713,6 +713,7 @@ def _load_gt_improvements():
         EquivariantSetTransformer as _EquivariantSetTransformerBase,
         StochasticEquivariantTFN as _StochasticEquivariantTFNBase,
         EquivariantGraphMambaNetwork as _EquivariantGraphMambaBase,
+        TemporalCrossAttentionTFN as _TemporalCrossAttentionTFNBase,
     )
 
     class HierarchicalGTTFN(_HierarchicalGTTFNBase):
@@ -757,14 +758,23 @@ def _load_gt_improvements():
                 _move_basis_tensors(self, batch[0].device)
             return _EquivariantGraphMambaBase.forward(self, batch, node_attrs, precomputed_geom)
 
+    class TemporalCrossAttentionTFN(_TemporalCrossAttentionTFNBase):
+        """Temporal cross-attention TFN, device-aware."""
+        def forward(self, batch):
+            if batch:
+                _move_basis_tensors(self, batch[0].device)
+            return _TemporalCrossAttentionTFNBase.forward(self, batch)
+
     return (HierarchicalGTTFN, _OnEquivariantWrapperBase, GTTFNEncoder,
             GTTensorFieldNetworkWithAttention, EquivariantSetTransformer,
-            StochasticEquivariantTFN, EquivariantGraphMambaNetwork)
+            StochasticEquivariantTFN, EquivariantGraphMambaNetwork,
+            TemporalCrossAttentionTFN)
 
 
 (HierarchicalGTTFN, OnEquivariantWrapper, GTTFNEncoder,
  GTTensorFieldNetworkWithAttention, EquivariantSetTransformer,
- StochasticEquivariantTFN, EquivariantGraphMambaNetwork) = _load_gt_improvements()
+ StochasticEquivariantTFN, EquivariantGraphMambaNetwork,
+ TemporalCrossAttentionTFN) = _load_gt_improvements()
 
 
 class HierarchicalTensorFieldNetwork(nn.Module):
@@ -896,12 +906,13 @@ class AttentionTensorFieldNetwork(nn.Module):
         k_neighbors: int = 16,
         classifier_dims: Optional[List[int]] = None,
         radial_hidden: int = 64,
+        n: int = 3,
     ):
         super().__init__()
         if classifier_dims is None:
             classifier_dims = [128, 64]
         self._inner = GTTensorFieldNetworkWithAttention(
-            n=3, num_classes=num_classes,
+            n=n, num_classes=num_classes,
             max_order=max_order,
             hidden_channels=hidden_channels,
             num_layers=num_layers,
@@ -911,6 +922,62 @@ class AttentionTensorFieldNetwork(nn.Module):
             k_neighbors=k_neighbors,
             classifier_dims=classifier_dims,
             radial_hidden=radial_hidden,
+        )
+
+    def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
+        return self._inner(batch)
+
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
+        self._inner.to(*args, **kwargs)
+        return self
+
+    def cuda(self, device=None):
+        super().cuda(device)
+        self._inner.cuda(device)
+        return self
+
+    def cpu(self):
+        super().cpu()
+        self._inner.cpu()
+        return self
+
+
+class CrossAttentionTensorFieldNetwork(nn.Module):
+    """GT-TFN with temporal transformer cross-attention over point sequence."""
+
+    def __init__(
+        self,
+        num_classes: int,
+        max_order: int = 1,
+        hidden_channels: int = 32,
+        num_layers: int = 4,
+        num_heads: int = 4,
+        transformer_layers: int = 2,
+        num_rbf: int = 32,
+        cutoff: float = 5.0,
+        k_neighbors: int = 16,
+        classifier_dims: Optional[List[int]] = None,
+        radial_hidden: int = 64,
+        dropout: float = 0.1,
+        n: int = 3,
+    ):
+        super().__init__()
+        if classifier_dims is None:
+            classifier_dims = [128, 64]
+        self._inner = TemporalCrossAttentionTFN(
+            n=n, num_classes=num_classes,
+            max_order=max_order,
+            hidden_channels=hidden_channels,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            transformer_layers=transformer_layers,
+            num_rbf=num_rbf,
+            cutoff=cutoff,
+            k_neighbors=k_neighbors,
+            classifier_dims=classifier_dims,
+            radial_hidden=radial_hidden,
+            dropout=dropout,
         )
 
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
@@ -1108,6 +1175,8 @@ __all__ = [
     'StochasticTensorFieldNetwork',
     'EquivariantGraphMambaNetwork',
     'GraphMambaTensorFieldNetwork',
+    'TemporalCrossAttentionTFN',
+    'CrossAttentionTensorFieldNetwork',
     # Notebook / ragged models
     'ScalarDistanceDeepSet',
     'PointNetTutorial',

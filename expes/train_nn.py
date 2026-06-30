@@ -27,6 +27,7 @@ from models import (
     ScalarDistanceDeepSet, PointNetTutorial, ScalarInputMLP, MultiInputModel,
     DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,
     AttentionTensorFieldNetwork, StochasticTensorFieldNetwork,
+    CrossAttentionTensorFieldNetwork,
     _move_basis_tensors,
 )
 
@@ -37,6 +38,7 @@ MODEL_NAMES = [
     'ScalarDistanceDeepSet', 'PointNetTutorial', 'ScalarInputMLP', 'MultiInputModel',
     'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
     'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
+    'CrossAttentionTensorFieldNetwork',
     # FIXME: GraphMambaTensorFieldNetwork has a selective-scan bug in the
     # GTMambaLayer (msg tensor lacks k-neighbor dim for per-step iteration).
     # Removed from training until the scan logic is rewritten.
@@ -48,6 +50,7 @@ TFN_MODELS = {
     'GTTensorFieldNetworkV2', 'HierarchicalGTTFN',
     'HierarchicalTensorFieldNetwork', 'OnEquivariantTensorFieldNetwork',
     'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
+    'CrossAttentionTensorFieldNetwork',
 }
 
 os.makedirs('models', exist_ok=True)
@@ -95,6 +98,40 @@ if normalize:
         PVs_test[hidx]  /= MPV
 
 output_dim = sum([PVs_train[hidx].shape[1] for hidx in range(len(homdim))])
+
+# -------------------------------------------------------------------------
+# Per-dataset hyperparameter overrides
+# -------------------------------------------------------------------------
+# Keys: dataset_name -> {hparam: value, ...}
+# Applied on top of model_hparams (env var); env var takes precedence.
+# Winning tasks (TFN beats DTW) get higher max_order by default.
+DATASET_HPARAMS = {
+    'SonyAIBORobotSurface2':      {'max_order': 2, 'hidden_channels': 16, 'num_layers': 3},
+    'MiddlePhalanxOutlineCorrect': {'max_order': 1, 'hidden_channels': 8},
+    'PowerCons':                   {'max_order': 1, 'hidden_channels': 16},
+    'ProximalPhalanxTW':           {'max_order': 1, 'hidden_channels': 8},
+    'ECG5000':                     {'max_order': 1, 'hidden_channels': 16},
+    'CBF':                         {'max_order': 1, 'hidden_channels': 8},
+    'ItalyPowerDemand':            {'max_order': 1, 'hidden_channels': 8},
+    'TwoLeadECG':                  {'max_order': 1, 'hidden_channels': 8},
+}
+if dataset_name in DATASET_HPARAMS:
+    for k, v in DATASET_HPARAMS[dataset_name].items():
+        if k not in model_hparams:
+            model_hparams[k] = v
+            print(f'  [dataset hparam] {k}={v}')
+
+# -------------------------------------------------------------------------
+# Selective Gaussian Smoothing: models where GS consistently helps
+# -------------------------------------------------------------------------
+GS_USE_MODELS = {
+    'GTTensorFieldNetworkV2',
+    'HierarchicalTensorFieldNetwork',
+}
+GS_SKIP_MODELS = {
+    'StochasticTensorFieldNetwork',
+    'TensorFieldNetwork',
+}
 
 if dataset_name[:5] == 'synth':
     optim_lr        = 5e-3
@@ -357,25 +394,32 @@ def _pad_to_3d(data_list):
 def augment_point_cloud(pc, sigma=0.02, clip=0.1):
     if pc.ndim != 2 or pc.shape[1] not in (2, 3):
         return pc
-    # Random rotation
-    if pc.shape[1] == 2:
-        theta = float(torch.rand(1, device=pc.device) * 2 * np.pi)
-        c, s = np.cos(theta), np.sin(theta)
-        R = torch.tensor([[c, -s], [s, c]], device=pc.device, dtype=pc.dtype)
-        pc = pc @ R
+    # Time-series-aware augmentations
+    n, d = pc.shape
+    if d == 2:
+        # Scale value dimension only (preserve temporal axis)
+        value_scale = 1.0 + (torch.rand(1, device=pc.device) - 0.5) * 0.3
+        pc[:, 1] = pc[:, 1] * value_scale
+        # Random vertical shift
+        shift = torch.randn(1, device=pc.device) * 0.1 * pc[:, 1].std().clamp(min=1e-6)
+        pc[:, 1] = pc[:, 1] + shift
+        # Random jitter (value only, time is exact)
+        noise = torch.randn(n, device=pc.device) * sigma * pc[:, 1].std().clamp(min=1e-6)
+        pc[:, 1] = pc[:, 1] + noise.clamp(-clip * pc[:, 1].std().clamp(min=1e-6),
+                                           clip * pc[:, 1].std().clamp(min=1e-6))
     else:
+        # 3D: random rotation, scaling, jitter
         R = torch.randn(3, 3, device=pc.device, dtype=pc.dtype)
         q, _ = torch.linalg.qr(R)
         if torch.det(q) < 0:
             q[:, 0] = -q[:, 0]
         pc = pc @ q
-    # Random scaling (new)
-    scale = 1.0 + (torch.rand(1, device=pc.device) - 0.5) * 0.2
-    pc = pc * scale
-    # Random jitter
-    noise = torch.randn_like(pc) * sigma
-    noise = noise.clamp(-clip, clip)
-    return pc + noise
+        scale = 1.0 + (torch.rand(1, device=pc.device) - 0.5) * 0.2
+        pc = pc * scale
+        noise = torch.randn_like(pc) * sigma
+        noise = noise.clamp(-clip, clip)
+        pc = pc + noise
+    return pc
 
 
 def prepare_data_for_model(mname, data_list, use_gs=False,
@@ -534,6 +578,22 @@ def build_model_by_name(name, n=None, hparams=None):
             cutoff=hp.get('cutoff', 1.0),
             k_neighbors=hp.get('k_neighbors', min(16, _npts // 10 + 1)),
             encoder_dims=hp.get('encoder_dims', [256, 128]),
+        )
+    if name == 'CrossAttentionTensorFieldNetwork':
+        return CrossAttentionTensorFieldNetwork(
+            num_classes=output_dim,
+            n=_n,
+            max_order=hp.get('max_order', 1),
+            hidden_channels=hp.get('hidden_channels', _hc),
+            num_layers=hp.get('num_layers', _nl),
+            num_heads=hp.get('num_heads', 4),
+            transformer_layers=hp.get('transformer_layers', 2),
+            num_rbf=hp.get('num_rbf', 64),
+            cutoff=hp.get('cutoff', 1.0),
+            k_neighbors=hp.get('k_neighbors', min(16, _npts // 10 + 1)),
+            classifier_dims=hp.get('classifier_dims', _cd),
+            radial_hidden=hp.get('radial_hidden', 64),
+            dropout=hp.get('dropout', 0.1),
         )
     if name == 'PointNet3D':
         return PointNet3D(output_dim=output_dim)
@@ -1074,7 +1134,14 @@ def _recover_cuda():
 
 def run_both(mname):
     res = {}
-    for use_gs in [False, True]:
+    # Selective GS: skip models where GS hurts, force GS where it helps
+    if mname in GS_SKIP_MODELS:
+        gs_variants = [False]
+    elif mname in GS_USE_MODELS:
+        gs_variants = [True]
+    else:
+        gs_variants = [False, True]
+    for use_gs in gs_variants:
         tag = '_GS' if use_gs else ''
         try:
             res[mname + tag] = train_single_model(mname, use_gs=use_gs)

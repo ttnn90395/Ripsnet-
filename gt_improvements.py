@@ -1004,6 +1004,201 @@ class GTTensorFieldNetworkWithAttention(nn.Module):
 
 
 # ============================================================================
+# TemporalCrossAttentionTFN  —  GT-TFN + temporal transformer over points
+# ============================================================================
+
+class TemporalCrossAttentionTFN(nn.Module):
+    """
+    GT-TFN backbone with a transformer encoder that attends over the
+    point (time) dimension, giving the model explicit access to temporal
+    structure beyond what k-NN spatial attention provides.
+
+    Architecture:
+      1. GTTensorFieldNetwork backbone produces per-point descriptors
+         (equivariant message passing in 2D time-value space).
+      2. Per-point descriptors are summed → global descriptor (standard).
+      3. Additionally, per-point descriptors are fed through a
+         TransformerEncoder with sinusoidal positional encoding,
+         then pooled → temporal descriptor.
+      4. Global + temporal descriptors are concatenated → classifier head.
+
+    Parameters
+    ----------
+    n               : ambient dimension (2 or 3)
+    num_classes     : output classes
+    max_order       : max GT irrep order  (default 1)
+    hidden_channels : channels per irrep  (default 32)
+    num_layers      : number of GT-TFN layers  (default 4)
+    num_rbf         : RBF centres         (default 32)
+    cutoff          : RBF cutoff distance (default 5.0)
+    k_neighbors     : k-NN neighbourhood  (default 16)
+    num_heads       : transformer heads   (default 4)
+    transformer_layers : transformer layers (default 2)
+    classifier_dims : MLP head           (default [128, 64])
+    radial_hidden   : radial MLP hidden   (default 64)
+    dropout         : transformer dropout (default 0.1)
+    """
+
+    def __init__(
+        self,
+        n:                int,
+        num_classes:      int,
+        max_order:        int   = 1,
+        hidden_channels:  int   = 32,
+        num_layers:       int   = 4,
+        num_rbf:          int   = 32,
+        cutoff:           float = 5.0,
+        k_neighbors:      int   = 16,
+        num_heads:        int   = 4,
+        transformer_layers: int = 2,
+        classifier_dims:  Optional[List[int]] = None,
+        radial_hidden:    int   = 64,
+        dropout:          float = 0.1,
+    ):
+        super().__init__()
+        if classifier_dims is None:
+            classifier_dims = [128, 64]
+        self.n                = n
+        self.num_classes      = num_classes
+        self.max_order        = max_order
+        self.k_neighbors      = k_neighbors
+
+        # GT-TFN backbone (produces per-point descriptors)
+        self.rbf      = RBFExpansion(num_rbf=num_rbf, cutoff=cutoff)
+        self.gt_basis = GTBasis(n=n, max_order=max_order)
+        self.cg       = CGCoefficients(n=n, max_order=max_order)
+
+        all_sigs   = self.gt_basis.signatures
+        scalar_sig = GTSignature.scalar(n)
+        vector_sig = GTSignature.vector(n)
+
+        init_types   = {scalar_sig: 2, vector_sig: 1}  # norm + 1 for scalar
+        hidden_types = {sig: hidden_channels for sig in all_sigs}
+
+        self.mp_layers  = nn.ModuleList()
+        self.mix_layers = nn.ModuleList()
+        in_types = init_types
+        for i in range(num_layers):
+            self.mp_layers.append(GTTFNLayer(
+                n=n, in_types=in_types, out_types=hidden_types,
+                num_rbf=num_rbf, cg=self.cg, gt_basis=self.gt_basis,
+                use_gate=True, use_residual=True,
+            ))
+            self.mix_layers.append(ChannelMixer(hidden_types))
+            in_types = hidden_types
+
+        self.inv_dim = hidden_channels * len(all_sigs)
+
+        # Temporal transformer encoder over point descriptors
+        self.pos_encoder = nn.Parameter(torch.zeros(1, 500, self.inv_dim))
+        nn.init.normal_(self.pos_encoder, std=0.02)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.inv_dim, nhead=num_heads,
+            dim_feedforward=self.inv_dim * 2,
+            dropout=dropout, activation='gelu', batch_first=True)
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer, num_layers=transformer_layers)
+
+        # Combined classifier: global pool + temporal pool
+        combined_dim = self.inv_dim * 2
+        self.rho = nn.Sequential(
+            nn.Linear(combined_dim, classifier_dims[0]), nn.SiLU(),
+            nn.LayerNorm(classifier_dims[0]) if n > 0 else nn.Identity(),
+            *sum(([
+                nn.Linear(d1, d2), nn.SiLU(),
+                nn.LayerNorm(d2) if n > 0 else nn.Identity(),
+            ] for d1, d2 in zip(classifier_dims, classifier_dims[1:])), []),
+            nn.Linear(classifier_dims[-1], num_classes),
+        )
+
+        self._scalar_sig = scalar_sig
+        self._vector_sig = vector_sig
+
+    # ------------------------------------------------------------------
+    def _encode_point_descriptors(
+        self,
+        pos: torch.Tensor,
+        precomputed_geom=None,
+    ) -> torch.Tensor:
+        """Encode point cloud → per-point invariant descriptors (N, D)."""
+        N = pos.shape[0]
+        sc = self._scalar_sig
+        vc = self._vector_sig
+
+        f0_parts = [pos.norm(dim=-1, keepdim=True),
+                    torch.ones(N, 1, device=pos.device)]
+        f0 = torch.cat(f0_parts, dim=-1).unsqueeze(-1)
+
+        pos_norm = pos.norm(dim=-1, keepdim=True)
+        pos_safe = pos / pos_norm.where(pos_norm > 0, torch.ones_like(pos_norm))
+        f1 = pos_safe.unsqueeze(1)
+        feats: FeatureDict = {sc: f0, vc: f1}
+
+        if precomputed_geom is not None:
+            rbf, gt_edge, nbr_idx = precomputed_geom
+            use_sparse = True
+        else:
+            use_sparse = (self.k_neighbors is not None and self.k_neighbors < N - 1)
+            if use_sparse:
+                rbf, gt_edge, nbr_idx = knn_geometry(
+                    pos, self.rbf, self.gt_basis, self.k_neighbors)
+            else:
+                rbf, gt_edge, mask = pairwise_geometry(
+                    pos, self.rbf, self.gt_basis)
+
+        for i, layer in enumerate(self.mp_layers):
+            if use_sparse:
+                feats = layer(feats, rbf, gt_edge, nbr_idx, sparse=True)
+            else:
+                feats = layer(feats, rbf, gt_edge, mask, sparse=False)
+            feats = self.mix_layers[i](feats)
+
+        parts = []
+        for sig in self.gt_basis.signatures:
+            if sig not in feats:
+                parts.append(torch.zeros(N, feats[sc].shape[1], device=pos.device))
+                continue
+            f = feats[sig]
+            if sig == sc:
+                parts.append(f.squeeze(-1))
+            else:
+                parts.append(f.norm(dim=-1))
+        return torch.cat(parts, dim=-1)  # (N, D)
+
+    # ------------------------------------------------------------------
+    def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
+        """Forward pass: encode + temporal transformer + classifier."""
+        descs_list = []
+        for pc in batch:
+            point_desc = self._encode_point_descriptors(pc)
+            global_desc = point_desc.sum(dim=0, keepdim=True)  # (1, D)
+
+            # Temporal transformer over point dimension
+            N = point_desc.shape[0]
+            pe = self.pos_encoder[:, :N, :]
+            temporal_input = point_desc.unsqueeze(0) + pe  # (1, N, D)
+            temporal_out = self.transformer_encoder(temporal_input)
+            temporal_desc = temporal_out.mean(dim=1)       # (1, D)
+
+            combined = torch.cat([global_desc, temporal_desc], dim=-1)
+            descs_list.append(self.rho(combined))
+        return torch.cat(descs_list, dim=0)
+
+    # ------------------------------------------------------------------
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
+        return self
+
+    def cuda(self, device=None):
+        super().cuda(device)
+        return self
+
+    def cpu(self):
+        super().cpu()
+        return self
+
+
+# ============================================================================
 # EquivariantSetTransformer  —  encoder-decoder with cross-attention
 # ============================================================================
 
