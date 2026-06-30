@@ -861,6 +861,21 @@ class OnEquivariantTensorFieldNetwork(nn.Module):
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
         return self._inner(batch)
 
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
+        self._inner.to(*args, **kwargs)
+        return self
+
+    def cuda(self, device=None):
+        super().cuda(device)
+        self._inner.cuda(device)
+        return self
+
+    def cpu(self):
+        super().cpu()
+        self._inner.cpu()
+        return self
+
 
 # ---------------------------------------------------------------------------
 # New TFN-derived model wrappers

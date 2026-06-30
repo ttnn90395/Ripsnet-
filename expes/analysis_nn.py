@@ -315,13 +315,18 @@ def _infer_tfn_architecture(model_state):
     """
     Infer TFN architecture parameters directly from saved state dict shapes.
 
-    Fix: classifier_dims now filters to only real nn.Linear layers by checking
-    that the weight tensor is 2-D (LayerNorm weights are 1-D and were previously
-    being incorrectly counted, causing doubled classifier_dims like [64,64,32,32]
-    instead of [64,32]).
+    Detects the correct state-dict prefix for nested wrappers:
+      OnEquivariantTFN → '_inner.base._inner.'
+      TensorFieldNetwork / GT wrappers → '_inner.'
+      Raw GT models → ''
     """
     keys = set(model_state.keys())
-    prefix = '_inner.' if any(k.startswith('_inner.') for k in keys) else ''
+    # Try most-nested prefix first, fall back to simpler ones
+    prefix = ''
+    for candidate in ('_inner.base._inner.', '_inner.', ''):
+        if any(k.startswith(candidate) for k in keys):
+            prefix = candidate
+            break
 
     info = {}
 
@@ -444,6 +449,9 @@ def precompute_geometry_batched(model_pv, class_name, data_list):
     except AttributeError:
         return None
 
+    # Ensure GT basis tensors are on the same device as the model
+    _move_basis_tensors(inner, next(inner.parameters()).device)
+
     is_hier = hasattr(inner, 'precompute_hierarchical_geometry')
 
     rbfs, gt_edges, nbr_idxs = [], [], []
@@ -498,6 +506,8 @@ def tfn_batched_forward(model, data_list, geom_cache, batch_size=64):
     """
     inner       = getattr(model, '_inner', model)
     inner_device = next(inner.parameters()).device
+    # GT basis tensors may not have been moved by .to() — fix here
+    _move_basis_tensors(inner, inner_device)
     results = []
 
     is_batched_geom = (
@@ -508,8 +518,8 @@ def tfn_batched_forward(model, data_list, geom_cache, batch_size=64):
         """Return per-sample hierarchical stage geometry if cached."""
         if not has_hier:
             return None
-        sg = geom_cache['hier'][i]
-        return {k: v.to(inner_device) for k, v in sg.items()}
+        sg_list = geom_cache['hier'][i]
+        return [{k: v.to(inner_device) for k, v in sg.items()} for sg in sg_list]
 
     with torch.inference_mode():
         for start in range(0, len(data_list), batch_size):
@@ -871,7 +881,7 @@ def load_and_eval(model_name, use_gs=False):
         ckpt_norm = 'bn' if _has_bn else 'none'
 
     print(f'  arch: activation={ckpt_activation}  norm={ckpt_norm}  ' +
-          ('(legacy ReLU checkpoint)' if not _has_bn else '(new GELU checkpoint)'))
+          ('(saved metadata)' if ckpt_activation else '(inferred from weights)'))
 
     _state_keys    = set(model_state.keys())
     _is_old_tfn    = any(k.startswith('layers.') and '.W0' in k for k in _state_keys)
