@@ -176,6 +176,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
     if name == 'TensorFieldNetwork':
         return TensorFieldNetwork(
             num_classes=output_dim,
+            max_order=extra.get('max_order', 0),
             hidden_channels=hidden_channels or 64,
             num_layers=num_layers or 6,
             num_rbf=num_rbf or 64,
@@ -187,6 +188,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
         return GTTensorFieldNetwork(
             n=n_dim,
             num_classes=output_dim,
+            max_order=extra.get('max_order', 0),
             hidden_channels=hidden_channels or 64,
             num_layers=num_layers or 6,
             num_rbf=num_rbf or 64,
@@ -199,6 +201,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
         return GTTensorFieldNetworkV2(
             n=n_dim,
             num_classes=output_dim,
+            max_order=extra.get('max_order', 0),
             hidden_channels=hidden_channels or 64,
             num_layers=num_layers or 6,
             num_rbf=num_rbf or 64,
@@ -211,6 +214,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
         return HierarchicalGTTFN(
             n=n_dim,
             num_classes=output_dim,
+            max_order=extra.get('max_order', 0),
             hidden_channels=hidden_channels or 64,
             stage_sizes=extra.get('stage_sizes', [256, 64]),
             stage_radii=extra.get('stage_radii', [0.2, 0.4]),
@@ -225,6 +229,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
     if name == 'HierarchicalTensorFieldNetwork':
         return HierarchicalTensorFieldNetwork(
             num_classes=output_dim,
+            max_order=extra.get('max_order', 0),
             hidden_channels=hidden_channels or 64,
             stage_sizes=extra.get('stage_sizes', [256, 64]),
             stage_radii=extra.get('stage_radii', [0.2, 0.4]),
@@ -379,6 +384,15 @@ def _infer_tfn_architecture(model_state):
         info['classifier_dims'] = [
             model_state[k].shape[0] for k in hidden_linear_keys
         ]
+
+    # ── max_order: infer from inv_dim vs hidden_channels ──────────────────
+    hc = info.get('hidden_channels')
+    if hc is not None and len(rho_linear_keys) >= 1:
+        inv_dim = model_state[rho_linear_keys[0]].shape[1]
+        # For GT-based TFN: inv_dim = hc * len(signatures)
+        # max_order=0 → only scalar sig → inv_dim = hc
+        # max_order=1 → scalar + vector sig → inv_dim = hc * 2
+        info['max_order'] = 0 if inv_dim == hc else 1
 
     return info
 
@@ -839,7 +853,9 @@ def load_and_eval(model_name, use_gs=False):
         ckpt_sigma      = checkpoint.get('gs_sigma', GS_SIGMA)
         ckpt_activation = checkpoint.get('activation', None)
         ckpt_norm       = checkpoint.get('norm', None)
+        ckpt_max_order  = checkpoint.get('max_order')
     else:
+        ckpt_max_order = None
         model_state     = checkpoint
         output_dim      = None
         ckpt_type       = model_name
@@ -895,6 +911,9 @@ def load_and_eval(model_name, use_gs=False):
                       'AttentionTensorFieldNetwork',
                       'StochasticTensorFieldNetwork']:
         tfn_extra = _infer_tfn_architecture(model_state)
+        # Prefer saved metadata over inference (more reliable)
+        if ckpt_max_order is not None:
+            tfn_extra['max_order'] = ckpt_max_order
         print(f'  inferred arch: {tfn_extra}')
 
     try:
