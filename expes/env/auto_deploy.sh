@@ -18,7 +18,7 @@
 set -euo pipefail
 
 REPO_DIR="/hs/work0/home/users/${USER}/exp/ripsnet/Ripsnet-"
-SLURM_SCRIPT="${REPO_DIR}/expes/env/run_ucr_split.slurm"
+SLURM_SCRIPT="${REPO_DIR}/expes/env/run_ucr_fast.slurm"
 LOG_DIR="${REPO_DIR}/expes/env/logs"
 DEPLOY_LOG="${LOG_DIR}/auto_deploy.log"
 
