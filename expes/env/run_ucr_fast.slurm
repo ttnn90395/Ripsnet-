@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=ripsnet-ucr
-#SBATCH --partition=qc-gh200,qc-mi250
+#SBATCH --partition=qc-gh200
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
