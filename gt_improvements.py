@@ -1090,8 +1090,9 @@ class TemporalCrossAttentionTFN(nn.Module):
         self.inv_dim = hidden_channels * len(all_sigs)
 
         # Temporal transformer encoder over point descriptors
-        self.pos_encoder = nn.Parameter(torch.zeros(1, 500, self.inv_dim))
+        self.pos_encoder = nn.Parameter(torch.zeros(1, 1500, self.inv_dim))
         nn.init.normal_(self.pos_encoder, std=0.02)
+        self.pre_norm = nn.LayerNorm(self.inv_dim)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=self.inv_dim, nhead=num_heads,
             dim_feedforward=self.inv_dim * 2,
@@ -1173,10 +1174,15 @@ class TemporalCrossAttentionTFN(nn.Module):
             point_desc = self._encode_point_descriptors(pc)
             global_desc = point_desc.sum(dim=0, keepdim=True)  # (1, D)
 
-            # Temporal transformer over point dimension
+            # Temporal transformer over point dimension (with pre-norm)
             N = point_desc.shape[0]
-            pe = self.pos_encoder[:, :N, :]
+            max_pos = self.pos_encoder.shape[1]
+            if N <= max_pos:
+                pe = self.pos_encoder[:, :N, :]
+            else:
+                pe = self.pos_encoder[:, [min(i, max_pos - 1) for i in range(N)], :]
             temporal_input = point_desc.unsqueeze(0) + pe  # (1, N, D)
+            temporal_input = self.pre_norm(temporal_input)
             temporal_out = self.transformer_encoder(temporal_input)
             temporal_desc = temporal_out.mean(dim=1)       # (1, D)
 

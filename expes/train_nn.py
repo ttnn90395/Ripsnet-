@@ -1036,8 +1036,8 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
 
     # TFN custom ops (einsum, CG tensor products) can overflow FP16 under AMP.
     # Disable AMP for TFN models; other models benefit from FP16 speedup.
-    use_amp = device.type == 'cuda' and mname not in TFN_MODELS \
-              and mname not in ('ScalarDistanceDeepSet',)
+    _no_amp = TFN_MODELS | {'CrossAttentionTensorFieldNetwork', 'ScalarDistanceDeepSet'}
+    use_amp = device.type == 'cuda' and mname not in _no_amp
     for epoch in tqdm(range(num_epochs), desc=f"Epochs ({label})"):
         tr_loss  = train_epoch(
             m, train_data, targets_train, optimizer, criterion, mname,
