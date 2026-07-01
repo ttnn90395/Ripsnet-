@@ -56,7 +56,7 @@ TFN_MODELS = {
     'GTTensorFieldNetworkV2', 'HierarchicalGTTFN',
     'HierarchicalTensorFieldNetwork', 'OnEquivariantTensorFieldNetwork',
     'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
-    'CrossAttentionTensorFieldNetwork',
+    # CrossAttentionTensorFieldNetwork uses its own forward (no _encode_single)
 }
 
 # -------------------------------------------------------------------------

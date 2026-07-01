@@ -50,7 +50,7 @@ TFN_MODELS = {
     'GTTensorFieldNetworkV2', 'HierarchicalGTTFN',
     'HierarchicalTensorFieldNetwork', 'OnEquivariantTensorFieldNetwork',
     'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
-    'CrossAttentionTensorFieldNetwork',
+    # CrossAttentionTensorFieldNetwork uses its own forward (no _encode_single)
 }
 
 os.makedirs('models', exist_ok=True)
@@ -247,6 +247,9 @@ def precompute_geometry(model, data_list, mname, tag=''):
         gt_basis = inner.gt_basis
         k        = inner.k_neighbors
     except AttributeError:
+        return None
+    # Skip geometry caching for models that can't use precomputed geometry
+    if not hasattr(inner, '_encode_single'):
         return None
 
     is_hier = hasattr(inner, 'precompute_hierarchical_geometry')
@@ -645,6 +648,7 @@ def forward_single(model, x, mname, geom=None):
         'DistanceMatrixRaggedModel', 'ScalarDistanceDeepSet',
         'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel',
         'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
+        'CrossAttentionTensorFieldNetwork',
     ]:
         return model([x])
     return model(x.unsqueeze(0))
