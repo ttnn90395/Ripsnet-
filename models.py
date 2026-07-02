@@ -714,6 +714,13 @@ def _load_gt_improvements():
         StochasticEquivariantTFN as _StochasticEquivariantTFNBase,
         EquivariantGraphMambaNetwork as _EquivariantGraphMambaBase,
         TemporalCrossAttentionTFN as _TemporalCrossAttentionTFNBase,
+        RelaxedEquivariantTFN as _RelaxedEquivariantTFNBase,
+        RelaxedOnEquivariantTensorFieldNetwork as _RelaxedOnEquivariantTFNBase,
+        HybridTFNClassifier as _HybridTFNClassifierBase,
+        HybridOnEquivariantTensorFieldNetwork as _HybridOnEquivariantTFNBase,
+        EndToEndClassifier as _EndToEndClassifierBase,
+        EndToEndTensorFieldNetwork as _EndToEndTFNBase,
+        build_enhanced_pointcloud,
     )
 
     class HierarchicalGTTFN(_HierarchicalGTTFNBase):
@@ -765,16 +772,70 @@ def _load_gt_improvements():
                 _move_basis_tensors(self, batch[0].device)
             return _TemporalCrossAttentionTFNBase.forward(self, batch)
 
+    class RelaxedEquivariantTFN(_RelaxedEquivariantTFNBase):
+        """Relaxed O(3) TFN, device-aware."""
+        def forward(self, batch, **kwargs):
+            if batch:
+                base = self.base
+                inner = getattr(base, '_inner', base)
+                _move_basis_tensors(inner, batch[0].device)
+            return _RelaxedEquivariantTFNBase.forward(self, batch, **kwargs)
+
+    class RelaxedOnEquivariantTensorFieldNetwork(_RelaxedOnEquivariantTFNBase):
+        """Relaxed O(3) TFN wrapper, device-aware."""
+        def forward(self, batch):
+            if batch:
+                _move_basis_tensors(self._inner, batch[0].device)
+            return _RelaxedOnEquivariantTFNBase.forward(self, batch)
+
+    class HybridTFNClassifier(_HybridTFNClassifierBase):
+        """Hybrid TFN + non-equivariant classifier, device-aware."""
+        def forward(self, batch):
+            if batch:
+                inner = getattr(self.tfn_backbone, '_inner', self.tfn_backbone)
+                _move_basis_tensors(inner, batch[0].device)
+            return _HybridTFNClassifierBase.forward(self, batch)
+
+    class HybridOnEquivariantTensorFieldNetwork(_HybridOnEquivariantTFNBase):
+        """Hybrid O(3) TFN wrapper, device-aware."""
+        def forward(self, batch):
+            if batch:
+                _move_basis_tensors(self._inner, batch[0].device)
+            return _HybridOnEquivariantTFNBase.forward(self, batch)
+
+    class EndToEndClassifier(_EndToEndClassifierBase):
+        """End-to-end classifier wrapper, device-aware."""
+        def forward(self, batch):
+            if batch:
+                inner = getattr(self.tfn_backbone, '_inner', self.tfn_backbone)
+                _move_basis_tensors(inner, batch[0].device)
+            return _EndToEndClassifierBase.forward(self, batch)
+
+    class EndToEndTensorFieldNetwork(_EndToEndTFNBase):
+        """End-to-end TFN classifier, device-aware."""
+        def forward(self, batch):
+            if batch:
+                _move_basis_tensors(self._inner, batch[0].device)
+            return _EndToEndTFNBase.forward(self, batch)
+
     return (HierarchicalGTTFN, _OnEquivariantWrapperBase, GTTFNEncoder,
             GTTensorFieldNetworkWithAttention, EquivariantSetTransformer,
             StochasticEquivariantTFN, EquivariantGraphMambaNetwork,
-            TemporalCrossAttentionTFN)
+            TemporalCrossAttentionTFN,
+            RelaxedEquivariantTFN, RelaxedOnEquivariantTensorFieldNetwork,
+            HybridTFNClassifier, HybridOnEquivariantTensorFieldNetwork,
+            EndToEndClassifier, EndToEndTensorFieldNetwork,
+            build_enhanced_pointcloud)
 
 
 (HierarchicalGTTFN, OnEquivariantWrapper, GTTFNEncoder,
  GTTensorFieldNetworkWithAttention, EquivariantSetTransformer,
  StochasticEquivariantTFN, EquivariantGraphMambaNetwork,
- TemporalCrossAttentionTFN) = _load_gt_improvements()
+ TemporalCrossAttentionTFN,
+ RelaxedEquivariantTFN, RelaxedOnEquivariantTensorFieldNetwork,
+ HybridTFNClassifier, HybridOnEquivariantTensorFieldNetwork,
+ EndToEndClassifier, EndToEndTensorFieldNetwork,
+ build_enhanced_pointcloud) = _load_gt_improvements()
 
 
 class HierarchicalTensorFieldNetwork(nn.Module):
@@ -1177,6 +1238,14 @@ __all__ = [
     'GraphMambaTensorFieldNetwork',
     'TemporalCrossAttentionTFN',
     'CrossAttentionTensorFieldNetwork',
+    # Improvement models
+    'RelaxedEquivariantTFN',
+    'RelaxedOnEquivariantTensorFieldNetwork',
+    'HybridTFNClassifier',
+    'HybridOnEquivariantTensorFieldNetwork',
+    'EndToEndClassifier',
+    'EndToEndTensorFieldNetwork',
+    'build_enhanced_pointcloud',
     # Notebook / ragged models
     'ScalarDistanceDeepSet',
     'PointNetTutorial',

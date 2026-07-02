@@ -17,6 +17,7 @@ These are designed to be composable:
 from __future__ import annotations
 import math
 from typing import Dict, List, Tuple, Optional
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -1857,3 +1858,499 @@ class EquivariantGraphMambaNetwork(nn.Module):
             descs.append(self._encode_single(pc, precomputed_geom=g))
         return self.rho(torch.stack(descs))
 
+
+# ============================================================================
+# Improvement 1: Relaxed Equivariance — modular SO(3) → O(3) with parity skip
+# ============================================================================
+
+class RelaxedEquivariantTFN(nn.Module):
+    """
+    TFN with relaxed O(3) equivariance: adds learned skip connections between
+    irreps of the same order but opposite parity (vector ↔ pseudovector, etc.).
+
+    Architecture:
+      - Forward original point cloud → get original features.
+      - Forward reflected point cloud (flip first coordinate) → get reflected features.
+      - Learned linear mixing of same-order irreps between original and reflected
+        branches, parameterised per layer.
+      - Final prediction = 0.5 * (f(x) + f(reflect(x))) + skip.
+
+    This generalises OnEquivariantWrapper: instead of hard averaging, we learn
+    how much parity-breaking to allow at each irrep.
+    """
+
+    def __init__(self, base_model: nn.Module, n: int = 3, max_order: int = 1,
+                 skip_init: float = 0.01):
+        super().__init__()
+        self.base = base_model
+        self.n = n
+        self.max_order = max_order
+        from gt_basis import GTSignature
+        # Learnable skip per order: a scalar that mixes original ↔ reflected.
+        # For order L, signature has dim=d and parity p = (-1)^L.
+        # We store a single scalar per signature channel.
+        self.skip_scalars = nn.ParameterDict()
+        all_sigs = getattr(base_model, '_inner', base_model).gt_basis.signatures \
+            if hasattr(getattr(base_model, '_inner', base_model), 'gt_basis') \
+            else [GTSignature.scalar(n), GTSignature.vector(n)]
+        for sig in all_sigs:
+            # For SO(3), sig._lam = (l,) where l is the irrep order
+            # parity = (-1)^l
+            l = sig._lam[0] if sig._lam else 0
+            parity = 1 if l % 2 == 0 else -1
+            self.skip_scalars[f'sig_{l}_{parity}'] = nn.Parameter(
+                torch.full((1,), skip_init))
+
+    def _reflect(self, batch: List[torch.Tensor]) -> List[torch.Tensor]:
+        reflected = []
+        for pc in batch:
+            pc_r = pc.clone()
+            pc_r[..., 0] = -pc_r[..., 0]
+            reflected.append(pc_r)
+        return reflected
+
+    def forward(self, batch: List[torch.Tensor], **kwargs) -> torch.Tensor:
+        out_orig = self.base(batch, **kwargs)
+        out_refl = self.base(self._reflect(batch), **kwargs)
+        # Mixed prediction: average + learned skip mixing
+        avg = 0.5 * (out_orig + out_refl)
+        diff = 0.5 * (out_orig - out_refl)
+        # Apply learned per-order mixing
+        mix = diff * torch.stack([s.expand_as(diff) for s in self.skip_scalars.values()]).sum(dim=0).clamp(-1, 1)
+        return avg + mix
+
+
+class RelaxedOnEquivariantTensorFieldNetwork(nn.Module):
+    """
+    O(3)-TFN with relaxed parity constraint.
+    Wraps TensorFieldNetwork in RelaxedEquivariantTFN.
+    """
+
+    def __init__(
+        self,
+        num_classes: int,
+        max_order: int = 1,
+        hidden_channels: int = 32,
+        num_layers: int = 3,
+        num_rbf: int = 64,
+        cutoff: float = 1.0,
+        k_neighbors: int = 16,
+        classifier_dims: Optional[List[int]] = None,
+        skip_init: float = 0.01,
+    ):
+        super().__init__()
+        if classifier_dims is None:
+            classifier_dims = [64, 32]
+        from models import TensorFieldNetwork
+        base = TensorFieldNetwork(
+            num_classes=num_classes,
+            max_order=max_order,
+            hidden_channels=hidden_channels,
+            num_layers=num_layers,
+            num_rbf=num_rbf,
+            cutoff=cutoff,
+            k_neighbors=k_neighbors,
+            classifier_dims=classifier_dims,
+        )
+        self._inner = RelaxedEquivariantTFN(base, n=3, max_order=max_order,
+                                            skip_init=skip_init)
+
+    def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
+        return self._inner(batch)
+
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
+        self._inner.to(*args, **kwargs)
+        return self
+
+    def cuda(self, device=None):
+        super().cuda(device)
+        self._inner.cuda(device)
+        return self
+
+    def cpu(self):
+        super().cpu()
+        self._inner.cpu()
+        return self
+
+    @property
+    def rho(self):    return self._inner.base.rho
+    @property
+    def layers(self): return self._inner.base.layers
+    @property
+    def rbf(self):    return self._inner.base.rbf
+
+
+# ============================================================================
+# Improvement 2: Hybrid TFN + non-equivariant features
+# ============================================================================
+
+class HybridTFNClassifier(nn.Module):
+    """
+    Combines an equivariant TFN backbone with non-equivariant point features.
+
+    Architecture:
+      - TFN branch: processes point cloud into equivariant descriptor (invariant output).
+      - Non-equivariant branch: processes raw point coordinates via PointNet-style MLP.
+      - Fusion: concatenate both descriptors, pass through final MLP head.
+
+    Parameters
+    ----------
+    tfn_backbone  : TFN model (any model with rho attribute)
+    non_eq_dim    : non-equivariant feature dimension
+    fusion_dims   : MLP dims after concatenation
+    output_dim    : final output dimension
+    """
+
+    def __init__(
+        self,
+        tfn_backbone: nn.Module,
+        non_eq_dim: int = 128,
+        fusion_dims: Optional[List[int]] = None,
+        output_dim: int = 10,
+    ):
+        super().__init__()
+        self.tfn_backbone = tfn_backbone
+        if fusion_dims is None:
+            fusion_dims = [256, 128]
+
+        # Non-equivariant point-wise MLP (processes raw (N,3) coords)
+        in_dim = 3
+        neq_dims = [in_dim, 64, 128, non_eq_dim]
+        neq_layers = []
+        for i in range(len(neq_dims) - 1):
+            neq_layers.append(nn.Linear(neq_dims[i], neq_dims[i + 1]))
+            if i < len(neq_dims) - 2:
+                neq_layers.append(nn.GELU())
+                neq_layers.append(nn.LayerNorm(neq_dims[i + 1]))
+        self.neq_phi = nn.Sequential(*neq_layers)
+
+        # Determine equivariant descriptor dim from backbone's invariant features
+        tfn_inner = getattr(tfn_backbone, '_inner', tfn_backbone)
+        if hasattr(tfn_inner, '_encode_single'):
+            # Probe with a dummy input to get invariant feature dim
+            with torch.no_grad():
+                dummy = torch.zeros(1, 3)
+                d = tfn_inner._encode_single(dummy)
+                eq_dim = d.shape[-1]
+        else:
+            eq_dim = 128
+
+        # Fusion MLP
+        fusion_in = eq_dim + non_eq_dim
+        fusion_layers = []
+        fd = [fusion_in] + list(fusion_dims) + [output_dim]
+        for i in range(len(fd) - 1):
+            fusion_layers.append(nn.Linear(fd[i], fd[i + 1]))
+            if i < len(fd) - 2:
+                fusion_layers.append(nn.GELU())
+                fusion_layers.append(nn.LayerNorm(fd[i + 1]))
+        self.fusion = nn.Sequential(*fusion_layers)
+        self._eq_dim = eq_dim
+
+    def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
+        # TFN branch: get equivariant invariant descriptor (before rho)
+        inner = getattr(self.tfn_backbone, '_inner', self.tfn_backbone)
+        descs = []
+        for pc in batch:
+            if hasattr(inner, '_encode_single'):
+                d = inner._encode_single(pc)
+            else:
+                d = inner(pc.unsqueeze(0))[0]
+            descs.append(d)
+        # Stack invariant descriptors (before rho projection)
+        eq_feats = torch.stack(descs)  # (B, inv_dim)
+
+        # Non-equivariant branch: per-point MLP → max-pool
+        neq_feats = []
+        for pc in batch:
+            raw = pc[:, :3] if pc.shape[1] >= 3 else pc
+            h = self.neq_phi(raw)
+            h = h.max(dim=0).values
+            neq_feats.append(h)
+        neq_feats = torch.stack(neq_feats)
+
+        # Fusion
+        combined = torch.cat([eq_feats, neq_feats], dim=1)
+        return self.fusion(combined)
+
+
+class HybridOnEquivariantTensorFieldNetwork(nn.Module):
+    """
+    Hybrid TFN classifier built on top of OnEquivariantTensorFieldNetwork.
+    """
+
+    def __init__(
+        self,
+        num_classes: int,
+        max_order: int = 1,
+        hidden_channels: int = 32,
+        num_layers: int = 3,
+        num_rbf: int = 64,
+        cutoff: float = 1.0,
+        k_neighbors: int = 16,
+        classifier_dims: Optional[List[int]] = None,
+        non_eq_dim: int = 128,
+        fusion_dims: Optional[List[int]] = None,
+    ):
+        super().__init__()
+        if classifier_dims is None:
+            classifier_dims = [64, 32]
+        if fusion_dims is None:
+            fusion_dims = [256, 128]
+        from models import TensorFieldNetwork
+        base = TensorFieldNetwork(
+            num_classes=num_classes,
+            max_order=max_order,
+            hidden_channels=hidden_channels,
+            num_layers=num_layers,
+            num_rbf=num_rbf,
+            cutoff=cutoff,
+            k_neighbors=k_neighbors,
+            classifier_dims=classifier_dims,
+        )
+        self._inner = HybridTFNClassifier(base, non_eq_dim=non_eq_dim,
+                                          fusion_dims=fusion_dims,
+                                          output_dim=num_classes)
+
+    def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
+        return self._inner(batch)
+
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
+        self._inner.to(*args, **kwargs)
+        return self
+
+    def cuda(self, device=None):
+        super().cuda(device)
+        self._inner.cuda(device)
+        return self
+
+    def cpu(self):
+        super().cpu()
+        self._inner.cpu()
+        return self
+
+
+# ============================================================================
+# Improvement 4: Enhanced time-series → point cloud representations
+# ============================================================================
+
+def sliding_window_pc(ts: np.ndarray, window: int = 10, stride: int = 1) -> np.ndarray:
+    """
+    Convert 1-D time series to 2-D point cloud via sliding window.
+
+    Each window becomes a point in R^2 (t_start, value).  Window width
+    creates multiple points per time step, giving the TFN more context.
+
+    Parameters
+    ----------
+    ts     : (T,) time series
+    window : window width
+    stride : stride between windows
+
+    Returns
+    -------
+    pc : (N, 2) point cloud
+    """
+    T = len(ts)
+    points = []
+    for start in range(0, T - window + 1, stride):
+        segment = ts[start:start + window]
+        points.append([start + window / 2, segment.mean()])
+    return np.array(points)
+
+
+def derivative_pc(ts: np.ndarray, order: int = 1) -> np.ndarray:
+    """
+    Augment point cloud with derivative features.
+
+    Takes (T, 1) time series and appends finite-difference derivatives
+    as extra coordinates: (t, value, dvalue/dt, ...).
+
+    Parameters
+    ----------
+    ts    : (T,) or (T, 1) time series
+    order : derivative order (1 or 2)
+
+    Returns
+    -------
+    pc : (T, 1 + order) point cloud
+    """
+    ts = ts.flatten()
+    cols = [ts]
+    for o in range(1, order + 1):
+        deriv = np.diff(ts, n=o, prepend=0, append=0)
+        if len(deriv) > len(ts):
+            deriv = deriv[:len(ts)]
+        elif len(deriv) < len(ts):
+            deriv = np.pad(deriv, (0, len(ts) - len(deriv)), 'edge')[:len(ts)]
+        cols.append(deriv)
+    return np.column_stack(cols)
+
+
+def fourier_pc(ts: np.ndarray, n_coeffs: int = 10) -> np.ndarray:
+    """
+    Convert time series to point cloud using Fourier coefficients.
+
+    Each point = (frequency, magnitude) from the FFT spectrum.
+    Captures periodic structure that TFN equivariance respects.
+
+    Parameters
+    ----------
+    ts      : (T,) time series
+    n_coeffs : number of frequency bins to keep
+
+    Returns
+    -------
+    pc : (n_coeffs, 2) point cloud
+    """
+    ts = ts.flatten()
+    T = len(ts)
+    fft_vals = np.fft.rfft(ts)
+    freqs = np.fft.rfftfreq(T)
+    magnitudes = np.abs(fft_vals) / T
+    n = min(n_coeffs, len(magnitudes))
+    return np.column_stack([freqs[:n], magnitudes[:n]])
+
+
+def build_enhanced_pointcloud(ts_data: List[np.ndarray],
+                               method: str = 'raw',
+                               **kwargs) -> List[np.ndarray]:
+    """
+    Build a list of point clouds from raw time-series data using the
+    specified transformation method.
+
+    Parameters
+    ----------
+    ts_data : list of (T,) arrays or (T, d) arrays (time series)
+    method  : 'raw' (default), 'sliding_window', 'derivative', 'fourier'
+
+    Returns
+    -------
+    pcs : list of (N, d') arrays
+    """
+    if method == 'raw':
+        return ts_data
+    if method == 'sliding_window':
+        w = kwargs.get('window', 10)
+        s = kwargs.get('stride', 1)
+        return [sliding_window_pc(t, w, s) for t in ts_data]
+    if method == 'derivative':
+        o = kwargs.get('order', 1)
+        return [derivative_pc(t, o) for t in ts_data]
+    if method == 'fourier':
+        n = kwargs.get('n_coeffs', 10)
+        return [fourier_pc(t, n) for t in ts_data]
+    raise ValueError(f"Unknown point cloud method: {method}")
+
+
+# ============================================================================
+# Improvement 3: End-to-end classification head wrapper
+# ============================================================================
+
+class EndToEndClassifier(nn.Module):
+    """
+    Wraps a TFN PV-predictor model with a classification head for direct
+    end-to-end training with cross-entropy loss.
+
+    The wrapped model predicts PV vectors as before, but the output is then
+    fed into a learnable classifier MLP that maps PV → class logits.
+
+    Parameters
+    ----------
+    tfn_backbone : TFN model (predicts PV vectors)
+    num_classes  : number of output classes
+    classifier_dims : hidden dims of the classifier MLP
+    """
+
+    def __init__(
+        self,
+        tfn_backbone: nn.Module,
+        num_classes: int,
+        classifier_dims: Optional[List[int]] = None,
+    ):
+        super().__init__()
+        self.tfn_backbone = tfn_backbone
+        if classifier_dims is None:
+            classifier_dims = [128, 64]
+
+        # Determine output dim of backbone
+        tfn_inner = getattr(tfn_backbone, '_inner', tfn_backbone)
+        if hasattr(tfn_inner, 'rho') and isinstance(tfn_inner.rho, nn.Sequential):
+            last_linear = None
+            for m in tfn_inner.rho.modules():
+                if isinstance(m, nn.Linear):
+                    last_linear = m
+            pv_dim = last_linear.out_features if last_linear else 128
+        else:
+            pv_dim = 128
+
+        self.classifier = nn.Sequential(
+            nn.Linear(pv_dim, classifier_dims[0]), nn.GELU(), nn.LayerNorm(classifier_dims[0]),
+            *[layer for d_in, d_out in zip(classifier_dims[:-1], classifier_dims[1:])
+              for layer in (nn.Linear(d_in, d_out), nn.GELU(), nn.LayerNorm(d_out))],
+            nn.Linear(classifier_dims[-1], num_classes),
+        )
+
+    def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
+        # Get PV predictions from backbone
+        pv_out = self.tfn_backbone(batch)
+        # Classify
+        return self.classifier(pv_out)
+
+
+class EndToEndTensorFieldNetwork(nn.Module):
+    """
+    End-to-end classification TFN: TensorFieldNetwork + a classification head
+    on top of the PV-predictor output.
+
+    Trained with cross-entropy loss directly on class labels.
+    """
+
+    def __init__(
+        self,
+        num_classes: int,
+        num_pv_classes: int = 10,
+        max_order: int = 1,
+        hidden_channels: int = 32,
+        num_layers: int = 3,
+        num_rbf: int = 64,
+        cutoff: float = 1.0,
+        k_neighbors: int = 16,
+        classifier_dims: Optional[List[int]] = None,
+    ):
+        super().__init__()
+        if classifier_dims is None:
+            classifier_dims = [64, 32]
+        from models import TensorFieldNetwork
+        base = TensorFieldNetwork(
+            num_classes=num_pv_classes,
+            max_order=max_order,
+            hidden_channels=hidden_channels,
+            num_layers=num_layers,
+            num_rbf=num_rbf,
+            cutoff=cutoff,
+            k_neighbors=k_neighbors,
+            classifier_dims=classifier_dims,
+        )
+        self._inner = EndToEndClassifier(base, num_classes=num_classes,
+                                         classifier_dims=[128, 64])
+
+    def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
+        return self._inner(batch)
+
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
+        self._inner.to(*args, **kwargs)
+        return self
+
+    def cuda(self, device=None):
+        super().cuda(device)
+        self._inner.cuda(device)
+        return self
+
+    def cpu(self):
+        super().cpu()
+        self._inner.cpu()
+        return self

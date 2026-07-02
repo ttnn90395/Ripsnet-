@@ -28,6 +28,9 @@ from models import (
     DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,
     AttentionTensorFieldNetwork, StochasticTensorFieldNetwork,
     CrossAttentionTensorFieldNetwork,
+    RelaxedOnEquivariantTensorFieldNetwork,
+    HybridOnEquivariantTensorFieldNetwork,
+    EndToEndTensorFieldNetwork,
     _move_basis_tensors,
 )
 
@@ -39,6 +42,9 @@ MODEL_NAMES = [
     'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
     'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
     'CrossAttentionTensorFieldNetwork',
+    'RelaxedOnEquivariantTensorFieldNetwork',
+    'HybridOnEquivariantTensorFieldNetwork',
+    # EndToEndTensorFieldNetwork excluded from default pipeline (needs classification workflow)
     # FIXME: GraphMambaTensorFieldNetwork has a selective-scan bug in the
     # GTMambaLayer (msg tensor lacks k-neighbor dim for per-step iteration).
     # Removed from training until the scan logic is rewritten.
@@ -50,7 +56,9 @@ TFN_MODELS = {
     'GTTensorFieldNetworkV2', 'HierarchicalGTTFN',
     'HierarchicalTensorFieldNetwork', 'OnEquivariantTensorFieldNetwork',
     'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
+    'RelaxedOnEquivariantTensorFieldNetwork',
     # CrossAttentionTensorFieldNetwork uses its own forward (no _encode_single)
+    # HybridOnEquivariantTensorFieldNetwork uses custom forward
 }
 
 os.makedirs('models', exist_ok=True)
@@ -147,7 +155,7 @@ PVs_test_torch  = [torch.FloatTensor(PVs_test[hidx]).to(device)  for hidx in ran
 # Gaussian smoothing  (Fix 4: batched vectorised kernel)
 # -------------------------------------------------------------------------
 
-GS_SIGMA = 0.01
+GS_SIGMA = 0.5
 
 def gaussian_smooth_batch(data_list: list, sigma: float = GS_SIGMA) -> list:
     """Vectorised GS: single (B,N,d) tensor when shapes are uniform."""
@@ -425,12 +433,259 @@ def augment_point_cloud(pc, sigma=0.02, clip=0.1):
     return pc
 
 
+# -------------------------------------------------------------------------
+# Improvement 8: Equivariance-tuned augmentation
+# -------------------------------------------------------------------------
+
+def _diffeomorphic_warp_1d(values: torch.Tensor, sigma: float = 0.05) -> torch.Tensor:
+    """
+    Smooth diffeomorphic warp of a 1-D time series via random velocity field.
+
+    Parameters
+    ----------
+    values : (T,) tensor of values
+    sigma  : std of velocity field
+
+    Returns
+    -------
+    warped : (T,) tensor
+    """
+    T = len(values)
+    device = values.device
+    # Random velocity field (low-pass filtered for smoothness)
+    vel = torch.randn(T, device=device) * sigma
+    # Simple moving average for smoothness
+    kernel = torch.tensor([0.25, 0.5, 0.25], device=device)
+    vel = torch.conv1d(vel.view(1, 1, T), kernel.view(1, 1, 3), padding=1).view(T)
+    # Integrate to get warped time grid
+    t = torch.arange(T, device=device, dtype=torch.float32)
+    warp = t + vel
+    # Interpolate values to warped grid
+    t = t / (T - 1) * 2 - 1  # normalize to [-1, 1]
+    warp = warp / (T - 1) * 2 - 1
+    warp = warp.clamp(-1, 1)
+    grid = warp.view(1, 1, T)
+    warped = F.grid_sample(
+        values.view(1, 1, T).unsqueeze(-1),
+        grid.view(1, 1, T, 1),
+        mode='bilinear', align_corners=True
+    ).view(T)
+    return warped
+
+
+def diffeomorphic_warp_augment(pc: torch.Tensor, sigma: float = 0.05) -> torch.Tensor:
+    """
+    Apply smooth diffeomorphic warp to the value coordinate of a 2D point cloud.
+
+    The time (x) axis stays fixed; the value (y) axis undergoes a smooth
+    diffeomorphic warp.
+
+    Parameters
+    ----------
+    pc    : (N, 2) point cloud (time, value)
+    sigma : warp strength
+
+    Returns
+    -------
+    pc_warped : (N, 2)
+    """
+    if pc.ndim != 2 or pc.shape[1] != 2:
+        return pc
+    values = _diffeomorphic_warp_1d(pc[:, 1], sigma=sigma)
+    out = pc.clone()
+    out[:, 1] = values
+    return out
+
+
+def phase_shift_augment(pc: torch.Tensor, max_shift: float = 0.1) -> torch.Tensor:
+    """
+    Random circular phase shift of the value coordinate.
+
+    Parameters
+    ----------
+    pc        : (N, 2) point cloud
+    max_shift : fraction of length to shift
+
+    Returns
+    -------
+    pc_shifted : (N, 2)
+    """
+    if pc.ndim != 2 or pc.shape[1] != 2:
+        return pc
+    N = pc.shape[0]
+    shift = int(N * max_shift * torch.rand(1).item())
+    if shift == 0:
+        return pc
+    out = pc.clone()
+    out[:, 1] = torch.roll(out[:, 1], shifts=shift)
+    return out
+
+
+def smart_augment_point_cloud(pc, sigma=0.02, clip=0.1, use_diffeo=False):
+    """
+    Augment a point cloud with the best available strategy.
+
+    For 2D (time-series) data: applies diffeomorphic warp + phase shift +
+    standard augment.  For 3D data: random rotation + scaling + jitter.
+    """
+    if pc.ndim != 2 or pc.shape[1] not in (2, 3):
+        return pc
+    n, d = pc.shape
+    if d == 2:
+        if use_diffeo and torch.rand(1).item() < 0.5:
+            pc = diffeomorphic_warp_augment(pc, sigma=sigma * 2.5)
+        if torch.rand(1).item() < 0.3:
+            pc = phase_shift_augment(pc, max_shift=0.1)
+        return augment_point_cloud(pc, sigma=sigma, clip=clip)
+    else:
+        return augment_point_cloud(pc, sigma=sigma, clip=clip)
+
+
+# -------------------------------------------------------------------------
+# Improvement 4: Build enhanced point clouds from time-series data
+# -------------------------------------------------------------------------
+
+def build_enhanced_pointcloud_data(data_list, method='raw', **kwargs):
+    """
+    Transform raw time-series data into enhanced point clouds.
+
+    Wraps gt_improvements.build_enhanced_pointcloud for numpy arrays.
+    """
+    import numpy as np
+    from models import build_enhanced_pointcloud as _build_pc
+    # Convert tensors to numpy if needed
+    np_data = []
+    for x in data_list:
+        arr = x.cpu().numpy() if isinstance(x, torch.Tensor) else np.asarray(x)
+        np_data.append(arr)
+    np_out = _build_pc(np_data, method=method, **kwargs)
+    # Convert back to tensors on the correct device
+    out = []
+    for arr in np_out:
+        t = torch.FloatTensor(arr)
+        if data_list and hasattr(data_list[0], 'device'):
+            t = t.to(data_list[0].device)
+        out.append(t)
+    return out
+
+
+# -------------------------------------------------------------------------
+# Improvement 6: Architecture search
+# -------------------------------------------------------------------------
+
+ARCHITECTURE_SEARCH = {
+    'max_order':     [0, 1, 2],
+    'hidden_channels': [8, 16, 32],
+    'num_layers':    [2, 3, 4],
+    'num_rbf':       [32, 64, 128],
+    'k_neighbors':   [8, 16, 32],
+    'lr':            [1e-3, 5e-3, 1e-2],
+}
+
+def sweep_architecture(mname, dataset_name,
+                       n_trials: int = 10,
+                       val_split: float = 0.2) -> dict:
+    """
+    Random search over ARCHITECTURE_SEARCH to find best hparams.
+
+    Trains `n_trials` random configurations, evaluates on validation split,
+    returns the best hyperparameter dict.
+
+    Parameters
+    ----------
+    mname        : model name (e.g. 'OnEquivariantTensorFieldNetwork')
+    dataset_name : dataset name
+    n_trials     : number of random trials
+    val_split    : fraction of training data for validation
+
+    Returns
+    -------
+    best_hparams : dict of best hyperparameters
+    """
+    import random
+    best_loss = float('inf')
+    best_hp = {}
+    n_train = len(data_train_torch)
+    n_val = max(1, int(n_train * val_split))
+    perm = torch.randperm(n_train)
+    train_idx = perm[n_val:]
+    val_idx = perm[:n_val]
+
+    for trial in range(n_trials):
+        hp = {}
+        for k, choices in ARCHITECTURE_SEARCH.items():
+            hp[k] = random.choice(choices)
+        hp['classifier_dims'] = [hp['hidden_channels'] * 2, hp['hidden_channels']]
+
+        print(f'\n  [ArchSearch trial {trial+1}/{n_trials}] {hp}')
+
+        # Build model
+        try:
+            m = deep_to(build_model_by_name(mname, n=dim, hparams=hp), device)
+        except Exception as e:
+            print(f'    SKIP (build failed): {e}')
+            continue
+
+        # Prepare data
+        train_data = [data_train_torch[i] for i in train_idx]
+        val_data   = [data_train_torch[i] for i in val_idx]
+        targets_train = torch.FloatTensor(flatten_pvs(
+            [[PVs_train[h][i] for i in train_idx] for h in range(len(homdim))])).to(device)
+        targets_val = torch.FloatTensor(flatten_pvs(
+            [[PVs_train[h][i] for i in val_idx] for h in range(len(homdim))])).to(device)
+
+        # Precompute geometry
+        geom_train = precompute_geometry(m, train_data, mname, tag='arch_train')
+        geom_val   = precompute_geometry(m, val_data,  mname, tag='arch_val')
+
+        # Optimize for a short number of epochs
+        opt = optim.Adam(m.parameters(), lr=hp.get('lr', 5e-3), weight_decay=1e-5)
+        criterion = nn.MSELoss()
+
+        for epoch in range(20):
+            m.train()
+            total = 0.0
+            for start in range(0, len(train_data), 32):
+                end = min(start + 32, len(train_data))
+                batch = train_data[start:end]
+                bgeom = _get_geom_batch(geom_train, list(range(start, end)))
+                opt.zero_grad()
+                out = forward_batch(m, batch, mname, geom_batch=bgeom)
+                loss = criterion(out, targets_train[start:end])
+                if torch.isfinite(loss):
+                    loss.backward()
+                    opt.step()
+                total += loss.item() * len(batch)
+
+        # Evaluate
+        m.eval()
+        with torch.no_grad():
+            out = forward_batch(m, val_data, mname, geom_batch=geom_val)
+            val_loss = criterion(out, targets_val).item()
+
+        print(f'    val_loss={val_loss:.5f}')
+        if val_loss < best_loss:
+            best_loss = val_loss
+            best_hp = hp
+
+    print(f'\n  Best hparams: {best_hp} (val_loss={best_loss:.5f})')
+    return best_hp
+
+
 def prepare_data_for_model(mname, data_list, use_gs=False,
-                           gs_sigma=GS_SIGMA, augment=False):
+                           gs_sigma=GS_SIGMA, augment=False,
+                           pc_method='raw', pc_kwargs=None):
     if augment:
-        data_list = [augment_point_cloud(x) for x in data_list]
+        if mname in TFN_MODELS or mname in ('RelaxedOnEquivariantTensorFieldNetwork',):
+            data_list = [smart_augment_point_cloud(x, use_diffeo=True) for x in data_list]
+        else:
+            data_list = [augment_point_cloud(x) for x in data_list]
     if use_gs:
         data_list = gaussian_smooth_batch(data_list, sigma=gs_sigma)
+    # Apply enhanced point cloud transform (if specified)
+    if pc_method != 'raw' and mname in TFN_MODELS:
+        data_list = build_enhanced_pointcloud_data(data_list, method=pc_method,
+                                                    **(pc_kwargs or {}))
 
     if mname == 'TensorFieldNetwork':
         return _pad_to_3d(data_list)
@@ -598,6 +853,44 @@ def build_model_by_name(name, n=None, hparams=None):
             radial_hidden=hp.get('radial_hidden', 64),
             dropout=hp.get('dropout', 0.1),
         )
+    if name == 'RelaxedOnEquivariantTensorFieldNetwork':
+        return RelaxedOnEquivariantTensorFieldNetwork(
+            num_classes=output_dim,
+            max_order=hp.get('max_order', 1),
+            hidden_channels=hp.get('hidden_channels', 32),
+            num_layers=hp.get('num_layers', 3),
+            num_rbf=hp.get('num_rbf', 64),
+            cutoff=hp.get('cutoff', 1.0),
+            k_neighbors=hp.get('k_neighbors', min(16, _npts // 10 + 1)),
+            classifier_dims=hp.get('classifier_dims', [64, 32]),
+            skip_init=hp.get('skip_init', 0.01),
+        )
+    if name == 'HybridOnEquivariantTensorFieldNetwork':
+        return HybridOnEquivariantTensorFieldNetwork(
+            num_classes=output_dim,
+            max_order=hp.get('max_order', 1),
+            hidden_channels=hp.get('hidden_channels', 32),
+            num_layers=hp.get('num_layers', 3),
+            num_rbf=hp.get('num_rbf', 64),
+            cutoff=hp.get('cutoff', 1.0),
+            k_neighbors=hp.get('k_neighbors', min(16, _npts // 10 + 1)),
+            classifier_dims=hp.get('classifier_dims', [64, 32]),
+            non_eq_dim=hp.get('non_eq_dim', 128),
+            fusion_dims=hp.get('fusion_dims', None),
+        )
+    if name == 'EndToEndTensorFieldNetwork':
+        num_labels = len(set(data.get('label_train', []))) if 'label_train' in data else 2
+        return EndToEndTensorFieldNetwork(
+            num_classes=num_labels,
+            num_pv_classes=output_dim,
+            max_order=hp.get('max_order', 1),
+            hidden_channels=hp.get('hidden_channels', 32),
+            num_layers=hp.get('num_layers', 3),
+            num_rbf=hp.get('num_rbf', 64),
+            cutoff=hp.get('cutoff', 1.0),
+            k_neighbors=hp.get('k_neighbors', min(16, _npts // 10 + 1)),
+            classifier_dims=hp.get('classifier_dims', [64, 32]),
+        )
     if name == 'PointNet3D':
         return PointNet3D(output_dim=output_dim)
     if name == 'ScalarDistanceDeepSet':
@@ -649,6 +942,9 @@ def forward_single(model, x, mname, geom=None):
         'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel',
         'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
         'CrossAttentionTensorFieldNetwork',
+        'RelaxedOnEquivariantTensorFieldNetwork',
+        'HybridOnEquivariantTensorFieldNetwork',
+        'EndToEndTensorFieldNetwork',
     ]:
         return model([x])
     return model(x.unsqueeze(0))
@@ -1036,7 +1332,7 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
 
     # TFN custom ops (einsum, CG tensor products) can overflow FP16 under AMP.
     # Disable AMP for TFN models; other models benefit from FP16 speedup.
-    _no_amp = TFN_MODELS | {'CrossAttentionTensorFieldNetwork', 'ScalarDistanceDeepSet'}
+    _no_amp = TFN_MODELS | {'CrossAttentionTensorFieldNetwork', 'ScalarDistanceDeepSet', 'HybridOnEquivariantTensorFieldNetwork', 'EndToEndTensorFieldNetwork'}
     use_amp = device.type == 'cuda' and mname not in _no_amp
     for epoch in tqdm(range(num_epochs), desc=f"Epochs ({label})"):
         tr_loss  = train_epoch(

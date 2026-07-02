@@ -38,6 +38,8 @@ from models import (
     DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,
     AttentionTensorFieldNetwork, StochasticTensorFieldNetwork,
     CrossAttentionTensorFieldNetwork,
+    RelaxedOnEquivariantTensorFieldNetwork,
+    HybridOnEquivariantTensorFieldNetwork,
     _move_basis_tensors,
 )
 
@@ -49,6 +51,8 @@ MODEL_NAMES = [
     'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
     'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
     'CrossAttentionTensorFieldNetwork',
+    'RelaxedOnEquivariantTensorFieldNetwork',
+    'HybridOnEquivariantTensorFieldNetwork',
 ]
 
 TFN_MODELS = {
@@ -56,7 +60,9 @@ TFN_MODELS = {
     'GTTensorFieldNetworkV2', 'HierarchicalGTTFN',
     'HierarchicalTensorFieldNetwork', 'OnEquivariantTensorFieldNetwork',
     'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
+    'RelaxedOnEquivariantTensorFieldNetwork',
     # CrossAttentionTensorFieldNetwork uses its own forward (no _encode_single)
+    # HybridOnEquivariantTensorFieldNetwork uses custom forward
 }
 
 # -------------------------------------------------------------------------
@@ -328,6 +334,31 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
             classifier_dims=classifier_dims or [256, 128],
             radial_hidden=radial_hidden or 64,
             dropout=extra.get('dropout', 0.1),
+        )
+    if name == 'RelaxedOnEquivariantTensorFieldNetwork':
+        return RelaxedOnEquivariantTensorFieldNetwork(
+            num_classes=output_dim,
+            max_order=extra.get('max_order', 0),
+            hidden_channels=hidden_channels or 32,
+            num_layers=num_layers or 3,
+            num_rbf=num_rbf or 64,
+            cutoff=cutoff,
+            k_neighbors=k_neighbors,
+            classifier_dims=classifier_dims or [64, 32],
+            skip_init=extra.get('skip_init', 0.01),
+        )
+    if name == 'HybridOnEquivariantTensorFieldNetwork':
+        return HybridOnEquivariantTensorFieldNetwork(
+            num_classes=output_dim,
+            max_order=extra.get('max_order', 0),
+            hidden_channels=hidden_channels or 32,
+            num_layers=num_layers or 3,
+            num_rbf=num_rbf or 64,
+            cutoff=cutoff,
+            k_neighbors=k_neighbors,
+            classifier_dims=classifier_dims or [64, 32],
+            non_eq_dim=extra.get('non_eq_dim', 128),
+            fusion_dims=extra.get('fusion_dims', None),
         )
     if name == 'PointNet3D':
         return PointNet3D(output_dim=output_dim,
@@ -693,9 +724,106 @@ def forward_single(model, prepared_x, mname, geom=None, stage_geom=None):
         'DistanceMatrixRaggedModel', 'ScalarDistanceDeepSet',
         'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel',
         'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
+        'RelaxedOnEquivariantTensorFieldNetwork',
+        'HybridOnEquivariantTensorFieldNetwork',
     ]:
         return model([prepared_x])
     return model(prepared_x.unsqueeze(0))
+
+# -------------------------------------------------------------------------
+# Improvement 5: TFN ensemble — average predictions from multiple models
+# -------------------------------------------------------------------------
+
+def tfn_ensemble_predict(model_names, data_list, geom_cache=None,
+                        use_gs=False, gs_sigma=GS_SIGMA, batch_size=64):
+    """
+    Ensemble prediction: run multiple TFN models and average their outputs.
+
+    Parameters
+    ----------
+    model_names : list of (model, class_name) tuples
+    data_list   : list of torch tensors
+    geom_cache  : precomputed geometry or None
+    use_gs      : apply Gaussian smoothing
+    gs_sigma    : GS sigma
+    batch_size  : inference batch size
+
+    Returns
+    -------
+    avg_preds : np.ndarray of shape (N, output_dim)
+    """
+    all_preds = []
+    for model_pv, class_name in model_names:
+        model_pv.eval()
+        if use_gs:
+            data = gaussian_smooth_batch(data_list, sigma=gs_sigma)
+        else:
+            data = data_list
+        if class_name in TFN_MODELS:
+            preds = tfn_batched_forward(model_pv, data, geom_cache,
+                                         batch_size=batch_size)
+        else:
+            preds_list = []
+            for idx, x in enumerate(data):
+                prepared = prepare_single_input(class_name, x, use_gs=False)
+                geom = geom_cache[idx] if geom_cache else None
+                out = forward_single(model_pv, prepared, class_name, geom=geom)
+                preds_list.append(out.detach().cpu().numpy() if isinstance(out, torch.Tensor) else np.asarray(out))
+            preds = np.vstack(preds_list)
+        all_preds.append(preds)
+    return np.mean(all_preds, axis=0)
+
+
+def ensemble_best_tfn(data_list, top_k=3, use_gs=False):
+    """
+    Ensemble the top-k best TFN models for this dataset.
+
+    Loads the best TFN checkpoints and averages their predictions.
+
+    Parameters
+    ----------
+    data_list  : list of torch tensors
+    top_k      : number of top models to ensemble
+    use_gs     : apply Gaussian smoothing
+
+    Returns
+    -------
+    avg_preds : np.ndarray
+    """
+    # Order TFN models by expected rank (based on historical performance)
+    tfn_models_by_rank = [
+        'OnEquivariantTensorFieldNetwork',
+        'GTTensorFieldNetwork',
+        'TensorFieldNetwork',
+        'AttentionTensorFieldNetwork',
+        'GTTensorFieldNetworkV2',
+        'StochasticTensorFieldNetwork',
+        'HierarchicalTensorFieldNetwork',
+        'CrossAttentionTensorFieldNetwork',
+        'RelaxedOnEquivariantTensorFieldNetwork',
+        'HybridOnEquivariantTensorFieldNetwork',
+    ]
+    loaded = []
+    for mname in tfn_models_by_rank:
+        if len(loaded) >= top_k:
+            break
+        try:
+            label = mname + ('_GS' if use_gs and mname not in GS_SKIP_MODELS else '')
+            ckpt = torch.load(find_checkpoint(label), map_location=device)
+            output_dim = ckpt.get('output_dim')
+            model_pv = build_analysis_model(
+                mname, output_dim, extra={})
+            model_pv.load_state_dict(ckpt['model_state_dict'])
+            model_pv = model_pv.to(device).eval()
+            loaded.append((model_pv, mname))
+        except (FileNotFoundError, KeyError, RuntimeError) as e:
+            print(f'  Ensemble: skipping {mname} ({e})')
+            continue
+    if not loaded:
+        raise RuntimeError('No TFN models found for ensemble')
+    geom = precompute_geometry_batched(loaded[0][0], loaded[0][1], data_list)
+    return tfn_ensemble_predict(loaded, data_list, geom_cache=geom, use_gs=use_gs)
+
 
 # -------------------------------------------------------------------------
 # DTW metric for baseline
