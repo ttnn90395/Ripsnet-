@@ -125,7 +125,7 @@ def knn_geometry(
             nbr_idx[start:end] = idx_c
 
     # Gather neighbor positions and compute edge vectors (shared path)
-    if nbr_idx.max() >= N or nbr_idx.min() < 0:
+    if nbr_idx.numel() > 0 and (nbr_idx.max().item() >= N or nbr_idx.min().item() < 0):
         print(f"[D] knn_geometry OOB: nbr_idx max={nbr_idx.max().item()}, "
               f"min={nbr_idx.min().item()}, N={N}, k={k}")
         nbr_idx = nbr_idx.clamp(0, N - 1)
@@ -438,7 +438,7 @@ class GTTFNLayer(nn.Module):
         """Sparse (N,k) message passing — gather neighbor features by index."""
         if fCG.ndim == 5:
             batch_idx = torch.arange(fCG.shape[0], device=fCG.device)[:, None, None]
-            if nbr_idx.max() >= fCG.shape[1] or nbr_idx.min() < 0:
+            if nbr_idx.numel() > 0 and (nbr_idx.max().item() >= fCG.shape[1] or nbr_idx.min().item() < 0):
                 print(f"[D] _message_sparse OOB: nbr_idx max={nbr_idx.max().item()}, "
                       f"min={nbr_idx.min().item()}, fCG.shape={fCG.shape}, "
                       f"N={N}, k={k}, c_in={c_in}, c_out={c_out}, "
@@ -449,7 +449,7 @@ class GTTFNLayer(nn.Module):
             return torch.einsum("bnjco,bnjcd->bnod", radial, contracted)         # (B, N, Co, do)
 
         # SINGLE path guard for OOB nbr_idx
-        if nbr_idx.max() >= fCG.shape[0] or nbr_idx.min() < 0:
+        if nbr_idx.numel() > 0 and (nbr_idx.max().item() >= fCG.shape[0] or nbr_idx.min().item() < 0):
             print(f"[D] _message_sparse (single) OOB: nbr_idx max={nbr_idx.max().item()}, "
                   f"min={nbr_idx.min().item()}, fCG.shape={fCG.shape}, "
                   f"N={N}, k={k}, c_in={c_in}, c_out={c_out}")
@@ -510,7 +510,7 @@ def knn_geometry_batch(
             nbr_idx[:, start:end] = idx_c
 
     batch_idx = torch.arange(B, device=dev)[:, None, None]
-    if nbr_idx.max() >= N or nbr_idx.min() < 0:
+    if nbr_idx.numel() > 0 and (nbr_idx.max().item() >= N or nbr_idx.min().item() < 0):
         print(f"[D] knn_geometry_batch OOB: nbr_idx max={nbr_idx.max().item()}, "
               f"min={nbr_idx.min().item()}, B={B}, N={N}, k={k}")
         nbr_idx = nbr_idx.clamp(0, N - 1)

@@ -699,7 +699,7 @@ class GTTFNAttentionLayer(nn.Module):
         """Sparse (N,k) message passing with scalar attention weighting."""
         if fCG.ndim == 5:  # batched
             batch_idx = torch.arange(fCG.shape[0], device=fCG.device)[:, None, None]
-            if nbr_idx.max() >= fCG.shape[1] or nbr_idx.min() < 0:
+            if nbr_idx.numel() > 0 and (nbr_idx.max().item() >= fCG.shape[1] or nbr_idx.min().item() < 0):
                 nbr_idx = nbr_idx.clamp(0, fCG.shape[1] - 1)
             fCG_nbr = fCG[batch_idx, nbr_idx]                              # (B,N,k,Ci,de,do)
             contracted = torch.einsum("bnje,bnjceo->bnjco", e_feat, fCG_nbr) # (B,N,k,Ci,do)
@@ -707,7 +707,7 @@ class GTTFNAttentionLayer(nn.Module):
             return torch.einsum("bnjco,bnjcd->bnod", radial, contracted)
 
         # single
-        if nbr_idx.max() >= fCG.shape[0] or nbr_idx.min() < 0:
+        if nbr_idx.numel() > 0 and (nbr_idx.max().item() >= fCG.shape[0] or nbr_idx.min().item() < 0):
             nbr_idx = nbr_idx.clamp(0, fCG.shape[0] - 1)
         fCG_nbr = fCG[nbr_idx]                                              # (N,k,Ci,de,do)
         contracted = torch.einsum("ije,ijceo->ijco", e_feat, fCG_nbr)       # (N,k,Ci,do)

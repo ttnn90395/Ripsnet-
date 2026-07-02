@@ -338,7 +338,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
     if name == 'RelaxedOnEquivariantTensorFieldNetwork':
         return RelaxedOnEquivariantTensorFieldNetwork(
             num_classes=output_dim,
-            max_order=extra.get('max_order', 0),
+            max_order=extra.get('max_order', 1),
             hidden_channels=hidden_channels or 32,
             num_layers=num_layers or 3,
             num_rbf=num_rbf or 64,
@@ -350,7 +350,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
     if name == 'HybridOnEquivariantTensorFieldNetwork':
         return HybridOnEquivariantTensorFieldNetwork(
             num_classes=output_dim,
-            max_order=extra.get('max_order', 0),
+            max_order=extra.get('max_order', 1),
             hidden_channels=hidden_channels or 32,
             num_layers=num_layers or 3,
             num_rbf=num_rbf or 64,
@@ -724,8 +724,10 @@ def forward_single(model, prepared_x, mname, geom=None, stage_geom=None):
         'DistanceMatrixRaggedModel', 'ScalarDistanceDeepSet',
         'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel',
         'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
+        'CrossAttentionTensorFieldNetwork',
         'RelaxedOnEquivariantTensorFieldNetwork',
         'HybridOnEquivariantTensorFieldNetwork',
+        'EndToEndTensorFieldNetwork',
     ]:
         return model([prepared_x])
     return model(prepared_x.unsqueeze(0))
@@ -1097,7 +1099,10 @@ def load_and_eval(model_name, use_gs=False):
                       'OnEquivariantTensorFieldNetwork',
                       'AttentionTensorFieldNetwork',
                       'StochasticTensorFieldNetwork',
-                      'CrossAttentionTensorFieldNetwork']:
+                      'CrossAttentionTensorFieldNetwork',
+                      'RelaxedOnEquivariantTensorFieldNetwork',
+                      'HybridOnEquivariantTensorFieldNetwork',
+                      'EndToEndTensorFieldNetwork']:
         # Prefer saved metadata from checkpoint (new checkpoints include these)
         saved_hp_keys = ['hidden_channels', 'num_layers', 'num_rbf', 'cutoff',
                          'k_neighbors', 'max_order', 'num_heads', 'radial_hidden',

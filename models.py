@@ -723,99 +723,117 @@ def _load_gt_improvements():
         build_enhanced_pointcloud,
     )
 
+    def _batch_device(batch):
+        if isinstance(batch, (list, tuple)):
+            return batch[0].device if batch else None
+        return batch.device
+
     class HierarchicalGTTFN(_HierarchicalGTTFNBase):
         """Hierarchical GT-TFN with device-aware forward pass."""
         def forward(self, batch, node_attrs=None):
-            if batch:
-                _move_basis_tensors(self, batch[0].device)
+            dev = _batch_device(batch)
+            if dev is not None:
+                _move_basis_tensors(self, dev)
             return _HierarchicalGTTFNBase.forward(self, batch, node_attrs)
 
     class GTTFNEncoder(_GTTFNEncoderBase):
         """Device-aware TFN encoder wrapper."""
         def forward(self, batch, node_attrs=None):
-            if batch:
-                _move_basis_tensors(self, batch[0].device)
+            dev = _batch_device(batch)
+            if dev is not None:
+                _move_basis_tensors(self, dev)
             return _GTTFNEncoderBase.forward(self, batch, node_attrs)
 
     class GTTensorFieldNetworkWithAttention(_GTTFNWABase):
         """GT-TFN with multi-head cross-attention, device-aware."""
         def forward(self, batch, node_attrs=None):
-            if batch:
-                _move_basis_tensors(self, batch[0].device)
+            dev = _batch_device(batch)
+            if dev is not None:
+                _move_basis_tensors(self, dev)
             return _GTTFNWABase.forward(self, batch, node_attrs)
 
     class EquivariantSetTransformer(_EquivariantSetTransformerBase):
         """Equivariant set transformer, device-aware."""
         def forward(self, context_batch, query_batch):
-            if context_batch:
-                _move_basis_tensors(self, context_batch[0].device)
+            dev = _batch_device(context_batch)
+            if dev is not None:
+                _move_basis_tensors(self, dev)
             return _EquivariantSetTransformerBase.forward(self, context_batch, query_batch)
 
     class StochasticEquivariantTFN(_StochasticEquivariantTFNBase):
         """Stochastic equivariant TFN, device-aware."""
         def forward(self, batch, node_attrs=None, return_dist=False):
-            if batch:
-                _move_basis_tensors(self, batch[0].device)
+            dev = _batch_device(batch)
+            if dev is not None:
+                _move_basis_tensors(self, dev)
             return _StochasticEquivariantTFNBase.forward(self, batch, node_attrs, return_dist)
 
     class EquivariantGraphMambaNetwork(_EquivariantGraphMambaBase):
         """Equivariant Graph Mamba network, device-aware."""
         def forward(self, batch, node_attrs=None, precomputed_geom=None):
-            if batch:
-                _move_basis_tensors(self, batch[0].device)
+            dev = _batch_device(batch)
+            if dev is not None:
+                _move_basis_tensors(self, dev)
             return _EquivariantGraphMambaBase.forward(self, batch, node_attrs, precomputed_geom)
 
     class TemporalCrossAttentionTFN(_TemporalCrossAttentionTFNBase):
         """Temporal cross-attention TFN, device-aware."""
         def forward(self, batch):
-            if batch:
-                _move_basis_tensors(self, batch[0].device)
+            dev = _batch_device(batch)
+            if dev is not None:
+                _move_basis_tensors(self, dev)
             return _TemporalCrossAttentionTFNBase.forward(self, batch)
 
     class RelaxedEquivariantTFN(_RelaxedEquivariantTFNBase):
         """Relaxed O(3) TFN, device-aware."""
         def forward(self, batch, **kwargs):
-            if batch:
+            dev = _batch_device(batch)
+            if dev is not None:
                 base = self.base
                 inner = getattr(base, '_inner', base)
-                _move_basis_tensors(inner, batch[0].device)
+                _move_basis_tensors(inner, dev)
             return _RelaxedEquivariantTFNBase.forward(self, batch, **kwargs)
 
     class RelaxedOnEquivariantTensorFieldNetwork(_RelaxedOnEquivariantTFNBase):
         """Relaxed O(3) TFN wrapper, device-aware."""
         def forward(self, batch):
-            if batch:
-                _move_basis_tensors(self._inner, batch[0].device)
+            dev = _batch_device(batch)
+            if dev is not None:
+                _move_basis_tensors(self._inner, dev)
             return _RelaxedOnEquivariantTFNBase.forward(self, batch)
 
     class HybridTFNClassifier(_HybridTFNClassifierBase):
         """Hybrid TFN + non-equivariant classifier, device-aware."""
         def forward(self, batch):
-            if batch:
+            dev = _batch_device(batch)
+            if dev is not None:
                 inner = getattr(self.tfn_backbone, '_inner', self.tfn_backbone)
-                _move_basis_tensors(inner, batch[0].device)
+                _move_basis_tensors(inner, dev)
             return _HybridTFNClassifierBase.forward(self, batch)
 
     class HybridOnEquivariantTensorFieldNetwork(_HybridOnEquivariantTFNBase):
         """Hybrid O(3) TFN wrapper, device-aware."""
         def forward(self, batch):
-            if batch:
-                _move_basis_tensors(self._inner, batch[0].device)
+            dev = _batch_device(batch)
+            if dev is not None:
+                _move_basis_tensors(self._inner, dev)
             return _HybridOnEquivariantTFNBase.forward(self, batch)
 
     class EndToEndClassifier(_EndToEndClassifierBase):
         """End-to-end classifier wrapper, device-aware."""
         def forward(self, batch):
-            if batch:
+            dev = _batch_device(batch)
+            if dev is not None:
                 inner = getattr(self.tfn_backbone, '_inner', self.tfn_backbone)
-                _move_basis_tensors(inner, batch[0].device)
+                _move_basis_tensors(inner, dev)
             return _EndToEndClassifierBase.forward(self, batch)
 
     class EndToEndTensorFieldNetwork(_EndToEndTFNBase):
         """End-to-end TFN classifier, device-aware."""
         def forward(self, batch):
-            if batch:
-                _move_basis_tensors(self._inner, batch[0].device)
+            dev = _batch_device(batch)
+            if dev is not None:
+                _move_basis_tensors(self._inner, dev)
             return _EndToEndTFNBase.forward(self, batch)
 
     return (HierarchicalGTTFN, _OnEquivariantWrapperBase, GTTFNEncoder,
