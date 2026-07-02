@@ -1412,17 +1412,29 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
     # Save all architecture-relevant hyperparams so analysis can rebuild the
     # exact model without having to infer shapes from the state dict.
     base_m = m._orig_mod if hasattr(m, '_orig_mod') else m
+    # Dig through wrappers (RelaxedOnEquivariantTFN, HybridOnEquivariantTFN,
+    # device-aware wrapper, etc.) to find the actual TFN with trainable params
+    _inner = base_m
+    for _ in range(5):  # at most 5 levels of nesting
+        if hasattr(_inner, '_inner'):
+            _inner = _inner._inner
+        elif hasattr(_inner, 'tfn_backbone'):
+            _inner = _inner.tfn_backbone
+        else:
+            break
     for attr in ('hidden_channels', 'num_layers', 'num_rbf', 'cutoff',
                  'k_neighbors', 'max_order', 'num_heads', 'radial_hidden',
                  'num_mixtures', 'k_local', 'k_global',
                  'num_layers_per_stage'):
-        val = getattr(base_m, attr, None)
+        val = getattr(_inner, attr, None)
         if val is not None:
             extra[attr] = val
     if hasattr(base_m, 'classifier_dims'):
         extra['classifier_dims'] = base_m.classifier_dims
     elif hasattr(base_m, '_inner') and hasattr(base_m._inner, 'classifier_dims'):
         extra['classifier_dims'] = base_m._inner.classifier_dims
+    if hasattr(_inner, 'classifier_dims'):
+        extra['classifier_dims'] = _inner.classifier_dims
     if hasattr(base_m, 'encoder_dims'):
         extra['encoder_dims'] = base_m.encoder_dims
     if hasattr(base_m, 'stage_sizes'):
