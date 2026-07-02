@@ -64,14 +64,15 @@ TFN_MODELS = {
 os.makedirs('models', exist_ok=True)
 os.makedirs('results', exist_ok=True)
 
-dataset_name = sys.argv[1]
-model_name   = sys.argv[2]
-normalize    = int(sys.argv[3])
-num_epochs   = int(sys.argv[4])
-PV_type      = sys.argv[5]
-mode         = sys.argv[6]
-batch_size   = int(sys.argv[7]) if len(sys.argv) > 7 else 32
-hparams_json = os.environ.get('TFN_HPARAMS', '{}')
+dataset_name  = sys.argv[1]
+model_name    = sys.argv[2]
+normalize     = int(sys.argv[3])
+num_epochs    = int(sys.argv[4])
+PV_type       = sys.argv[5]
+mode          = sys.argv[6]
+batch_size    = int(sys.argv[7]) if len(sys.argv) > 7 else 32
+dataset_test  = sys.argv[8] if len(sys.argv) > 8 else None
+hparams_json  = os.environ.get('TFN_HPARAMS', '{}')
 model_hparams = json.loads(hparams_json) if hparams_json else {}
 model_tag = os.environ.get('TFN_MODEL_TAG', '')
 
@@ -106,6 +107,19 @@ if normalize:
         PVs_test[hidx]  /= MPV
 
 output_dim = sum([PVs_train[hidx].shape[1] for hidx in range(len(homdim))])
+
+# Load labels for end-to-end classification if available
+if 'label_train' in data:
+    label_train = data['label_train']
+else:
+    label_train = None
+if dataset_test is not None and os.path.isfile('datasets/' + dataset_test + '.pkl'):
+    data_test_pkl = pck.load(open('datasets/' + dataset_test + '.pkl', 'rb'))
+    label_test = data_test_pkl.get('label_test', None)
+elif 'label_test' in data:
+    label_test = data['label_test']
+else:
+    label_test = None
 
 # -------------------------------------------------------------------------
 # Per-dataset hyperparameter overrides
@@ -1249,7 +1263,25 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
     label = f'{mname}{tag}'
     print(f'\n=== Training {label} (gs={use_gs}) ===')
 
-    m = deep_to(build_model_by_name(mname, n=dim, hparams=model_hparams), device)
+    use_classification = os.environ.get('TFN_E2E', '0') == '1'
+    if use_classification:
+        # Override model to EndToEndTensorFieldNetwork
+        from models import EndToEndTensorFieldNetwork
+        num_labels = len(set(label_train)) if label_train is not None else 2
+        print(f'  End-to-end classification mode: {num_labels} classes')
+        m = deep_to(EndToEndTensorFieldNetwork(
+            num_classes=num_labels,
+            num_pv_classes=output_dim,
+            max_order=model_hparams.get('max_order', 1),
+            hidden_channels=model_hparams.get('hidden_channels', 32),
+            num_layers=model_hparams.get('num_layers', 3),
+            num_rbf=model_hparams.get('num_rbf', 64),
+            cutoff=model_hparams.get('cutoff', 1.0),
+            k_neighbors=model_hparams.get('k_neighbors', 16),
+            classifier_dims=model_hparams.get('classifier_dims', [64, 32]),
+        ), device)
+    else:
+        m = deep_to(build_model_by_name(mname, n=dim, hparams=model_hparams), device)
 
     train_data = prepare_data_for_model(
         mname, data_train_torch, use_gs=use_gs,
@@ -1301,23 +1333,35 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
     else:
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='min', factor=0.5, patience=10, min_lr=1e-6)
-    criterion     = nn.MSELoss()
-    
-    # Flatten persistence vectors: if PVs are 3D (N, H, W), flatten to (N, H*W)
-    # Handle both 2D and 3D PV arrays
-    def flatten_pvs(pv_list):
-        """Flatten list of PV arrays and stack into (N, total_features)."""
-        flattened = []
-        for pv in pv_list:
-            if pv.ndim == 3:  # (N, H, W) → (N, H*W)
-                n_samples = pv.shape[0]
-                flattened.append(pv.reshape(n_samples, -1))
-            else:  # already (N, D)
-                flattened.append(pv)
-        return np.hstack(flattened) if flattened else np.array([])
-    
-    targets_train = torch.FloatTensor(flatten_pvs(PVs_train)).to(device)
-    targets_test  = torch.FloatTensor(flatten_pvs(PVs_test)).to(device)
+
+    if use_classification:
+        # End-to-end: load labels, use CrossEntropyLoss
+        from sklearn.preprocessing import LabelEncoder
+        all_labels = [l for l in [label_train, label_test] if l is not None]
+        if not all_labels:
+            raise RuntimeError('No labels found for e2e classification')
+        le = LabelEncoder().fit(np.concatenate(all_labels))
+        targets_train = torch.LongTensor(le.transform(label_train)).to(device)
+        targets_test  = torch.LongTensor(le.transform(label_test)).to(device)
+        criterion = nn.CrossEntropyLoss()
+        print(f'  E2E: {len(le.classes_)} classes, '
+              f'train={len(targets_train)} test={len(targets_test)}')
+    else:
+        criterion = nn.MSELoss()
+        
+        # Flatten persistence vectors: if PVs are 3D (N, H, W), flatten to (N, H*W)
+        def flatten_pvs(pv_list):
+            flattened = []
+            for pv in pv_list:
+                if pv.ndim == 3:  # (N, H, W) → (N, H*W)
+                    n_samples = pv.shape[0]
+                    flattened.append(pv.reshape(n_samples, -1))
+                else:  # already (N, D)
+                    flattened.append(pv)
+            return np.hstack(flattened) if flattened else np.array([])
+        
+        targets_train = torch.FloatTensor(flatten_pvs(PVs_train)).to(device)
+        targets_test  = torch.FloatTensor(flatten_pvs(PVs_test)).to(device)
     try:
         scaler = torch.amp.GradScaler(device_type='cuda',
                                      enabled=(device.type == 'cuda'))

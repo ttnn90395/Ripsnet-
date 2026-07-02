@@ -15,7 +15,12 @@ fi
 
 MODEL_NAME="${TFN_MODEL_NAME:-all}"
 if [ $TRAINNN = "train" ]; then
-    python train_nn.py $1$2 $MODEL_NAME ${20} ${21} ${22} $MODE
+    if [ "${TFN_E2E:-0}" = "1" ]; then
+        # End-to-end: pass test dataset path for label loading
+        python train_nn.py $1$2 $MODEL_NAME ${20} ${21} ${22} $MODE $1$4
+    else
+        python train_nn.py $1$2 $MODEL_NAME ${20} ${21} ${22} $MODE
+    fi
 fi
 
 python analysis_nn.py $MODEL_NAME $1$2 $1$3 $1$4 ${20} ${22} $MODE
