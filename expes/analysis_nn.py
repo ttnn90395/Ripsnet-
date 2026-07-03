@@ -405,7 +405,7 @@ def _infer_tfn_architecture(model_state):
     keys = set(model_state.keys())
     # Try most-nested prefix first, fall back to simpler ones
     prefix = ''
-    for candidate in ('_inner.base._inner.', '_inner.', ''):
+    for candidate in ('_inner.base._inner.', '_inner.tfn_backbone._inner.', '_inner.', ''):
         if any(k.startswith(candidate) for k in keys):
             prefix = candidate
             break

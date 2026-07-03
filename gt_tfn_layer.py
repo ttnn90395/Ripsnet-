@@ -580,10 +580,14 @@ class GTTensorFieldNetwork(nn.Module):
         radial_hidden:   int   = 64,
     ):
         super().__init__()
-        self.n            = n
-        self.num_classes  = num_classes
-        self.max_order    = max_order
-        self.k_neighbors  = k_neighbors
+        self.n              = n
+        self.num_classes    = num_classes
+        self.max_order      = max_order
+        self.hidden_channels = hidden_channels
+        self.num_layers     = num_layers
+        self.num_rbf        = num_rbf
+        self.cutoff         = cutoff
+        self.k_neighbors    = k_neighbors
 
         # Shared geometry encoders
         self.rbf      = RBFExpansion(num_rbf=num_rbf, cutoff=cutoff)
