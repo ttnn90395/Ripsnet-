@@ -73,68 +73,58 @@ print(f"  train={N_train} test={N_test} dim={dim} out={output_dim}")
 le = LabelEncoder().fit(np.concatenate([label_train, label_test]))
 y_train, y_test = le.transform(label_train), le.transform(label_test)
 
-# ─── Load checkpoint ──────────────────────────────────────────────────────────
+# ─── Torch tensors ──────────────────────────────────────────────────────────
+data_train_t = [torch.FloatTensor(x).to(device) for x in data_train]
+data_test_t  = [torch.FloatTensor(x).to(device)  for x in data_test]
+
+# ─── Checkpoint lookup ───────────────────────────────────────────────────────
 def find_checkpoint(mname):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     model_tag = os.environ.get('TFN_MODEL_TAG', '')
-    dirs = [f'models/{model_tag}' if model_tag else 'models', 'models']
-    for d in dirs:
+    for d in ([f'models/{model_tag}' if model_tag else 'models', 'models',
+               os.path.join(script_dir, 'models'), os.path.join(script_dir, '..', 'models')]):
         if not d: continue
-        for ext in ('.pth', '.pt'):
-            p = os.path.join(d, mname + ext)
-            if os.path.isfile(p): return p
-    for d in [os.path.join(script_dir, 'models'), os.path.join(script_dir, '..', 'models')]:
         for ext in ('.pth', '.pt'):
             p = os.path.join(d, mname + ext)
             if os.path.isfile(p): return p
     return None
 
+# ─── Load or train model ────────────────────────────────────────────────────
 ckpt_path = find_checkpoint(model_label)
 if ckpt_path is None:
     print(f"  No checkpoint for '{model_label}', training from scratch...")
-    from sklearn.preprocessing import LabelEncoder
-    _npts = data_train[0].shape[0]
-    def _build_model(name, out_dim, n_dim):
-        if name == 'OnEquivariantTensorFieldNetwork':
-            return OnEquivariantTensorFieldNetwork(num_classes=out_dim, max_order=1, hidden_channels=32, num_layers=3, num_rbf=64, classifier_dims=[64,32])
-        if name == 'AttentionTensorFieldNetwork':
-            return AttentionTensorFieldNetwork(num_classes=out_dim, max_order=1, hidden_channels=32, num_layers=3, num_heads=4, num_rbf=64, classifier_dims=[64,32], radial_hidden=64)
-        if name == 'TensorFieldNetwork':
-            return TensorFieldNetwork(num_classes=out_dim, max_order=0, hidden_channels=8, num_layers=2, classifier_dims=[16], num_rbf=64, k_neighbors=8)
-        if name == 'GTTensorFieldNetwork':
-            return GTTensorFieldNetwork(n=n_dim, num_classes=out_dim, max_order=0, hidden_channels=8, num_layers=2, num_rbf=64, classifier_dims=[16], radial_hidden=128)
-        return OnEquivariantTensorFieldNetwork(num_classes=out_dim, max_order=1, hidden_channels=32, num_layers=3, num_rbf=64, classifier_dims=[64,32])
-    model = _build_model(model_label, output_dim, dim).to(device)
-    from torch import nn
-    targets_t_nn = torch.FloatTensor(np.concatenate(PVs_train, axis=1)).to(device)
-    optim = torch.optim.Adam(model.parameters(), lr=1e-3)
-    criterion = nn.MSELoss()
+    if model_label == 'OnEquivariantTensorFieldNetwork':
+        _model = OnEquivariantTensorFieldNetwork(num_classes=output_dim, max_order=1, hidden_channels=32, num_layers=3, num_rbf=64, classifier_dims=[64,32]).to(device)
+    elif model_label == 'AttentionTensorFieldNetwork':
+        _model = AttentionTensorFieldNetwork(num_classes=output_dim, max_order=1, hidden_channels=32, num_layers=3, num_heads=4, num_rbf=64, classifier_dims=[64,32], radial_hidden=64).to(device)
+    else:
+        _model = OnEquivariantTensorFieldNetwork(num_classes=output_dim, max_order=1, hidden_channels=32, num_layers=3, num_rbf=64, classifier_dims=[64,32]).to(device)
+    _targets = torch.FloatTensor(np.concatenate(PVs_train, axis=1)).to(device)
+    _optim = torch.optim.Adam(_model.parameters(), lr=1e-3)
+    _criterion = torch.nn.MSELoss()
     _tfn = model_label in TFN_MODELS
-    def _prepare_pts(data_list):
-        if _tfn:
-            return [torch.cat([x, x.new_zeros(x.shape[0],1)], dim=1) if x.shape[1]==2 else x for x in data_list]
-        return data_list
-    train_in_nn = _prepare_pts(data_train_t)
-    bs = min(32, len(train_in_nn))
+    if _tfn:
+        _train_in = [torch.cat([x, x.new_zeros(x.shape[0],1)], dim=1) if x.shape[1]==2 else x for x in data_train_t]
+    else:
+        _train_in = data_train_t
+    _bs = min(32, len(_train_in))
     for ep in range(5):
-        model.train()
-        perm = np.random.permutation(len(train_in_nn))
-        ls = 0.0
-        for s in range(0, len(train_in_nn), bs):
-            bix = perm[s:s+bs]
-            bd = [train_in_nn[i] for i in bix]
-            optim.zero_grad(set_to_none=True)
-            out = model(bd)
-            loss = criterion(out, targets_t_nn[bix])
-            if torch.isfinite(loss):
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optim.step()
-                ls += loss.item() * len(bd)
-        if (ep+1) % 500 == 0:
-            print(f"    ep {ep+1}/5  loss={ls/len(train_in_nn):.6f}")
-    model.eval()
-    model_state = model.state_dict()
+        _model.train()
+        _perm = np.random.permutation(len(_train_in))
+        _ls = 0.0
+        for s in range(0, len(_train_in), _bs):
+            _bix = _perm[s:s+_bs]
+            _bd = [_train_in[i] for i in _bix]
+            _optim.zero_grad(set_to_none=True)
+            _out = _model(_bd)
+            _loss = _criterion(_out, _targets[_bix])
+            if torch.isfinite(_loss):
+                _loss.backward()
+                torch.nn.utils.clip_grad_norm_(_model.parameters(), 1.0)
+                _optim.step()
+                _ls += _loss.item() * len(_bd)
+    _model.eval()
+    model_state = _model.state_dict()
     ckpt_out_dim = output_dim
     base_name = model_label.replace('_GS', '')
     ckpt_npts = data_train[0].shape[0]
@@ -143,7 +133,7 @@ if ckpt_path is None:
     ckpt = {'model_state_dict': model_state, 'output_dim': output_dim, 'num_points': ckpt_npts, 'activation': 'gelu', 'norm': 'bn'}
     os.makedirs('models', exist_ok=True)
     torch.save(ckpt, f'models/{model_label}.pth')
-    print(f"  Saved checkpoint to models/{model_label}.pth")
+    print(f"  Trained and saved to models/{model_label}.pth")
 else:
     ckpt = torch.load(ckpt_path, map_location=device)
     model_state = ckpt['model_state_dict'] if isinstance(ckpt, dict) and 'model_state_dict' in ckpt else ckpt
@@ -152,6 +142,7 @@ else:
     ckpt_npts = ckpt.get('num_points', None) if isinstance(ckpt, dict) else None
     ckpt_activation = ckpt.get('activation', None) if isinstance(ckpt, dict) else None
     ckpt_norm = ckpt.get('norm', None) if isinstance(ckpt, dict) else None
+    print(f"  Loaded checkpoint from {ckpt_path}")
 
 _has_bn = any('running_mean' in k for k in model_state)
 if ckpt_activation is None: ckpt_activation = 'gelu' if _has_bn else 'relu'
