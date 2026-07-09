@@ -18,5 +18,5 @@ if [ $TRAINNN = "train" ]; then
     python train_nn.py $1$2 $MODEL_NAME ${20} ${21} ${22} $MODE
 fi
 
-python analysis_nn.py $MODEL_NAME $1$2 $1$3 $1$4 ${20} ${22} $MODE
-python analysis_nn.py $MODEL_NAME $1$2 $1$3 $1$5 ${20} ${22} $MODE
+python analysis_nn.py all $1$2 $1$3 $1$4 ${20} ${22} $MODE
+python analysis_nn.py all $1$2 $1$3 $1$5 ${20} ${22} $MODE

@@ -4,6 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
+#SBATCH --gres=gpu:1
 #SBATCH --time=12:00:00
 #SBATCH --export=ALL
 #SBATCH --output=logs/tfn_sweep_%A_%a.out
@@ -19,7 +20,7 @@ set -euo pipefail
 REPO_DIR="/hs/work0/home/users/${USER}/exp/ripsnet/Ripsnet-"
 CONDA_PREFIX="/hs/work0/home/users/${USER}/exp/ripsnet/miniforge3-$(uname -m)"
 ENV_NAME="ripsnet"
-UCR_PATH="${UCR_PATH:-/hs/work0/home/users/${USER}/data/UCRArchive_2018}"
+export UCR_PATH="${UCR_PATH:-/hs/work0/home/users/${USER}/data/UCRArchive_2018}"
 
 cd "$REPO_DIR/expes"
 mkdir -p logs
@@ -46,7 +47,7 @@ configs=(
   'cosine    {"lr_schedule":"cosine","lr":0.005}'
 )
 
-IFS=$'\n' read -d '' -ra cfglines <<<"${configs[*]}"
+readarray -t cfglines <<<"${configs[*]}"
 line="${cfglines[$SLURM_ARRAY_TASK_ID]}"
 cfg_name=$(echo "$line" | awk '{print $1}')
 cfg_json=$(echo "$line" | cut -d' ' -f2-)

@@ -4,14 +4,15 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --time=23:00:00
+#SBATCH --gres=gpu:1
+#SBATCH --time=08:00:00
 #SBATCH --export=ALL
 #SBATCH --output=logs/ucr_split_%A_%a.out
 #SBATCH --error=logs/ucr_split_%A_%a.err
 #SBATCH --array=0-20
 
-# Restructured UCR experiment: 21 array tasks, one per dataset.
-# Each task processes its assigned dataset with identifier try0.
+# Optimized UCR: 21 array tasks, 1 dataset each, 8h limit.
+# With --gres=gpu:1, multiple tasks share nodes on multi-GPU partitions.
 
 set -euo pipefail
 
@@ -21,6 +22,7 @@ ENV_NAME="ripsnet"
 IDENTIFIER="try0"
 
 export UCR_PATH="${UCR_PATH:-/hs/work0/home/users/${USER}/data/UCRArchive_2018}"
+export TFN_MODEL_TAG="task_${SLURM_ARRAY_TASK_ID}"
 
 cd "$REPO_DIR/expes"
 mkdir -p logs

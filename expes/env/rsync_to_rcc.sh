@@ -23,6 +23,8 @@ rsync -avz --delete \
   --exclude='.vscode' \
   --exclude='*.pkl' \
   --exclude='*.pt' \
+  --exclude='results/' \
+  --exclude='env/logs/' \
   -e "ssh ${RCC_SSH_OPTS:-}" \
   "$REPO_ROOT/" "$SSH_HOST:$REMOTE_DIR"
 

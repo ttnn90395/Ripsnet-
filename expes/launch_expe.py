@@ -33,12 +33,15 @@ if expes == 'ucr':
             size_noise = 30
 
         command_line = "./expe_ucr.sh " + str(F[idx_data,1]) + " _train_TDE311LS_5" + identifier + " _train_TDE311LS_6" + identifier + " _test_TDE311LS_clean_3" + identifier + " _test_TDE311LS_noise_3" + identifier + "    3 1 1    01    0 "   + str(int(F[idx_data,2]/2)) + "     0 500    50    " + str(int(F[idx_data,2]/2)) + " " + str(F[idx_data,2]) + "    0 500    " + str(int(size_noise)) + " 0 3000    PL 5 - - " + mode + " " + data + " " + train_nn
-        os.system(command_line)
+        if os.system(command_line) != 0:
+            sys.exit(1)
 
 elif expes == 'synth':
 
     command_line = "./expe_synth.sh synth _train_PI_1" + identifier + " _train_PI_2" + identifier + " _test_PI_clean_1" + identifier + " _test_PI_noise_1" + identifier + "    - - -    1    - -     - -    50      - -    - -    - 1 1000    PI 0 10 1 " + mode + " " + data + " " + train_nn
-    os.system(command_line)
+    if os.system(command_line) != 0:
+        sys.exit(1)
     command_line = "./expe_synth.sh synth _train_LS_1" + identifier + " _train_LS_2" + identifier + " _test_LS_clean_1" + identifier + " _test_LS_noise_1" + identifier + "    - - -    1    - -     - -    300     - -    - -    - 1 1000    PL 5 - - " + mode + " " + data + " " + train_nn
-    os.system(command_line)
+    if os.system(command_line) != 0:
+        sys.exit(1)
     

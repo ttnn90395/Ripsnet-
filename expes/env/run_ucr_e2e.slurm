@@ -4,6 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
+#SBATCH --gres=gpu:1
 #SBATCH --time=23:00:00
 #SBATCH --export=ALL
 #SBATCH --output=logs/ucr_e2e_%A_%a.out

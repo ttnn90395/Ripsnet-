@@ -24,6 +24,8 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import pairwise_distances
 from xgboost import XGBClassifier
 
+ERROR_COUNT = 0
+
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
@@ -131,13 +133,16 @@ GS_SKIP_MODELS = {
 }
 
 if requested_model == 'all':
-    models_to_test    = MODEL_NAMES[:]
+    models_to_test    = [m for m in MODEL_NAMES if m not in GS_USE_MODELS]
     models_to_test_gs = []
     for m in MODEL_NAMES:
         if m not in GS_SKIP_MODELS:
             models_to_test_gs.append(m + '_GS')
 elif requested_model in MODEL_NAMES:
-    models_to_test    = [requested_model]
+    if requested_model in GS_USE_MODELS:
+        models_to_test    = []
+    else:
+        models_to_test    = [requested_model]
     if requested_model not in GS_SKIP_MODELS:
         models_to_test_gs = [requested_model + '_GS']
     else:
@@ -1017,6 +1022,7 @@ def load_and_eval(model_name, use_gs=False):
     """
     Load checkpoint, run optimised inference, classify with XGBoost.
     """
+    global ERROR_COUNT
     label = model_name
     print(f'\n{"="*60}')
     print(f'Evaluating: {label}')
@@ -1029,6 +1035,7 @@ def load_and_eval(model_name, use_gs=False):
         try:
             ckpt_path = find_checkpoint(label)
         except FileNotFoundError as e:
+            ERROR_COUNT += 1
             print(f'  SKIP: {e}')
             all_model_results[label] = {'error': str(e), 'use_gs': use_gs}
             return
@@ -1150,6 +1157,7 @@ def load_and_eval(model_name, use_gs=False):
         model_PV = model_PV.to(device)
         model_PV.eval()
     except Exception as e:
+        ERROR_COUNT += 1
         print(f'  SKIP: failed to load model – {e}')
         all_model_results[label] = {'error': str(e), 'use_gs': use_gs}
         return
@@ -1272,6 +1280,7 @@ def load_and_eval(model_name, use_gs=False):
             'use_gs':        effective_gs,
         }
     except Exception as e:
+        ERROR_COUNT += 1
         print(f'  WARNING: XGB failed – {e}')
         all_model_results[label] = {'error': str(e), 'use_gs': effective_gs}
 
@@ -1362,3 +1371,7 @@ print(f"  {'DTW k-NN':<30} {'---':>3} {100*train_acc_dtw:>6.2f}%"
       f" {100*test_acc_dtw:>6.2f}%  {XB12-XB11:>7.2f}s")
 print(f"  {'Euclidean k-NN':<30} {'---':>3} {100*train_acc_euc:>6.2f}%"
       f" {100*test_acc_euc:>6.2f}%  {XB22-XB21:>7.2f}s")
+
+if ERROR_COUNT > 0:
+    print(f'\n=== {ERROR_COUNT} model(s) FAILED in analysis ===')
+    sys.exit(1)

@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 MODE=${26}
 DATA=${27}
@@ -17,7 +18,7 @@ MODEL_NAME="${TFN_MODEL_NAME:-all}"
 if [ $TRAINNN = "train" ]; then
     if [ "${TFN_E2E:-0}" = "1" ]; then
         # End-to-end: pass test dataset path for label loading
-        python train_nn.py $1$2 $MODEL_NAME ${20} ${21} ${22} $MODE $1$4
+        python train_nn.py $1$2 $MODEL_NAME ${20} ${21} ${22} $MODE 32 $1$4
     else
         python train_nn.py $1$2 $MODEL_NAME ${20} ${21} ${22} $MODE
     fi

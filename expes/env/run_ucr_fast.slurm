@@ -4,14 +4,16 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --time=23:00:00
+#SBATCH --gres=gpu:1
+#SBATCH --time=08:00:00
 #SBATCH --export=ALL
 #SBATCH --output=logs/ucr_split_%A_%a.out
 #SBATCH --error=logs/ucr_split_%A_%a.err
-#SBATCH --array=0-5
+#SBATCH --array=0-20
 
-# Consolidated UCR experiment: 6 array tasks, each handling ~3-4 datasets.
-# Uses task_total=6 in launch_expe.py to split 21 datasets across 6 tasks.
+# Optimized UCR experiment: 21 array tasks, 1 dataset each.
+# Each task trains all models on its assigned dataset.
+# With --gres=gpu:1, multiple tasks share nodes on multi-GPU partitions.
 
 set -euo pipefail
 
@@ -21,6 +23,9 @@ ENV_NAME="ripsnet"
 IDENTIFIER="try0"
 
 export UCR_PATH="${UCR_PATH:-/hs/work0/home/users/${USER}/data/UCRArchive_2018}"
+
+# Isolate checkpoints per task to avoid overwrites
+export TFN_MODEL_TAG="task_${SLURM_ARRAY_TASK_ID}"
 
 cd "$REPO_DIR/expes"
 mkdir -p logs
@@ -40,6 +45,7 @@ echo "=== $(date) Starting UCR fast: task $SLURM_ARRAY_TASK_ID ==="
 echo "Host: $(hostname)  Arch: $(uname -m)"
 python -c "import torch; print('GPU:', torch.cuda.is_available(), 'Count:', torch.cuda.device_count())"
 
-python launch_expe.py ucr cluster generate train "$IDENTIFIER" 6 "$SLURM_ARRAY_TASK_ID"
+# 21 datasets, 1 per task (round-robin split)
+python launch_expe.py ucr cluster generate train "$IDENTIFIER" 21 "$SLURM_ARRAY_TASK_ID"
 
 echo "=== $(date) Done: task $SLURM_ARRAY_TASK_ID ==="

@@ -83,21 +83,75 @@ def find_checkpoint(mname):
         for ext in ('.pth', '.pt'):
             p = os.path.join(d, mname + ext)
             if os.path.isfile(p): return p
-    # Try script-relative paths
     for d in [os.path.join(script_dir, 'models'), os.path.join(script_dir, '..', 'models')]:
         for ext in ('.pth', '.pt'):
             p = os.path.join(d, mname + ext)
             if os.path.isfile(p): return p
-    raise FileNotFoundError(f"No checkpoint for '{mname}'")
+    return None
 
 ckpt_path = find_checkpoint(model_label)
-ckpt = torch.load(ckpt_path, map_location=device)
-model_state = ckpt['model_state_dict'] if isinstance(ckpt, dict) and 'model_state_dict' in ckpt else ckpt
-ckpt_out_dim = ckpt.get('output_dim', output_dim) if isinstance(ckpt, dict) else output_dim
-base_name = model_label.replace('_GS', '')
-ckpt_npts = ckpt.get('num_points', None) if isinstance(ckpt, dict) else None
-ckpt_activation = ckpt.get('activation', None) if isinstance(ckpt, dict) else None
-ckpt_norm = ckpt.get('norm', None) if isinstance(ckpt, dict) else None
+if ckpt_path is None:
+    print(f"  No checkpoint for '{model_label}', training from scratch...")
+    from sklearn.preprocessing import LabelEncoder
+    _npts = data_train[0].shape[0]
+    def _build_model(name, out_dim, n_dim):
+        if name == 'OnEquivariantTensorFieldNetwork':
+            return OnEquivariantTensorFieldNetwork(num_classes=out_dim, max_order=1, hidden_channels=32, num_layers=3, num_rbf=64, classifier_dims=[64,32])
+        if name == 'AttentionTensorFieldNetwork':
+            return AttentionTensorFieldNetwork(num_classes=out_dim, max_order=1, hidden_channels=32, num_layers=3, num_heads=4, num_rbf=64, classifier_dims=[64,32], radial_hidden=64)
+        if name == 'TensorFieldNetwork':
+            return TensorFieldNetwork(num_classes=out_dim, max_order=0, hidden_channels=8, num_layers=2, classifier_dims=[16], num_rbf=64, k_neighbors=8)
+        if name == 'GTTensorFieldNetwork':
+            return GTTensorFieldNetwork(n=n_dim, num_classes=out_dim, max_order=0, hidden_channels=8, num_layers=2, num_rbf=64, classifier_dims=[16], radial_hidden=128)
+        return OnEquivariantTensorFieldNetwork(num_classes=out_dim, max_order=1, hidden_channels=32, num_layers=3, num_rbf=64, classifier_dims=[64,32])
+    model = _build_model(model_label, output_dim, dim).to(device)
+    from torch import nn
+    targets_t_nn = torch.FloatTensor(np.concatenate(PVs_train, axis=1)).to(device)
+    optim = torch.optim.Adam(model.parameters(), lr=1e-3)
+    criterion = nn.MSELoss()
+    _tfn = model_label in TFN_MODELS
+    def _prepare_pts(data_list):
+        if _tfn:
+            return [torch.cat([x, x.new_zeros(x.shape[0],1)], dim=1) if x.shape[1]==2 else x for x in data_list]
+        return data_list
+    train_in_nn = _prepare_pts(data_train_t)
+    bs = min(32, len(train_in_nn))
+    for ep in range(5):
+        model.train()
+        perm = np.random.permutation(len(train_in_nn))
+        ls = 0.0
+        for s in range(0, len(train_in_nn), bs):
+            bix = perm[s:s+bs]
+            bd = [train_in_nn[i] for i in bix]
+            optim.zero_grad(set_to_none=True)
+            out = model(bd)
+            loss = criterion(out, targets_t_nn[bix])
+            if torch.isfinite(loss):
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optim.step()
+                ls += loss.item() * len(bd)
+        if (ep+1) % 500 == 0:
+            print(f"    ep {ep+1}/5  loss={ls/len(train_in_nn):.6f}")
+    model.eval()
+    model_state = model.state_dict()
+    ckpt_out_dim = output_dim
+    base_name = model_label.replace('_GS', '')
+    ckpt_npts = data_train[0].shape[0]
+    ckpt_activation = 'gelu'
+    ckpt_norm = 'bn'
+    ckpt = {'model_state_dict': model_state, 'output_dim': output_dim, 'num_points': ckpt_npts, 'activation': 'gelu', 'norm': 'bn'}
+    os.makedirs('models', exist_ok=True)
+    torch.save(ckpt, f'models/{model_label}.pth')
+    print(f"  Saved checkpoint to models/{model_label}.pth")
+else:
+    ckpt = torch.load(ckpt_path, map_location=device)
+    model_state = ckpt['model_state_dict'] if isinstance(ckpt, dict) and 'model_state_dict' in ckpt else ckpt
+    ckpt_out_dim = ckpt.get('output_dim', output_dim) if isinstance(ckpt, dict) else output_dim
+    base_name = model_label.replace('_GS', '')
+    ckpt_npts = ckpt.get('num_points', None) if isinstance(ckpt, dict) else None
+    ckpt_activation = ckpt.get('activation', None) if isinstance(ckpt, dict) else None
+    ckpt_norm = ckpt.get('norm', None) if isinstance(ckpt, dict) else None
 
 _has_bn = any('running_mean' in k for k in model_state)
 if ckpt_activation is None: ckpt_activation = 'gelu' if _has_bn else 'relu'

@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from IPython.display import SVG
 import gudhi as gd
@@ -57,6 +58,7 @@ TFN_MODELS = {
     'HierarchicalTensorFieldNetwork', 'OnEquivariantTensorFieldNetwork',
     'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
     'RelaxedOnEquivariantTensorFieldNetwork',
+    'EndToEndTensorFieldNetwork',
     # CrossAttentionTensorFieldNetwork uses its own forward (no _encode_single)
     # HybridOnEquivariantTensorFieldNetwork uses custom forward
 }
@@ -224,9 +226,16 @@ def _geom_cache_path(dataset_name: str, model_name: str,
     The cache key includes a hash of geometry-relevant hyperparameters
     (num_rbf, k_neighbors, max_order) to prevent stale cache collisions
     when hparams change.
+
+    Also includes the optional *TFN_MODEL_TAG* environment variable so that
+    parallel fine-grained sweeps (one model per task) do not collide on the
+    same cache file when sharing a filesystem.
     """
     os.makedirs('cache', exist_ok=True)
     suffix = f'_{tag}' if tag else ''
+    mt = os.environ.get('TFN_MODEL_TAG', '')
+    if mt:
+        suffix += f'_{mt}'
     geom_keys = ('num_rbf', 'k_neighbors', 'max_order')
     hparam_str = json.dumps(
         {k: model_hparams.get(k) for k in geom_keys}, sort_keys=True)
@@ -410,8 +419,13 @@ def _pad_to_3d(data_list):
     out = []
     for x in data_list:
         arr = x.cpu().numpy() if isinstance(x, torch.Tensor) else np.array(x)
-        if arr.shape[1] == 2:
+        d = arr.shape[1]
+        if d == 1:
+            arr = np.concatenate([arr, np.zeros((len(arr), 2), dtype=arr.dtype)], axis=1)
+        elif d == 2:
             arr = np.concatenate([arr, np.zeros((len(arr), 1), dtype=arr.dtype)], axis=1)
+        elif d > 3:
+            arr = arr[:, :3]
         out.append(torch.FloatTensor(arr).to(device))
     return out
 
@@ -474,16 +488,12 @@ def _diffeomorphic_warp_1d(values: torch.Tensor, sigma: float = 0.05) -> torch.T
     # Integrate to get warped time grid
     t = torch.arange(T, device=device, dtype=torch.float32)
     warp = t + vel
-    # Interpolate values to warped grid
-    t = t / (T - 1) * 2 - 1  # normalize to [-1, 1]
-    warp = warp / (T - 1) * 2 - 1
-    warp = warp.clamp(-1, 1)
-    grid = warp.view(1, 1, T)
-    warped = F.grid_sample(
-        values.view(1, 1, T).unsqueeze(-1),
-        grid.view(1, 1, T, 1),
-        mode='bilinear', align_corners=True
-    ).view(T)
+    # Manual 1D linear interp at warped indices [0, T-1]
+    idx = warp.clamp(0, T - 1)
+    lo = idx.floor().long()
+    hi = (lo + 1).clamp(max=T - 1)
+    frac = idx - lo.float()
+    warped = values[lo] * (1 - frac) + values[hi] * frac
     return warped
 
 
@@ -701,7 +711,7 @@ def prepare_data_for_model(mname, data_list, use_gs=False,
         data_list = build_enhanced_pointcloud_data(data_list, method=pc_method,
                                                     **(pc_kwargs or {}))
 
-    if mname == 'TensorFieldNetwork':
+    if mname in ('TensorFieldNetwork', 'EndToEndTensorFieldNetwork'):
         return _pad_to_3d(data_list)
 
     if mname in ['PointNetTutorial', 'PointNet3D']:
@@ -1488,7 +1498,11 @@ def _recover_cuda():
     except RuntimeError:
         pass
 
+ERROR_COUNT = 0
+
+
 def run_both(mname):
+    global ERROR_COUNT
     res = {}
     # Selective GS: skip models where GS hurts, force GS where it helps
     if mname in GS_SKIP_MODELS:
@@ -1502,6 +1516,7 @@ def run_both(mname):
         try:
             res[mname + tag] = train_single_model(mname, use_gs=use_gs)
         except RuntimeError as e:
+            ERROR_COUNT += 1
             err_str = str(e)
             traceback.print_exc()
             print(f'ERROR training {mname}{tag}: {e}')
@@ -1509,6 +1524,7 @@ def run_both(mname):
                 _recover_cuda()
             res[mname + tag] = {'error': err_str}
         except Exception as e:
+            ERROR_COUNT += 1
             traceback.print_exc()
             print(f'ERROR training {mname}{tag}: {e}')
             res[mname + tag] = {'error': str(e)}
@@ -1531,3 +1547,7 @@ else:
         f"Unknown model_name '{model_name}'. "
         f"Use one of {MODEL_NAMES} or 'all'."
     )
+
+if ERROR_COUNT > 0:
+    print(f'\n=== {ERROR_COUNT} model(s) FAILED ===')
+    sys.exit(1)
