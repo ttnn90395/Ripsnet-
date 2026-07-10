@@ -12,6 +12,7 @@ import dill as pck
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from sklearn.preprocessing import LabelEncoder
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
@@ -19,7 +20,7 @@ from models import (_move_basis_tensors,
     PointNetTutorial, PointNet3D, DistanceMatrixRaggedModel, ScalarDistanceDeepSet,
     ScalarInputMLP, MultiInputModel,
     TensorFieldNetwork, GTTensorFieldNetwork, GTTensorFieldNetworkV2,
-    HierarchicalGTTFN, HierarchicalTensorFieldNetwork,
+    HierarchicalGTTFN, HierarchicalTensorFieldNetwork, RaggedPersistenceModel,
     OnEquivariantTensorFieldNetwork, AttentionTensorFieldNetwork,
     StochasticTensorFieldNetwork, CrossAttentionTensorFieldNetwork,
     RelaxedOnEquivariantTensorFieldNetwork, HybridOnEquivariantTensorFieldNetwork)
@@ -105,6 +106,8 @@ def build_model(name):
         return PointNet3D(output_dim=output_dim)
     if name == 'DistanceMatrixRaggedModel':
         return DistanceMatrixRaggedModel(output_dim=output_dim, num_points=_npts)
+    if name == 'RaggedPersistenceModel':
+        return RaggedPersistenceModel(output_dim=output_dim)
     if name == 'ScalarDistanceDeepSet':
         return ScalarDistanceDeepSet(output_dim=output_dim)
     if name == 'ScalarInputMLP':
@@ -115,12 +118,22 @@ def build_model(name):
         return TensorFieldNetwork(num_classes=output_dim, **hp)
     if name == 'GTTensorFieldNetwork':
         return GTTensorFieldNetwork(n=dim, num_classes=output_dim, radial_hidden=128, **hp)
+    if name == 'GTTensorFieldNetworkV2':
+        return GTTensorFieldNetworkV2(n=dim, num_classes=output_dim, radial_hidden=128, **hp)
+    if name == 'HierarchicalGTTFN':
+        return HierarchicalGTTFN(n=dim, num_classes=output_dim,
+            max_order=hp.get('max_order', 0), hidden_channels=hp.get('hidden_channels', 8),
+            stage_sizes=[64, 32], num_rbf=hp.get('num_rbf', 64),
+            cutoff=1.0, classifier_dims=hp.get('classifier_dims', [16]))
+    if name == 'HierarchicalTensorFieldNetwork':
+        return HierarchicalTensorFieldNetwork(num_classes=output_dim,
+            max_order=hp.get('max_order', 0), hidden_channels=hp.get('hidden_channels', 8),
+            stage_sizes=[64, 32], num_rbf=hp.get('num_rbf', 64),
+            cutoff=1.0, classifier_dims=hp.get('classifier_dims', [16]))
     if name == 'OnEquivariantTensorFieldNetwork':
         return OnEquivariantTensorFieldNetwork(num_classes=output_dim,
             max_order=1, hidden_channels=32, num_layers=3, num_rbf=64,
             classifier_dims=[64,32])
-    if name == 'GTTensorFieldNetworkV2':
-        return GTTensorFieldNetworkV2(n=dim, num_classes=output_dim, radial_hidden=128, **hp)
     if name == 'AttentionTensorFieldNetwork':
         return AttentionTensorFieldNetwork(num_classes=output_dim,
             max_order=1, hidden_channels=32, num_layers=3, num_heads=4,
@@ -133,12 +146,10 @@ def build_model(name):
         return StochasticTensorFieldNetwork(num_classes=output_dim,
             num_mixtures=3, max_order=0, hidden_channels=8, num_layers=2,
             num_rbf=64, encoder_dims=[64,32])
-    return build_model(name)  # recursive fallback works via globals?
-    # Actually for safety let me just raise if unknown:
-    # But TensorFieldNetwork was already handled; let's cover the rest.
     if name == 'RelaxedOnEquivariantTensorFieldNetwork':
         return RelaxedOnEquivariantTensorFieldNetwork(num_classes=output_dim,
-            max_order=1, hidden_channels=32, num_layers=3, num_rbf=64, classifier_dims=[64,32])
+            max_order=1, hidden_channels=32, num_layers=3, num_rbf=64,
+            classifier_dims=[64,32])
     if name == 'HybridOnEquivariantTensorFieldNetwork':
         return HybridOnEquivariantTensorFieldNetwork(num_classes=output_dim,
             max_order=1, hidden_channels=32, num_layers=3, num_rbf=64,
@@ -283,11 +294,19 @@ if n_classes < 2:
     print(f"  WARNING: only {n_classes} class(es) in subsample, XGBoost would fail. Recording NaN.")
     tr_acc, te_acc = float('nan'), float('nan')
 else:
-    clf = XGBClassifier(eval_metric='logloss', use_label_encoder=False, verbosity=0)
-    clf.fit(PV_train, y_train)
-    tr_acc = clf.score(PV_train, y_train)
-    te_acc = clf.score(PV_test, y_test)
-    print(f"  XGB  train={100*tr_acc:.2f}%  test={100*te_acc:.2f}%")
+    le = LabelEncoder()
+    y_train_enc = le.fit_transform(y_train)
+    mask = np.isin(y_test, le.classes_)
+    if mask.sum() < 1:
+        print(f"  WARNING: no test samples have classes seen in training. Recording NaN.")
+        tr_acc, te_acc = float('nan'), float('nan')
+    else:
+        y_test_enc = le.transform(y_test[mask])
+        clf = XGBClassifier(eval_metric='logloss', use_label_encoder=False, verbosity=0)
+        clf.fit(PV_train, y_train_enc)
+        tr_acc = clf.score(PV_train, y_train_enc)
+        te_acc = clf.score(PV_test[mask], y_test_enc)
+        print(f"  XGB  train={100*tr_acc:.2f}%  test={100*te_acc:.2f}%  (test_mask={mask.sum()}/{len(mask)})")
 
 # ─── Save ──────────────────────────────────────────────────────────────────────
 result = {

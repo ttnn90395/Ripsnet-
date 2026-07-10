@@ -1,0 +1,29 @@
+\babel@toc {english}{}\relax 
+\contentsline {section}{\numberline {1}Introduction}{3}{section.1}%
+\contentsline {section}{\numberline {2}Background}{3}{section.2}%
+\contentsline {subsection}{\numberline {2.1}Persistence Diagrams}{3}{subsection.2.1}%
+\contentsline {subsection}{\numberline {2.2}Bottleneck Distance and Stability}{4}{subsection.2.2}%
+\contentsline {subsection}{\numberline {2.3}Vectorizations of Persistence Diagrams}{4}{subsection.2.3}%
+\contentsline {subsection}{\numberline {2.4}Permutation-Invariant Set Functions}{5}{subsection.2.4}%
+\contentsline {subsection}{\numberline {2.5}Group Actions and Equivariance}{5}{subsection.2.5}%
+\contentsline {subsection}{\numberline {2.6}Representations and Tensor Products}{5}{subsection.2.6}%
+\contentsline {subsection}{\numberline {2.7}Clebsch-Gordan Coefficients}{6}{subsection.2.7}%
+\contentsline {subsection}{\numberline {2.8}Local Geometric Encodings}{6}{subsection.2.8}%
+\contentsline {section}{\numberline {3}Related Work}{6}{section.3}%
+\contentsline {section}{\numberline {4}Models}{7}{section.4}%
+\contentsline {subsection}{\numberline {4.1}DistanceMatrixRaggedModel}{7}{subsection.4.1}%
+\contentsline {subsection}{\numberline {4.2}PointNet3D}{8}{subsection.4.2}%
+\contentsline {subsection}{\numberline {4.3}Tensor Field Networks}{8}{subsection.4.3}%
+\contentsline {paragraph}{GTTensorFieldNetworkV2}{8}{paragraph*.1}%
+\contentsline {paragraph}{HierarchicalGTTFN}{9}{paragraph*.2}%
+\contentsline {paragraph}{OnEquivariantTensorFieldNetwork}{9}{paragraph*.3}%
+\contentsline {paragraph}{Common design}{9}{paragraph*.4}%
+\contentsline {section}{\numberline {5}Experimental Setup}{9}{section.5}%
+\contentsline {subsection}{\numberline {5.1}Evaluation Protocol}{10}{subsection.5.1}%
+\contentsline {subsection}{\numberline {5.2}Synthetic Point-Cloud Benchmarks}{10}{subsection.5.2}%
+\contentsline {subsection}{\numberline {5.3}UCR Benchmarks}{10}{subsection.5.3}%
+\contentsline {subsection}{\numberline {5.4}Training Scripts}{10}{subsection.5.4}%
+\contentsline {subsection}{\numberline {5.5}Experiment Directory}{11}{subsection.5.5}%
+\contentsline {subsection}{\numberline {5.6}Notebook Workflow}{11}{subsection.5.6}%
+\contentsline {section}{\numberline {6}Results}{11}{section.6}%
+\contentsline {section}{\numberline {7}Conclusion}{12}{section.7}%
