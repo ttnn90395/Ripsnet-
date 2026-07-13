@@ -8,8 +8,8 @@ IDENT=${2:-try1}
 BATCH=${3:-0}
 
 BASE="/users/eleves-a/2023/ten.nguyen-hanaoka/Ripsnet-/expes"
-RESULTS="$BASE/results/ablations"
-PARAM_FILE="$RESULTS/param_map_b${BATCH}.txt"
+ABL_DIR="$BASE/results/ablations"
+PARAM_FILE="$ABL_DIR/param_map_b${BATCH}.txt"
 
 cd "$BASE"
 
@@ -29,7 +29,7 @@ echo "Node: $(hostname)"
 echo "Date: $(date)"
 
 # Check if result already exists
-RESULT_FILE="$RESULTS/ablation_train_${DS}_${MODEL}_${PCT}pct_t${TRIAL}.json"
+RESULT_FILE="$BASE/results/ablation_train_${DS}_${MODEL}_${PCT}pct_t${TRIAL}.json"
 if [ -f "$RESULT_FILE" ]; then
   echo "Result already exists, skipping: $RESULT_FILE"
   exit 0
