@@ -201,18 +201,24 @@ def _unwrap_tfn(m):
     for _ in range(5):
         if hasattr(m, 'k_neighbors') and hasattr(m, 'rbf') and hasattr(m, 'gt_basis'):
             return m
-        child = getattr(m, '_inner', None) or getattr(m, 'base', None)
+        child = getattr(m, '_inner', None) or getattr(m, 'base', None) or getattr(m, 'tfn_backbone', None)
         if child is None or child is m:
             break
         m = child
     return m
+
+def _is_hybrid(m):
+    """Check if model wraps a TFN with additional non-equivariant processing."""
+    inner = getattr(m, '_inner', None)
+    return inner is not None and hasattr(inner, 'neq_phi')
+
 
 def _find_encoder(m):
     """Find the model with _encode_single/_encode_batch and rho (for forward pass)."""
     for _ in range(5):
         if (hasattr(m, '_encode_single') or hasattr(m, '_encode_batch')) and hasattr(m, 'rho'):
             return m
-        child = getattr(m, '_inner', None) or getattr(m, 'base', None)
+        child = getattr(m, '_inner', None) or getattr(m, 'base', None) or getattr(m, 'tfn_backbone', None)
         if child is None or child is m:
             break
         m = child
@@ -258,7 +264,7 @@ def forward(model, batch_data, mname, geom=None):
         return model(torch.cat([x.reshape(1,-1) for x in batch_data]))
     if mname == 'CrossAttentionTensorFieldNetwork':
         return model(batch_data)
-    if geom is not None and mname in TFN_MODELS:
+    if geom is not None and mname in TFN_MODELS and not _is_hybrid(model):
         inner = _find_encoder(model)
         _move_basis_tensors(inner, device)
         if isinstance(geom, dict) and geom.get('uniform',False):
