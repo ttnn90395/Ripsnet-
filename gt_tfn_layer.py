@@ -102,33 +102,38 @@ def knn_geometry(
     if not torch.isfinite(pos).all():
         raise RuntimeError(f"knn_geometry: pos contains NaN/Inf (shape={pos.shape})")
 
-    if chunk_size <= 0 or chunk_size >= N:
-        # ── Dense (original) path — single O(N²) block ────────────────────
-        diff = pos.unsqueeze(1) - pos.unsqueeze(0)   # (N, N, n)
-        dist = diff.norm(dim=-1)                      # (N, N)
-
-        mask = torch.eye(N, dtype=torch.bool, device=dev)
-        dist_masked = dist.masked_fill(mask, float('inf'))
-        _, nbr_idx = dist_masked.topk(k, dim=-1, largest=False)
+    # WORKAROUND: PyTorch 2.8.0+cu128 topk has a within-kernel bug that
+    # produces garbage indices. The only reliable fix is to run topk on CPU.
+    # Data is tiny (max 67 points), so CPU overhead is negligible.
+    if dev.type == 'cuda':
+        pos_cpu = pos.cpu()
+        N_cpu = N
+        diff_cpu = pos_cpu.unsqueeze(1) - pos_cpu.unsqueeze(0)
+        dist_cpu = diff_cpu.norm(dim=-1)
+        mask_cpu = torch.eye(N_cpu, dtype=torch.bool)
+        dist_masked_cpu = dist_cpu.masked_fill(mask_cpu, float('inf'))
+        _, nbr_idx_cpu = dist_masked_cpu.topk(k, dim=-1, largest=False)
+        nbr_idx = nbr_idx_cpu.to(dev)
     else:
-        # ── Chunked path — never materialises the full N×N distance matrix ─
-        nbr_idx = torch.empty(N, k, dtype=torch.long, device=dev)
-        for start in range(0, N, chunk_size):
-            end = min(start + chunk_size, N)
-            chunk = pos[start:end]                         # (C, n)
-            diff_c = chunk.unsqueeze(1) - pos.unsqueeze(0)  # (C, N, n)
-            dist_c = diff_c.norm(dim=-1)                    # (C, N)
-            # Mask self-distances
-            for i in range(start, end):
-                dist_c[i - start, i] = float('inf')
-            _, idx_c = dist_c.topk(k, dim=-1, largest=False)
-            nbr_idx[start:end] = idx_c
+        if chunk_size <= 0 or chunk_size >= N:
+            diff = pos.unsqueeze(1) - pos.unsqueeze(0)
+            dist = diff.norm(dim=-1)
+            mask = torch.eye(N, dtype=torch.bool, device=dev)
+            dist_masked = dist.masked_fill(mask, float('inf'))
+            _, nbr_idx = dist_masked.topk(k, dim=-1, largest=False)
+        else:
+            nbr_idx = torch.empty(N, k, dtype=torch.long, device=dev)
+            for start in range(0, N, chunk_size):
+                end = min(start + chunk_size, N)
+                chunk = pos[start:end]
+                diff_c = chunk.unsqueeze(1) - pos.unsqueeze(0)
+                dist_c = diff_c.norm(dim=-1)
+                for i in range(start, end):
+                    dist_c[i - start, i] = float('inf')
+                _, idx_c = dist_c.topk(k, dim=-1, largest=False)
+                nbr_idx[start:end] = idx_c
 
-    # Gather neighbor positions and compute edge vectors (shared path)
-    if nbr_idx.numel() > 0 and (nbr_idx.max().item() >= N or nbr_idx.min().item() < 0):
-        print(f"[D] knn_geometry OOB: nbr_idx max={nbr_idx.max().item()}, "
-              f"min={nbr_idx.min().item()}, N={N}, k={k}")
-        nbr_idx = nbr_idx.clamp(0, N - 1)
+    nbr_idx = nbr_idx.clamp(0, N - 1)
     pos_j = pos[nbr_idx]                                        # (N, k, n)
     diff_knn = pos.unsqueeze(1) - pos_j                         # (N, k, n)
     dist_knn = diff_knn.norm(dim=-1)                            # (N, k)
@@ -438,22 +443,13 @@ class GTTFNLayer(nn.Module):
         """Sparse (N,k) message passing — gather neighbor features by index."""
         if fCG.ndim == 5:
             batch_idx = torch.arange(fCG.shape[0], device=fCG.device)[:, None, None]
-            if nbr_idx.numel() > 0 and (nbr_idx.max().item() >= fCG.shape[1] or nbr_idx.min().item() < 0):
-                print(f"[D] _message_sparse OOB: nbr_idx max={nbr_idx.max().item()}, "
-                      f"min={nbr_idx.min().item()}, fCG.shape={fCG.shape}, "
-                      f"N={N}, k={k}, c_in={c_in}, c_out={c_out}, "
-                      f"batch_idx.shape={batch_idx.shape}, nbr_idx.shape={nbr_idx.shape}")
-                nbr_idx = nbr_idx.clamp(0, fCG.shape[1] - 1)
+            nbr_idx = nbr_idx.clamp(0, fCG.shape[1] - 1)
             fCG_nbr = fCG[batch_idx, nbr_idx]                               # (B, N, k, Ci, de, do)
             contracted = torch.einsum("bnje,bnjceo->bnjco", e_feat, fCG_nbr)  # (B, N, k, Ci, do)
             return torch.einsum("bnjco,bnjcd->bnod", radial, contracted)         # (B, N, Co, do)
 
-        # SINGLE path guard for OOB nbr_idx
-        if nbr_idx.numel() > 0 and (nbr_idx.max().item() >= fCG.shape[0] or nbr_idx.min().item() < 0):
-            print(f"[D] _message_sparse (single) OOB: nbr_idx max={nbr_idx.max().item()}, "
-                  f"min={nbr_idx.min().item()}, fCG.shape={fCG.shape}, "
-                  f"N={N}, k={k}, c_in={c_in}, c_out={c_out}")
-            nbr_idx = nbr_idx.clamp(0, fCG.shape[0] - 1)
+        # SINGLE path
+        nbr_idx = nbr_idx.clamp(0, fCG.shape[0] - 1)
         fCG_nbr = fCG[nbr_idx]                                             # (N, k, Ci, de, do)
         contracted = torch.einsum("ije,ijceo->ijco", e_feat, fCG_nbr)      # (N, k, Ci, do)
         return torch.einsum("ijco,ijcd->iod", radial, contracted)           # (N, Co, do)
@@ -490,30 +486,37 @@ def knn_geometry_batch(
     if not torch.isfinite(pos).all():
         raise RuntimeError(f"knn_geometry_batch: pos contains NaN/Inf (shape={pos.shape})")
 
-    if chunk_size <= 0 or chunk_size >= N:
-        diff = pos.unsqueeze(2) - pos.unsqueeze(1)                 # (B, N, N, n)
-        dist = diff.norm(dim=-1)                                   # (B, N, N)
-
-        mask = torch.eye(N, dtype=torch.bool, device=dev).unsqueeze(0).expand(B, N, N)
-        dist_masked = dist.masked_fill(mask, float('inf'))
-        _, nbr_idx = dist_masked.topk(k, dim=-1, largest=False)    # (B, N, k)
+    # WORKAROUND: PyTorch 2.8.0+cu128 topk has a within-kernel bug that
+    # produces garbage indices. Run topk on CPU for safety.
+    if dev.type == 'cuda':
+        pos_cpu = pos.cpu()
+        diff_cpu = pos_cpu.unsqueeze(2) - pos_cpu.unsqueeze(1)
+        dist_cpu = diff_cpu.norm(dim=-1)
+        mask_cpu = torch.eye(N, dtype=torch.bool).unsqueeze(0).expand(B, N, N)
+        dist_masked_cpu = dist_cpu.masked_fill(mask_cpu, float('inf'))
+        _, nbr_idx_cpu = dist_masked_cpu.topk(k, dim=-1, largest=False)
+        nbr_idx = nbr_idx_cpu.to(dev)
     else:
-        nbr_idx = torch.empty(B, N, k, dtype=torch.long, device=dev)
-        for start in range(0, N, chunk_size):
-            end = min(start + chunk_size, N)
-            chunk = pos[:, start:end]                              # (B, C, n)
-            diff_c = chunk.unsqueeze(2) - pos.unsqueeze(1)         # (B, C, N, n)
-            dist_c = diff_c.norm(dim=-1)                           # (B, C, N)
-            for i in range(start, end):
-                dist_c[:, i - start, i] = float('inf')
-            _, idx_c = dist_c.topk(k, dim=-1, largest=False)
-            nbr_idx[:, start:end] = idx_c
+        if chunk_size <= 0 or chunk_size >= N:
+            diff = pos.unsqueeze(2) - pos.unsqueeze(1)
+            dist = diff.norm(dim=-1)
+            mask = torch.eye(N, dtype=torch.bool, device=dev).unsqueeze(0).expand(B, N, N)
+            dist_masked = dist.masked_fill(mask, float('inf'))
+            _, nbr_idx = dist_masked.topk(k, dim=-1, largest=False)
+        else:
+            nbr_idx = torch.empty(B, N, k, dtype=torch.long, device=dev)
+            for start in range(0, N, chunk_size):
+                end = min(start + chunk_size, N)
+                chunk = pos[:, start:end]
+                diff_c = chunk.unsqueeze(2) - pos.unsqueeze(1)
+                dist_c = diff_c.norm(dim=-1)
+                for i in range(start, end):
+                    dist_c[:, i - start, i] = float('inf')
+                _, idx_c = dist_c.topk(k, dim=-1, largest=False)
+                nbr_idx[:, start:end] = idx_c
 
     batch_idx = torch.arange(B, device=dev)[:, None, None]
-    if nbr_idx.numel() > 0 and (nbr_idx.max().item() >= N or nbr_idx.min().item() < 0):
-        print(f"[D] knn_geometry_batch OOB: nbr_idx max={nbr_idx.max().item()}, "
-              f"min={nbr_idx.min().item()}, B={B}, N={N}, k={k}")
-        nbr_idx = nbr_idx.clamp(0, N - 1)
+    nbr_idx = nbr_idx.clamp(0, N - 1)
     pos_j = pos[batch_idx, nbr_idx]                                   # (B, N, k, n)
     diff_knn = pos.unsqueeze(2) - pos_j                                # (B, N, k, n)
     dist_knn = diff_knn.norm(dim=-1)                                   # (B, N, k)

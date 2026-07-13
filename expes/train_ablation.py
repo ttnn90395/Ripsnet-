@@ -188,8 +188,7 @@ def prepare(data_list):
         for x in data_list:
             a = x.cpu().numpy()
             m = np.linalg.norm(a[:,None] - a[None], axis=-1)
-            out.append((torch.FloatTensor(x).to(device),
-                        torch.FloatTensor([[m.mean()]]).to(device)))
+            out.append((x, torch.FloatTensor([[m.mean()]]).to(device)))
         return out
     return data_list
 
@@ -207,12 +206,16 @@ def precompute_geom(model, data_list):
         rbfs, gts, nbrs = [], [], []
         for pc in data_list:
             r, g, n = knn_geometry(pc, inner.rbf, inner.gt_basis, k)
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
             rbfs.append(r.detach()); gts.append(g.detach()); nbrs.append(n.detach())
         if all(r.shape == rbfs[0].shape for r in rbfs):
             return {'rbf':torch.stack(rbfs),'gt_edge':torch.stack(gts),
                     'nbr_idx':torch.stack(nbrs),'uniform':True}
         return {'list':list(zip(rbfs,gts,nbrs)),'uniform':False}
-    except: return None
+    except Exception as e:
+        print(f"  precompute_geom failed for {model_name}: {e}")
+        return None
 
 train_geom = precompute_geom(model, train_in)
 test_geom  = precompute_geom(model, test_in)
@@ -231,13 +234,20 @@ def forward(model, batch_data, mname, geom=None):
                      torch.cat([x[1] for x in batch_data]))
     if mname == 'ScalarInputMLP':
         return model(torch.cat([x.reshape(1,-1) for x in batch_data]))
+    if mname == 'CrossAttentionTensorFieldNetwork':
+        return model(batch_data)
     if geom is not None and mname in TFN_MODELS:
         inner = getattr(model, '_inner', model)
         _move_basis_tensors(inner, device)
-        if isinstance(geom, dict) and geom.get('uniform',False) and hasattr(inner, '_encode_batch'):
-            return inner._encode_batch(torch.stack(batch_data),
-                precomputed_geom=(geom['rbf'],geom['gt_edge'],geom['nbr_idx']))
-        geom_list = geom['list'] if isinstance(geom, dict) else geom
+        if isinstance(geom, dict) and geom.get('uniform',False):
+            if hasattr(inner, '_encode_batch'):
+                return inner._encode_batch(torch.stack(batch_data),
+                    precomputed_geom=(geom['rbf'],geom['gt_edge'],geom['nbr_idx']))
+            geom_list = list(zip(geom['rbf'], geom['gt_edge'], geom['nbr_idx']))
+        elif isinstance(geom, dict):
+            geom_list = geom['list']
+        else:
+            geom_list = geom
         descs = []
         for x, (r,g,n) in zip(batch_data, geom_list):
             r=r.squeeze(0) if r.ndim==4 else r; g=g.squeeze(0) if g.ndim==4 else g
@@ -247,66 +257,73 @@ def forward(model, batch_data, mname, geom=None):
     return model(batch_data)
 
 # ─── Training loop ────────────────────────────────────────────────────────────
-optimizer = optim.Adam(model.parameters(), lr=5e-3, weight_decay=1e-5)
-criterion = nn.MSELoss()
-bs = min(32, len(train_in))
-n_t = len(train_in)
-
-for ep in range(num_epochs):
-    model.train()
-    perm = np.random.permutation(n_t)
-    loss_sum = 0.0
-    for s in range(0, n_t, bs):
-        bix = perm[s:s+bs]; bd = [train_in[i] for i in bix]; bt = targets_t[bix]
-        bg = get_geom(train_geom, bix)
-        optimizer.zero_grad(set_to_none=True)
-        out = forward(model, bd, model_name, geom=bg)
-        loss = criterion(out, bt)
-        if torch.isfinite(loss):
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            loss_sum += loss.item() * len(bd)
-    if (ep+1) % 500 == 0:
-        print(f"  ep {ep+1}/{num_epochs}  loss={loss_sum/n_t:.6f}")
-
-# ─── Evaluate ─────────────────────────────────────────────────────────────────
-model.eval()
-all_preds = []
-with torch.no_grad():
-    for s in range(0, len(test_in), bs):
-        bd = test_in[s:s+bs]; bg = get_geom(test_geom, list(range(s,s+bs)))
-        out = forward(model, bd, model_name, geom=bg)
-        all_preds.append(out.detach().cpu().numpy())
-PV_test = np.vstack(all_preds)
-
-# Get train PV predictions for XGBoost
-all_preds_train = []
-with torch.no_grad():
-    for s in range(0, len(train_in), bs):
-        bd = train_in[s:s+bs]; bg = get_geom(train_geom, list(range(s,s+bs)))
-        out = forward(model, bd, model_name, geom=bg)
-        all_preds_train.append(out.detach().cpu().numpy())
-PV_train = np.vstack(all_preds_train)
-
-n_classes = len(np.unique(y_train))
-if n_classes < 2:
-    print(f"  WARNING: only {n_classes} class(es) in subsample, XGBoost would fail. Recording NaN.")
-    tr_acc, te_acc = float('nan'), float('nan')
-else:
-    le = LabelEncoder()
-    y_train_enc = le.fit_transform(y_train)
-    mask = np.isin(y_test, le.classes_)
-    if mask.sum() < 1:
-        print(f"  WARNING: no test samples have classes seen in training. Recording NaN.")
-        tr_acc, te_acc = float('nan'), float('nan')
+tr_acc = te_acc = float('nan')
+try:
+    if model_name in TFN_MODELS and model_name != 'CrossAttentionTensorFieldNetwork' and train_geom is None:
+        print(f"  GEOMETRY FAILED — skipping training, recording NaN")
     else:
-        y_test_enc = le.transform(y_test[mask])
-        clf = XGBClassifier(eval_metric='logloss', use_label_encoder=False, verbosity=0)
-        clf.fit(PV_train, y_train_enc)
-        tr_acc = clf.score(PV_train, y_train_enc)
-        te_acc = clf.score(PV_test[mask], y_test_enc)
-        print(f"  XGB  train={100*tr_acc:.2f}%  test={100*te_acc:.2f}%  (test_mask={mask.sum()}/{len(mask)})")
+        optimizer = optim.Adam(model.parameters(), lr=5e-3, weight_decay=1e-5)
+        criterion = nn.MSELoss()
+        bs = min(32, len(train_in))
+        n_t = len(train_in)
+
+        for ep in range(num_epochs):
+            model.train()
+            perm = np.random.permutation(n_t)
+            loss_sum = 0.0
+            for s in range(0, n_t, bs):
+                bix = perm[s:s+bs]; bd = [train_in[i] for i in bix]; bt = targets_t[bix]
+                bg = get_geom(train_geom, bix)
+                optimizer.zero_grad(set_to_none=True)
+                out = forward(model, bd, model_name, geom=bg)
+                loss = criterion(out, bt)
+                if torch.isfinite(loss):
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    optimizer.step()
+                    loss_sum += loss.item() * len(bd)
+            if (ep+1) % 500 == 0:
+                print(f"  ep {ep+1}/{num_epochs}  loss={loss_sum/n_t:.6f}")
+
+        # ─── Evaluate ──────────────────────────────────────────────────────────────
+        model.eval()
+        all_preds = []
+        with torch.no_grad():
+            for s in range(0, len(test_in), bs):
+                e = min(s+bs, len(test_in))
+                bd = test_in[s:e]; bg = get_geom(test_geom, list(range(s,e)))
+                out = forward(model, bd, model_name, geom=bg)
+                all_preds.append(out.detach().cpu().numpy())
+        PV_test = np.vstack(all_preds)
+
+        # Get train PV predictions for XGBoost
+        all_preds_train = []
+        with torch.no_grad():
+            for s in range(0, len(train_in), bs):
+                e = min(s+bs, len(train_in))
+                bd = train_in[s:e]; bg = get_geom(train_geom, list(range(s,e)))
+                out = forward(model, bd, model_name, geom=bg)
+                all_preds_train.append(out.detach().cpu().numpy())
+        PV_train = np.vstack(all_preds_train)
+
+        n_classes = len(np.unique(y_train))
+        if n_classes < 2:
+            print(f"  WARNING: only {n_classes} class(es) in subsample, XGBoost would fail. Recording NaN.")
+        else:
+            le = LabelEncoder()
+            y_train_enc = le.fit_transform(y_train)
+            mask = np.isin(y_test, le.classes_)
+            if mask.sum() < 1:
+                print(f"  WARNING: no test samples have classes seen in training. Recording NaN.")
+            else:
+                y_test_enc = le.transform(y_test[mask])
+                clf = XGBClassifier(eval_metric='logloss', use_label_encoder=False, verbosity=0)
+                clf.fit(PV_train, y_train_enc)
+                tr_acc = clf.score(PV_train, y_train_enc)
+                te_acc = clf.score(PV_test[mask], y_test_enc)
+                print(f"  XGB  train={100*tr_acc:.2f}%  test={100*te_acc:.2f}%  (test_mask={mask.sum()}/{len(mask)})")
+except Exception as e:
+    print(f"  Training/evaluation failed: {e}")
 
 # ─── Save ──────────────────────────────────────────────────────────────────────
 result = {

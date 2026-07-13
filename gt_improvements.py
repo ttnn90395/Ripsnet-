@@ -97,7 +97,12 @@ def ball_query(
     # Replace out-of-radius distances with inf
     dist2_masked = dist2.clone()
     dist2_masked[~within] = float('inf')
-    _, top_idx = dist2_masked.topk(k, dim=-1, largest=False)  # (M, k)
+    dev = dist2_masked.device
+    if dev.type == 'cuda':
+        _, top_idx = dist2_masked.cpu().topk(k, dim=-1, largest=False)
+        top_idx = top_idx.to(dev)
+    else:
+        _, top_idx = dist2_masked.topk(k, dim=-1, largest=False)  # (M, k)
 
     # Where fewer than k points are in radius, topk returns inf-distance points.
     # Replace those with the center's own nearest neighbour (index 0 of top_idx).
