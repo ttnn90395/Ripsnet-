@@ -197,9 +197,20 @@ test_in  = prepare(data_test_t)
 
 # ─── TFN geometry ─────────────────────────────────────────────────────────────
 def _unwrap_tfn(m):
-    """Drill through wrapper layers to find the actual TFN with k_neighbors/rbf/gt_basis."""
+    """Find the model with k_neighbors/rbf/gt_basis (for precompute_geom)."""
     for _ in range(5):
         if hasattr(m, 'k_neighbors') and hasattr(m, 'rbf') and hasattr(m, 'gt_basis'):
+            return m
+        child = getattr(m, '_inner', None) or getattr(m, 'base', None)
+        if child is None or child is m:
+            break
+        m = child
+    return m
+
+def _find_encoder(m):
+    """Find the model with _encode_single/_encode_batch and rho (for forward pass)."""
+    for _ in range(5):
+        if (hasattr(m, '_encode_single') or hasattr(m, '_encode_batch')) and hasattr(m, 'rho'):
             return m
         child = getattr(m, '_inner', None) or getattr(m, 'base', None)
         if child is None or child is m:
@@ -248,7 +259,7 @@ def forward(model, batch_data, mname, geom=None):
     if mname == 'CrossAttentionTensorFieldNetwork':
         return model(batch_data)
     if geom is not None and mname in TFN_MODELS:
-        inner = _unwrap_tfn(model)
+        inner = _find_encoder(model)
         _move_basis_tensors(inner, device)
         if isinstance(geom, dict) and geom.get('uniform',False):
             if hasattr(inner, '_encode_batch'):
