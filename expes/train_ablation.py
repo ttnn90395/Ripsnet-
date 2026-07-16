@@ -263,7 +263,15 @@ def forward(model, batch_data, mname, geom=None):
     if mname == 'ScalarInputMLP':
         return model(torch.cat([x.reshape(1,-1) for x in batch_data]))
     if mname == 'CrossAttentionTensorFieldNetwork':
-        return model(batch_data)
+        geom_list = None
+        if geom is not None:
+            if isinstance(geom, dict) and geom.get('uniform', False):
+                geom_list = list(zip(geom['rbf'], geom['gt_edge'], geom['nbr_idx']))
+            elif isinstance(geom, dict):
+                geom_list = geom['list']
+            else:
+                geom_list = geom
+        return model(batch_data, precomputed_geom=geom_list)
     if geom is not None and mname in TFN_MODELS and not _is_hybrid(model):
         inner = _find_encoder(model)
         _move_basis_tensors(inner, device)

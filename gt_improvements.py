@@ -1078,7 +1078,7 @@ class TemporalCrossAttentionTFN(nn.Module):
         scalar_sig = GTSignature.scalar(n)
         vector_sig = GTSignature.vector(n)
 
-        init_types   = {scalar_sig: 2, vector_sig: 1}  # norm + 1 for scalar
+        init_types   = {scalar_sig: 1, vector_sig: 1}  # norm only for scalar (standard)
         hidden_types = {sig: hidden_channels for sig in all_sigs}
 
         self.mp_layers  = nn.ModuleList()
@@ -1093,15 +1093,19 @@ class TemporalCrossAttentionTFN(nn.Module):
             self.mix_layers.append(ChannelMixer(hidden_types))
             in_types = hidden_types
 
-        self.inv_dim = hidden_channels * len(all_sigs)
+        _raw_inv_dim = hidden_channels * len(all_sigs)
+        self.inv_dim = max(_raw_inv_dim, 64)  # transformer needs d_model >= 64
 
         # Temporal transformer encoder over point descriptors
-        self.pos_encoder = nn.Parameter(torch.zeros(1, 1500, self.inv_dim))
+        self.pos_encoder = nn.Parameter(torch.zeros(1, 2048, self.inv_dim))
         nn.init.normal_(self.pos_encoder, std=0.02)
         self.pre_norm = nn.LayerNorm(self.inv_dim)
+        _proj = (nn.Linear(_raw_inv_dim, self.inv_dim)
+                 if _raw_inv_dim != self.inv_dim else nn.Identity())
+        self._desc_proj = _proj
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=self.inv_dim, nhead=num_heads,
-            dim_feedforward=self.inv_dim * 2,
+            dim_feedforward=self.inv_dim * 4,
             dropout=dropout, activation='gelu', batch_first=True)
         self.transformer_encoder = nn.TransformerEncoder(
             encoder_layer, num_layers=transformer_layers)
@@ -1127,14 +1131,17 @@ class TemporalCrossAttentionTFN(nn.Module):
         pos: torch.Tensor,
         precomputed_geom=None,
     ) -> torch.Tensor:
-        """Encode point cloud → per-point invariant descriptors (N, D)."""
+        """Encode point cloud → per-point invariant descriptors (N, D).
+
+        When a precomputed geometry tuple (rbf, gt_edge, nbr_idx) is
+        provided the expensive k-NN lookup is skipped, matching the
+        standard TFN forward path.
+        """
         N = pos.shape[0]
         sc = self._scalar_sig
         vc = self._vector_sig
 
-        f0_parts = [pos.norm(dim=-1, keepdim=True),
-                    torch.ones(N, 1, device=pos.device)]
-        f0 = torch.cat(f0_parts, dim=-1).unsqueeze(-1)
+        f0 = pos.norm(dim=-1, keepdim=True).unsqueeze(-1)  # (N, 1, 1) -- standard scalar init
 
         pos_norm = pos.norm(dim=-1, keepdim=True)
         pos_safe = pos / pos_norm.where(pos_norm > 0, torch.ones_like(pos_norm))
@@ -1170,14 +1177,25 @@ class TemporalCrossAttentionTFN(nn.Module):
                 parts.append(f.squeeze(-1))
             else:
                 parts.append(f.norm(dim=-1))
-        return torch.cat(parts, dim=-1)  # (N, D)
+        desc = torch.cat(parts, dim=-1)  # (N, D_raw)
+        return self._desc_proj(desc)     # (N, D_inv)
 
     # ------------------------------------------------------------------
-    def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
-        """Forward pass: encode + temporal transformer + classifier."""
+    def forward(self, batch: List[torch.Tensor],
+                precomputed_geom=None) -> torch.Tensor:
+        """Forward pass: encode + temporal transformer + classifier.
+
+        Parameters
+        ----------
+        batch : list of (N_i, n) tensors
+        precomputed_geom : optional list of (rbf, gt_edge, nbr_idx) tuples,
+            one per sample, as produced by knn_geometry().  When provided the
+            expensive k-NN lookup is skipped.
+        """
         descs_list = []
-        for pc in batch:
-            point_desc = self._encode_point_descriptors(pc)
+        for idx, pc in enumerate(batch):
+            geom_i = precomputed_geom[idx] if precomputed_geom is not None else None
+            point_desc = self._encode_point_descriptors(pc, precomputed_geom=geom_i)
             global_desc = point_desc.sum(dim=0, keepdim=True)  # (1, D)
 
             # Temporal transformer over point dimension (with pre-norm)
@@ -1195,6 +1213,11 @@ class TemporalCrossAttentionTFN(nn.Module):
             combined = torch.cat([global_desc, temporal_desc], dim=-1)
             descs_list.append(self.rho(combined))
         return torch.cat(descs_list, dim=0)
+
+    # ------------------------------------------------------------------
+    def _encode_single(self, pos, precomputed_geom=None, **kwargs):
+        """Standard TFN-compatible single-sample encoding interface."""
+        return self._encode_point_descriptors(pos, precomputed_geom=precomputed_geom)
 
     # ------------------------------------------------------------------
     def to(self, *args, **kwargs):
