@@ -385,7 +385,8 @@ def tfn_batched_forward(model, data_list, geom_cache, mname, batch_size=64):
                                 sub_nbr   = torch.stack([geom_list[i][2] for i in idxs])
                                 sub_out   = inner._encode_batch(
                                     sub_batch,
-                                    precomputed_geom=(sub_rbf, sub_gt, sub_nbr))
+                                    precomputed_geom=(sub_rbf, sub_gt, sub_nbr),
+                                    return_descriptors=True)
                                 for off, i in enumerate(idxs):
                                     descs[i] = sub_out[off]
                         out = inner.rho(torch.stack(descs))
@@ -1123,7 +1124,8 @@ def forward_batch(model, batch_data, mname, geom_batch=None, hier_batch=None):
                     sub_nbr   = torch.stack([geom_list[i][2] for i in idxs])
                     sub_out   = inner._encode_batch(
                         sub_batch,
-                        precomputed_geom=(sub_rbf, sub_gt, sub_nbr))
+                        precomputed_geom=(sub_rbf, sub_gt, sub_nbr),
+                        return_descriptors=True)
                     for off, i in enumerate(idxs):
                         descs[i] = sub_out[off]
                 else:

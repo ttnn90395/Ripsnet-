@@ -203,6 +203,8 @@ GEOM_CASES = [
 
 
 def check_geom_paths():
+    from collections import defaultdict
+
     from gt_tfn_layer import knn_geometry
 
     torch.manual_seed(0)
@@ -212,25 +214,59 @@ def check_geom_paths():
             m = build()
             m.eval()
             inner = getattr(m, "_inner", m)
-            pcs = [torch.randn(24, 3) * 2.0, torch.randn(18, 3) * 2.0]
+            # batch with a repeated size (20, 20, 17) to exercise the grouped
+            # _encode_batch path used by train_nn.py forward_batch
+            pcs = [torch.randn(20, 3) * 2.0, torch.randn(20, 3) * 2.0, torch.randn(17, 3) * 2.0]
             geoms = [knn_geometry(pc, inner.rbf, inner.gt_basis, inner.k_neighbors) for pc in pcs]
+
             with torch.no_grad():
-                if mode == "fast":
-                    descs = [inner._encode_single(pc, precomputed_geom=g) for pc, g in zip(pcs, geoms)]
-                    out_fast = inner.rho(torch.stack(descs))
+                # reference: per-sample _encode_single + rho(stack)
+                descs = [inner._encode_single(pc, precomputed_geom=g) for pc, g in zip(pcs, geoms)]
+                out_ref = inner.rho(torch.stack(descs))
+
+                # grouped path exactly as in train_nn.py forward_batch
+                size_groups = defaultdict(list)
+                for i, x in enumerate(pcs):
+                    size_groups[x.shape[0]].append(i)
+                descs = [None] * len(pcs)
+                for sz, idxs in size_groups.items():
+                    if len(idxs) == 1:
+                        i = idxs[0]
+                        descs[i] = inner._encode_single(pcs[i], precomputed_geom=geoms[i])
+                    elif hasattr(inner, "_encode_batch"):
+                        sub_batch = torch.stack([pcs[i] for i in idxs])
+                        sub_rbf = torch.stack([geoms[i][0] for i in idxs])
+                        sub_gt = torch.stack([geoms[i][1] for i in idxs])
+                        sub_nbr = torch.stack([geoms[i][2] for i in idxs])
+                        sub_out = inner._encode_batch(
+                            sub_batch,
+                            precomputed_geom=(sub_rbf, sub_gt, sub_nbr),
+                            return_descriptors=True)
+                        for off, i in enumerate(idxs):
+                            descs[i] = sub_out[off]
+                    else:
+                        for i in idxs:
+                            descs[i] = inner._encode_single(pcs[i], precomputed_geom=geoms[i])
+                out_grouped = inner.rho(torch.stack(descs))
+
+                if mode == "model":
+                    out_direct = m(pcs, precomputed_geom=geoms)
                 else:
-                    out_fast = m(pcs, precomputed_geom=geoms)
-                out_direct = m(pcs)
-            if isinstance(out_fast, (list, tuple)):
-                out_fast = out_fast[0]
+                    out_direct = m(pcs)
+
+            if isinstance(out_ref, (list, tuple)):
+                out_ref = out_ref[0]
+            if isinstance(out_grouped, (list, tuple)):
+                out_grouped = out_grouped[0]
             if isinstance(out_direct, (list, tuple)):
                 out_direct = out_direct[0]
-            diff = (out_fast - out_direct).abs().max().item()
-            if diff < 1e-5:
-                print(f"GEOMOK {name:44s} diff={diff:.2e}")
+            d1 = (out_ref - out_grouped).abs().max().item()
+            d2 = (out_ref - out_direct).abs().max().item()
+            if max(d1, d2) < 1e-5:
+                print(f"GEOMOK {name:44s} grouped={d1:.2e} direct={d2:.2e}")
             else:
                 failures.append(name)
-                print(f"GEOMFAIL {name:44s} diff={diff:.2e}")
+                print(f"GEOMFAIL {name:44s} grouped={d1:.2e} direct={d2:.2e}")
         except Exception as exc:
             failures.append(name)
             print(f"GEOMFAIL {name:44s} {type(exc).__name__}: {exc}")
