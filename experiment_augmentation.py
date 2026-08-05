@@ -832,19 +832,6 @@ print(f"Shape of first noisy test distance matrix: {dm_noisy_test[0].shape}")
 ds = [pairwise_distances(X).flatten() for X in data_train[:30]]
 maxd = np.max(np.concatenate(ds))
 
-n_augment_levels = [0,1,5,10,20]
-
-clean_accuracies = []
-noisy_accuracies = []
-clean_permutation_robustness_scores = []
-noisy_permutation_robustness_scores = []
-
-subset_size_for_robustness = 50
-
-print(f"Defined n_augment_levels: {n_augment_levels}")
-print("Initialized empty lists for accuracies and robustness scores.")
-print(f"Set subset_size_for_robustness to: {subset_size_for_robustness}")
-
 
 def data_augmentation_by_permutations(data_train, label_train, n_augment_per_sample, seed=42):
     rng = np.random.default_rng(seed)
