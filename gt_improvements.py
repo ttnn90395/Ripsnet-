@@ -991,29 +991,41 @@ class TemporalCrossAttentionTFN(nn.Module):
         descs_list = []
         for idx, pc in enumerate(batch):
             geom_i = precomputed_geom[idx] if precomputed_geom is not None else None
-            point_desc = self._encode_point_descriptors(pc, precomputed_geom=geom_i)
-            global_desc = point_desc.sum(dim=0, keepdim=True)  # (1, D)
-
-            # Temporal transformer over point dimension (with pre-norm)
-            N = point_desc.shape[0]
-            max_pos = self.pos_encoder.shape[1]
-            if N <= max_pos:
-                pe = self.pos_encoder[:, :N, :]
-            else:
-                pe = self.pos_encoder[:, [min(i, max_pos - 1) for i in range(N)], :]
-            temporal_input = point_desc.unsqueeze(0) + pe  # (1, N, D)
-            temporal_input = self.pre_norm(temporal_input)
-            temporal_out = self.transformer_encoder(temporal_input)
-            temporal_desc = temporal_out.mean(dim=1)       # (1, D)
-
-            combined = torch.cat([global_desc, temporal_desc], dim=-1)
+            combined = self._encode_descriptor(pc, precomputed_geom=geom_i).unsqueeze(0)  # (1, D)
             descs_list.append(self.rho(combined))
         return torch.cat(descs_list, dim=0)
 
     # ------------------------------------------------------------------
+    def _encode_descriptor(self, pos, precomputed_geom=None):
+        """Pool a single point cloud into the (D,) invariant descriptor.
+
+        Combines the global (sum) pool and the temporal (transformer)
+        pool exactly as ``_encode_batch`` does, so the pipeline's
+        stack-then-``rho`` fast-path matches direct ``forward``.
+        """
+        point_desc = self._encode_point_descriptors(pos, precomputed_geom=precomputed_geom)
+        global_desc = point_desc.sum(dim=0, keepdim=True)      # (1, D)
+        N = point_desc.shape[0]
+        max_pos = self.pos_encoder.shape[1]
+        if N <= max_pos:
+            pe = self.pos_encoder[:, :N, :]
+        else:
+            pe = self.pos_encoder[:, [min(i, max_pos - 1) for i in range(N)], :]
+        temporal_input = point_desc.unsqueeze(0) + pe          # (1, N, D)
+        temporal_input = self.pre_norm(temporal_input)
+        temporal_out = self.transformer_encoder(temporal_input)
+        temporal_desc = temporal_out.mean(dim=1)               # (1, D)
+        combined = torch.cat([global_desc, temporal_desc], dim=-1)
+        return combined.squeeze(0)                             # (D,)
+
+    # ------------------------------------------------------------------
     def _encode_single(self, pos, precomputed_geom=None, **kwargs):
-        """Standard TFN-compatible single-sample encoding interface."""
-        return self._encode_point_descriptors(pos, precomputed_geom=precomputed_geom)
+        """Standard TFN-compatible single-sample encoding interface.
+
+        Returns a pooled invariant descriptor (D,) so the pipeline's
+        stack-then-``rho`` fast-path works for mixed-size batches.
+        """
+        return self._encode_descriptor(pos, precomputed_geom=precomputed_geom)
 
 
 # ============================================================================

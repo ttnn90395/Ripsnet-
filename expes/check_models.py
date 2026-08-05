@@ -155,5 +155,93 @@ def run():
     print(f"ALL {len(CASES)} MODELS OK")
 
 
+# ---------------------------------------------------------------------------
+# Precomputed-geometry consistency
+#
+# The training/eval pipelines fast-path every TFN model through
+# `inner._encode_single(pc, precomputed_geom=g)` + `inner.rho(stack)` (and the
+# model-level `forward(..., precomputed_geom=...)` for CrossAttention).  If
+# that path ever diverges from the direct forward, every experiment using the
+# geometry cache silently computes the wrong thing, so both must agree on a
+# mixed-size batch (which also catches torch.stack shape bugs).
+# ---------------------------------------------------------------------------
+
+GEOM_CASES = [
+    ("GTTensorFieldNetwork",
+     lambda: models.GTTensorFieldNetwork(n=3, num_classes=4, max_order=1, hidden_channels=8,
+                                         num_layers=2, k_neighbors=6), "fast"),
+    ("GTTensorFieldNetworkV2",
+     lambda: models.GTTensorFieldNetworkV2(n=3, num_classes=4, max_order=1, hidden_channels=8,
+                                           num_layers=2, k_neighbors=6), "fast"),
+    ("GTTensorFieldNetworkWithAttention",
+     lambda: models.GTTensorFieldNetworkWithAttention(n=3, num_classes=4, max_order=1,
+                                                      hidden_channels=8, num_layers=2,
+                                                      k_neighbors=6), "fast"),
+    ("AttentionTensorFieldNetwork",
+     lambda: models.AttentionTensorFieldNetwork(n=3, num_classes=4, max_order=1, hidden_channels=8,
+                                                num_layers=2, num_heads=2, num_rbf=8,
+                                                k_neighbors=6), "fast"),
+    ("StochasticTensorFieldNetwork",
+     lambda: models.StochasticTensorFieldNetwork(n=3, num_classes=4, num_mixtures=2, max_order=1,
+                                                 hidden_channels=8, num_layers=2), "fast"),
+    ("GraphMambaTensorFieldNetwork",
+     lambda: models.GraphMambaTensorFieldNetwork(num_classes=4, max_order=1, hidden_channels=8,
+                                                 num_layers=2, num_rbf=8, k_neighbors=6), "fast"),
+    ("TemporalCrossAttentionTFN",
+     lambda: models.TemporalCrossAttentionTFN(n=3, num_classes=4, max_order=1, hidden_channels=8,
+                                              num_layers=1, num_heads=2, transformer_layers=1,
+                                              num_rbf=8, k_neighbors=6), "fast"),
+    ("StochasticEquivariantTFN",
+     lambda: models.StochasticEquivariantTFN(n=3, num_classes=4, num_mixtures=2, max_order=1,
+                                             hidden_channels=8, num_layers=2), "fast"),
+    ("CrossAttentionTensorFieldNetwork",
+     lambda: models.CrossAttentionTensorFieldNetwork(num_classes=4, n=3, max_order=1,
+                                                     hidden_channels=8, num_layers=1, num_heads=2,
+                                                     transformer_layers=1, num_rbf=8,
+                                                     k_neighbors=6), "model"),
+]
+
+
+def check_geom_paths():
+    from gt_tfn_layer import knn_geometry
+
+    torch.manual_seed(0)
+    failures = []
+    for name, build, mode in GEOM_CASES:
+        try:
+            m = build()
+            m.eval()
+            inner = getattr(m, "_inner", m)
+            pcs = [torch.randn(24, 3) * 2.0, torch.randn(18, 3) * 2.0]
+            geoms = [knn_geometry(pc, inner.rbf, inner.gt_basis, inner.k_neighbors) for pc in pcs]
+            with torch.no_grad():
+                if mode == "fast":
+                    descs = [inner._encode_single(pc, precomputed_geom=g) for pc, g in zip(pcs, geoms)]
+                    out_fast = inner.rho(torch.stack(descs))
+                else:
+                    out_fast = m(pcs, precomputed_geom=geoms)
+                out_direct = m(pcs)
+            if isinstance(out_fast, (list, tuple)):
+                out_fast = out_fast[0]
+            if isinstance(out_direct, (list, tuple)):
+                out_direct = out_direct[0]
+            diff = (out_fast - out_direct).abs().max().item()
+            if diff < 1e-5:
+                print(f"GEOMOK {name:44s} diff={diff:.2e}")
+            else:
+                failures.append(name)
+                print(f"GEOMFAIL {name:44s} diff={diff:.2e}")
+        except Exception as exc:
+            failures.append(name)
+            print(f"GEOMFAIL {name:44s} {type(exc).__name__}: {exc}")
+
+    print()
+    if failures:
+        print(f"{len(failures)} geometry failure(s): {', '.join(failures)}")
+        sys.exit(1)
+    print(f"ALL {len(GEOM_CASES)} GEOMETRY PATHS CONSISTENT")
+
+
 if __name__ == "__main__":
     run()
+    check_geom_paths()
