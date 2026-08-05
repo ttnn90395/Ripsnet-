@@ -1215,8 +1215,12 @@ class SetTransformerTensorFieldNetwork(nn.Module):
             decoder_dims=decoder_dims,
         )
 
-    def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
-        return self._inner(batch)
+    def forward(
+        self,
+        context_batch: List[torch.Tensor],
+        query_batch:   List[torch.Tensor],
+    ) -> torch.Tensor:
+        return self._inner(context_batch, query_batch)
 
 
 class GraphMambaTensorFieldNetwork(nn.Module):

@@ -38,6 +38,7 @@ from models import (
     CrossAttentionTensorFieldNetwork,
     RelaxedOnEquivariantTensorFieldNetwork,
     HybridOnEquivariantTensorFieldNetwork,
+    GraphMambaTensorFieldNetwork,
     _move_basis_tensors,
 )
 
@@ -51,6 +52,7 @@ MODEL_NAMES = [
     'CrossAttentionTensorFieldNetwork',
     'RelaxedOnEquivariantTensorFieldNetwork',
     'HybridOnEquivariantTensorFieldNetwork',
+    'GraphMambaTensorFieldNetwork',
 ]
 
 TFN_MODELS = {
@@ -60,6 +62,7 @@ TFN_MODELS = {
     'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
     'RelaxedOnEquivariantTensorFieldNetwork',
     'CrossAttentionTensorFieldNetwork',
+    'GraphMambaTensorFieldNetwork',
 }
 
 # -------------------------------------------------------------------------
@@ -250,6 +253,17 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
             k_neighbors=k_neighbors,
             classifier_dims=classifier_dims or [256, 128],
             radial_hidden=radial_hidden or 128,
+        )
+    if name == 'GraphMambaTensorFieldNetwork':
+        return GraphMambaTensorFieldNetwork(
+            num_classes=output_dim,
+            max_order=extra.get('max_order', 0),
+            hidden_channels=hidden_channels or 64,
+            num_layers=num_layers or 6,
+            num_rbf=num_rbf or 64,
+            cutoff=cutoff,
+            k_neighbors=k_neighbors,
+            classifier_dims=classifier_dims or [256, 128],
         )
     if name == 'HierarchicalGTTFN':
         return HierarchicalGTTFN(
@@ -1168,7 +1182,7 @@ def load_and_eval(model_name, use_gs=False):
     if hasattr(torch, 'compile') and device.type == 'cuda':
         try:
             compiled_model = torch.compile(model_PV, mode='reduce-overhead')
-            print(f'  torch.compile enabled')
+            print('  torch.compile enabled')
         except Exception as e:
             print(f'  torch.compile skipped: {e}')
 

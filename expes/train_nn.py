@@ -27,6 +27,7 @@ from models import (
     RelaxedOnEquivariantTensorFieldNetwork,
     HybridOnEquivariantTensorFieldNetwork,
     EndToEndTensorFieldNetwork,
+    GraphMambaTensorFieldNetwork,
     _move_basis_tensors,
 )
 
@@ -41,10 +42,7 @@ MODEL_NAMES = [
     'RelaxedOnEquivariantTensorFieldNetwork',
     'HybridOnEquivariantTensorFieldNetwork',
     # EndToEndTensorFieldNetwork excluded from default pipeline (needs classification workflow)
-    # FIXME: GraphMambaTensorFieldNetwork has a selective-scan bug in the
-    # GTMambaLayer (msg tensor lacks k-neighbor dim for per-step iteration).
-    # Removed from training until the scan logic is rewritten.
-    # 'GraphMambaTensorFieldNetwork',
+    'GraphMambaTensorFieldNetwork',
 ]
 
 TFN_MODELS = {
@@ -55,6 +53,7 @@ TFN_MODELS = {
     'RelaxedOnEquivariantTensorFieldNetwork',
     'CrossAttentionTensorFieldNetwork',
     'EndToEndTensorFieldNetwork',
+    'GraphMambaTensorFieldNetwork',
 }
 
 os.makedirs('models', exist_ok=True)
@@ -808,6 +807,17 @@ def build_model_by_name(name, n=None, hparams=None):
             classifier_dims=hp.get('classifier_dims', _cd),
             radial_hidden=hp.get('radial_hidden', 128),
         )
+    if name == 'GraphMambaTensorFieldNetwork':
+        return GraphMambaTensorFieldNetwork(
+            num_classes=output_dim,
+            max_order=hp.get('max_order', 0),
+            hidden_channels=hp.get('hidden_channels', _hc),
+            num_layers=hp.get('num_layers', _nl),
+            num_rbf=hp.get('num_rbf', 64),
+            cutoff=hp.get('cutoff', 1.0),
+            k_neighbors=hp.get('k_neighbors', min(16, _npts // 10 + 1)),
+            classifier_dims=hp.get('classifier_dims', _cd),
+        )
     if name == 'HierarchicalGTTFN':
         return HierarchicalGTTFN(
             n=_n,
@@ -1354,7 +1364,7 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
     if False and hasattr(torch, 'compile') and device.type == 'cuda':
         try:
             m = torch.compile(m, mode='reduce-overhead')
-            print(f'  torch.compile enabled')
+            print('  torch.compile enabled')
         except Exception as e:
             print(f'  torch.compile skipped: {e}')
 
