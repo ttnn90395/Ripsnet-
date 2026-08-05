@@ -43,9 +43,9 @@ if train_data:
         ax.legend()
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
-        fig.savefig(f'ablation_plots/train_frac_{ds}.png', dpi=150)
+        fig.savefig('ablation_plots/train_frac_{ds}.png', dpi=150)
         plt.close(fig)
-        print(f"  Saved ablation_plots/train_frac_{ds}.png")
+        print("  Saved ablation_plots/train_frac_{ds}.png")
 
     # Summary: avg accuracy across datasets per fraction per model
     print("\n=== Training fraction: Mean test accuracy across all datasets ===")
@@ -73,9 +73,9 @@ if train_data:
     ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(f'ablation_plots/train_frac_overall.png', dpi=150)
+    fig.savefig('ablation_plots/train_frac_overall.png', dpi=150)
     plt.close(fig)
-    print(f"  Saved ablation_plots/train_frac_overall.png")
+    print("  Saved ablation_plots/train_frac_overall.png")
 else:
     print("No training ablation results found.")
 
@@ -108,9 +108,9 @@ if density_data:
         ax.legend()
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
-        fig.savefig(f'ablation_plots/density_{ds}.png', dpi=150)
+        fig.savefig('ablation_plots/density_{ds}.png', dpi=150)
         plt.close(fig)
-        print(f"  Saved ablation_plots/density_{ds}.png")
+        print("  Saved ablation_plots/density_{ds}.png")
 
     # Overall summary
     print("\n=== Density ablation: Mean test accuracy across all datasets ===")
@@ -138,9 +138,9 @@ if density_data:
     ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(f'ablation_plots/density_overall.png', dpi=150)
+    fig.savefig('ablation_plots/density_overall.png', dpi=150)
     plt.close(fig)
-    print(f"  Saved ablation_plots/density_overall.png")
+    print("  Saved ablation_plots/density_overall.png")
 
     # Per-model-type comparison (raw vs GS)
     print("\n=== Raw vs GS comparison ===")
@@ -190,9 +190,9 @@ if iso_data:
         ax.set_title(f'{ds} — Isometry robustness (lower = more robust)')
         ax.grid(True, alpha=0.3, axis='x')
         fig.tight_layout()
-        fig.savefig(f'ablation_plots/isometry_{ds}.png', dpi=150)
+        fig.savefig('ablation_plots/isometry_{ds}.png', dpi=150)
         plt.close(fig)
-        print(f"  Saved ablation_plots/isometry_{ds}.png")
+        print("  Saved ablation_plots/isometry_{ds}.png")
 
     # 2. Summary: mean L2 distance per model across datasets
     print("\n=== Isometry: Mean L2 distance across datasets ===")
@@ -213,9 +213,9 @@ if iso_data:
     ax.set_title('Isometry robustness (lower = more robust)')
     ax.grid(True, alpha=0.3, axis='x')
     fig.tight_layout()
-    fig.savefig(f'ablation_plots/isometry_overall.png', dpi=150)
+    fig.savefig('ablation_plots/isometry_overall.png', dpi=150)
     plt.close(fig)
-    print(f"  Saved ablation_plots/isometry_overall.png")
+    print("  Saved ablation_plots/isometry_overall.png")
 else:
     print("No isometry robustness results found.")
 

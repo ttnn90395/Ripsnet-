@@ -30,6 +30,7 @@ from models import (
     CrossAttentionTensorFieldNetwork,
     RelaxedOnEquivariantTensorFieldNetwork,
     HybridOnEquivariantTensorFieldNetwork,
+    GraphMambaTensorFieldNetwork,
     _move_basis_tensors,
 )
 
@@ -49,7 +50,8 @@ TFN_MODELS = {'TensorFieldNetwork','GTTensorFieldNetwork','GTTensorFieldNetworkV
     'HierarchicalGTTFN','HierarchicalTensorFieldNetwork',
     'OnEquivariantTensorFieldNetwork','AttentionTensorFieldNetwork',
     'StochasticTensorFieldNetwork','CrossAttentionTensorFieldNetwork',
-    'RelaxedOnEquivariantTensorFieldNetwork','HybridOnEquivariantTensorFieldNetwork'}
+    'RelaxedOnEquivariantTensorFieldNetwork','HybridOnEquivariantTensorFieldNetwork',
+    'GraphMambaTensorFieldNetwork'}
 
 # ─── Load data ────────────────────────────────────────────────────────────────
 train_sfx = f"_train_TDE311LS_5{identifier}"
@@ -212,6 +214,12 @@ def build_analysis_model(name, out_dim, extra=None):
         return HybridOnEquivariantTensorFieldNetwork(num_classes=out_dim,
             max_order=1, hidden_channels=32, num_layers=3, num_rbf=64,
             cutoff=1.0, k_neighbors=16, classifier_dims=[64,32], non_eq_dim=128)
+    if name == 'GraphMambaTensorFieldNetwork':
+        return GraphMambaTensorFieldNetwork(num_classes=out_dim,
+            max_order=hp('max_order',1), hidden_channels=hp('hidden_channels',32),
+            num_layers=hp('num_layers',4), num_rbf=hp('num_rbf',64),
+            cutoff=hp('cutoff',1.0), k_neighbors=hp('k_neighbors',16),
+            classifier_dims=hp('classifier_dims',[64,32]))
     # Check for saved arch metadata
     for k in ['hidden_channels','num_layers','num_rbf','classifier_dims','k_neighbors']:
         v = None

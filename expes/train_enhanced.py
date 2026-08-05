@@ -44,6 +44,7 @@ from models import (
     OnEquivariantTensorFieldNetwork, AttentionTensorFieldNetwork,
     StochasticTensorFieldNetwork, CrossAttentionTensorFieldNetwork,
     RelaxedOnEquivariantTensorFieldNetwork, HybridOnEquivariantTensorFieldNetwork,
+    GraphMambaTensorFieldNetwork,
 )
 from tfn_enhancements import (
     MLPClassifierHead, PointCloudAugmenter,
@@ -157,6 +158,7 @@ TFN_MODELS = {
     'OnEquivariantTensorFieldNetwork', 'AttentionTensorFieldNetwork',
     'StochasticTensorFieldNetwork', 'CrossAttentionTensorFieldNetwork',
     'RelaxedOnEquivariantTensorFieldNetwork', 'HybridOnEquivariantTensorFieldNetwork',
+    'GraphMambaTensorFieldNetwork',
 }
 
 _npts = data_train[0].shape[0]
@@ -236,6 +238,11 @@ def build_backbone(name, hp):
         return HybridOnEquivariantTensorFieldNetwork(num_classes=output_dim,
             max_order=1, hidden_channels=32, num_layers=3, num_rbf=64,
             classifier_dims=[64, 32], non_eq_dim=128)
+    if name == 'GraphMambaTensorFieldNetwork':
+        return GraphMambaTensorFieldNetwork(num_classes=output_dim,
+            max_order=hp.get('max_order', 1), hidden_channels=hp.get('hidden_channels', 32),
+            num_layers=hp.get('num_layers', 4), num_rbf=hp.get('num_rbf', 64),
+            k_neighbors=hp.get('k_neighbors', 16), classifier_dims=hp.get('classifier_dims'))
     raise ValueError(f"Unknown model: {name}")
 
 
@@ -428,7 +435,7 @@ def forward_full(model, batch_data, geom=None):
 tr_acc = te_acc = float('nan')
 try:
     if model_name in TFN_MODELS and model_name != 'CrossAttentionTensorFieldNetwork' and train_geom is None:
-        print(f"  GEOMETRY FAILED — skipping training")
+        print("  GEOMETRY FAILED — skipping training")
     else:
         optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         criterion = nn.CrossEntropyLoss()

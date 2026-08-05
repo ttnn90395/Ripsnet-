@@ -181,7 +181,7 @@ all_pvs = []  # list of (tag, PV_NN) for each member
 for tag in model_tags:
     print(f"\n{'='*60}")
     print(f'Member: {tag}')
-    print(f'='*60)
+    print('='*60)
 
     os.environ['TFN_MODEL_TAG'] = tag
     # Import find_checkpoint, load_and_eval from analysis_nn in a module-specific way

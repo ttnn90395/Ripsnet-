@@ -27,7 +27,8 @@ from models import (_move_basis_tensors,
     HierarchicalGTTFN, HierarchicalTensorFieldNetwork, RaggedPersistenceModel,
     OnEquivariantTensorFieldNetwork, AttentionTensorFieldNetwork,
     StochasticTensorFieldNetwork, CrossAttentionTensorFieldNetwork,
-    RelaxedOnEquivariantTensorFieldNetwork, HybridOnEquivariantTensorFieldNetwork)
+    RelaxedOnEquivariantTensorFieldNetwork, HybridOnEquivariantTensorFieldNetwork,
+    GraphMambaTensorFieldNetwork)
 from xgboost import XGBClassifier
 
 os.makedirs('results', exist_ok=True)
@@ -84,7 +85,8 @@ TFN_MODELS = {'TensorFieldNetwork','GTTensorFieldNetwork','GTTensorFieldNetworkV
     'HierarchicalGTTFN','HierarchicalTensorFieldNetwork',
     'OnEquivariantTensorFieldNetwork','AttentionTensorFieldNetwork',
     'StochasticTensorFieldNetwork','CrossAttentionTensorFieldNetwork',
-    'RelaxedOnEquivariantTensorFieldNetwork','HybridOnEquivariantTensorFieldNetwork'}
+    'RelaxedOnEquivariantTensorFieldNetwork','HybridOnEquivariantTensorFieldNetwork',
+    'GraphMambaTensorFieldNetwork'}
 _npts = data_train[0].shape[0]
 
 _hp = {'max_order': 0, 'hidden_channels': 8, 'num_layers': 2,
@@ -157,6 +159,11 @@ def build_model(name):
         return HybridOnEquivariantTensorFieldNetwork(num_classes=output_dim,
             max_order=1, hidden_channels=32, num_layers=3, num_rbf=64,
             classifier_dims=[64,32], non_eq_dim=128)
+    if name == 'GraphMambaTensorFieldNetwork':
+        return GraphMambaTensorFieldNetwork(num_classes=output_dim,
+            max_order=hp.get('max_order', 1), hidden_channels=hp.get('hidden_channels', 32),
+            num_layers=hp.get('num_layers', 4), num_rbf=hp.get('num_rbf', 64),
+            k_neighbors=hp.get('k_neighbors', 16), classifier_dims=hp.get('classifier_dims'))
     raise ValueError(f"Unknown model: {name}")
 
 model = build_model(model_name).to(device)
@@ -299,7 +306,7 @@ def forward(model, batch_data, mname, geom=None):
 tr_acc = te_acc = float('nan')
 try:
     if model_name in TFN_MODELS and model_name != 'CrossAttentionTensorFieldNetwork' and train_geom is None:
-        print(f"  GEOMETRY FAILED — skipping training, recording NaN")
+        print("  GEOMETRY FAILED — skipping training, recording NaN")
     else:
         optimizer = optim.Adam(model.parameters(), lr=5e-3, weight_decay=1e-5)
         criterion = nn.MSELoss()
@@ -353,7 +360,7 @@ try:
             y_train_enc = le.fit_transform(y_train)
             mask = np.isin(y_test, le.classes_)
             if mask.sum() < 1:
-                print(f"  WARNING: no test samples have classes seen in training. Recording NaN.")
+                print("  WARNING: no test samples have classes seen in training. Recording NaN.")
             else:
                 y_test_enc = le.transform(y_test[mask])
                 clf = XGBClassifier(eval_metric='logloss', use_label_encoder=False, verbosity=0)
