@@ -1,15 +1,10 @@
 # Training of the NN
 
 import dill as pck
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
-from IPython.display import SVG
-import gudhi as gd
-import gudhi.representations
 from tqdm import tqdm
 import os
 import sys
@@ -17,10 +12,10 @@ import json
 import hashlib
 import traceback
 from collections import defaultdict
+from typing import Dict, List
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
-from sklearn.model_selection import KFold
 from models import (
     TensorFieldNetwork, GTTensorFieldNetwork, GTTensorFieldNetworkV2,
     HierarchicalGTTFN, HierarchicalTensorFieldNetwork,
@@ -58,9 +53,8 @@ TFN_MODELS = {
     'HierarchicalTensorFieldNetwork', 'OnEquivariantTensorFieldNetwork',
     'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
     'RelaxedOnEquivariantTensorFieldNetwork',
+    'CrossAttentionTensorFieldNetwork',
     'EndToEndTensorFieldNetwork',
-    # CrossAttentionTensorFieldNetwork uses its own forward (no _encode_single)
-    # HybridOnEquivariantTensorFieldNetwork uses custom forward
 }
 
 os.makedirs('models', exist_ok=True)
@@ -606,6 +600,18 @@ ARCHITECTURE_SEARCH = {
     'lr':            [1e-3, 5e-3, 1e-2],
 }
 
+def flatten_pvs(pv_list):
+    """Flatten persistence vectors: 3D (N, H, W) → (N, H*W), else keep (N, D)."""
+    flattened = []
+    for pv in pv_list:
+        if pv.ndim == 3:  # (N, H, W) → (N, H*W)
+            n_samples = pv.shape[0]
+            flattened.append(pv.reshape(n_samples, -1))
+        else:  # already (N, D)
+            flattened.append(pv)
+    return np.hstack(flattened) if flattened else np.array([])
+
+
 def sweep_architecture(mname, dataset_name,
                        n_trials: int = 10,
                        val_split: float = 0.2) -> dict:
@@ -828,7 +834,7 @@ def build_model_by_name(name, n=None, hparams=None):
     if name == 'OnEquivariantTensorFieldNetwork':
         return OnEquivariantTensorFieldNetwork(
             num_classes=output_dim,
-            max_order=hp.get('max_order', 1),
+            max_order=hp.get('max_order', 0),
             hidden_channels=hp.get('hidden_channels', 32),
             num_layers=hp.get('num_layers', 3),
             num_rbf=hp.get('num_rbf', 64),
@@ -839,7 +845,7 @@ def build_model_by_name(name, n=None, hparams=None):
     if name == 'AttentionTensorFieldNetwork':
         return AttentionTensorFieldNetwork(
             num_classes=output_dim,
-            max_order=hp.get('max_order', 1),
+            max_order=hp.get('max_order', 0),
             hidden_channels=hp.get('hidden_channels', 32),
             num_layers=hp.get('num_layers', 3),
             num_heads=hp.get('num_heads', 4),
@@ -862,25 +868,27 @@ def build_model_by_name(name, n=None, hparams=None):
             encoder_dims=hp.get('encoder_dims', [256, 128]),
         )
     if name == 'CrossAttentionTensorFieldNetwork':
+        # Enforce minimum hidden_channels=32 so transformer d_model >= 64
+        _ca_hc = max(hp.get('hidden_channels', 32), 32)
         return CrossAttentionTensorFieldNetwork(
             num_classes=output_dim,
             n=_n,
-            max_order=hp.get('max_order', 1),
-            hidden_channels=hp.get('hidden_channels', _hc),
-            num_layers=hp.get('num_layers', _nl),
+            max_order=hp.get('max_order', 0),
+            hidden_channels=_ca_hc,
+            num_layers=hp.get('num_layers', max(_nl, 2)),
             num_heads=hp.get('num_heads', 4),
             transformer_layers=hp.get('transformer_layers', 2),
             num_rbf=hp.get('num_rbf', 64),
             cutoff=hp.get('cutoff', 1.0),
             k_neighbors=hp.get('k_neighbors', min(16, _npts // 10 + 1)),
-            classifier_dims=hp.get('classifier_dims', _cd),
+            classifier_dims=hp.get('classifier_dims', [64, 32]),
             radial_hidden=hp.get('radial_hidden', 64),
             dropout=hp.get('dropout', 0.1),
         )
     if name == 'RelaxedOnEquivariantTensorFieldNetwork':
         return RelaxedOnEquivariantTensorFieldNetwork(
             num_classes=output_dim,
-            max_order=hp.get('max_order', 1),
+            max_order=hp.get('max_order', 0),
             hidden_channels=hp.get('hidden_channels', 32),
             num_layers=hp.get('num_layers', 3),
             num_rbf=hp.get('num_rbf', 64),
@@ -892,7 +900,7 @@ def build_model_by_name(name, n=None, hparams=None):
     if name == 'HybridOnEquivariantTensorFieldNetwork':
         return HybridOnEquivariantTensorFieldNetwork(
             num_classes=output_dim,
-            max_order=hp.get('max_order', 1),
+            max_order=hp.get('max_order', 0),
             hidden_channels=hp.get('hidden_channels', 32),
             num_layers=hp.get('num_layers', 3),
             num_rbf=hp.get('num_rbf', 64),
@@ -907,7 +915,7 @@ def build_model_by_name(name, n=None, hparams=None):
         return EndToEndTensorFieldNetwork(
             num_classes=num_labels,
             num_pv_classes=output_dim,
-            max_order=hp.get('max_order', 1),
+            max_order=hp.get('max_order', 0),
             hidden_channels=hp.get('hidden_channels', 32),
             num_layers=hp.get('num_layers', 3),
             num_rbf=hp.get('num_rbf', 64),
@@ -1011,6 +1019,18 @@ def forward_batch(model, batch_data, mname, geom_batch=None, hier_batch=None):
         if isinstance(batch_data, list):
             batch_data = torch.cat([x.reshape(1, -1) for x in batch_data], dim=0)
         return model(batch_data)
+
+    # CrossAttentionTensorFieldNetwork: pass geometry through to forward()
+    if mname == 'CrossAttentionTensorFieldNetwork':
+        geom_list = None
+        if geom_batch is not None:
+            if isinstance(geom_batch, dict) and geom_batch.get('uniform', False):
+                geom_list = list(zip(geom_batch['rbf'], geom_batch['gt_edge'], geom_batch['nbr_idx']))
+            elif isinstance(geom_batch, dict):
+                geom_list = geom_batch['list']
+            else:
+                geom_list = geom_batch
+        return model(batch_data, precomputed_geom=geom_list)
 
     # Unpack hierarchical geometry from tuple when present
     if geom_batch is not None and isinstance(geom_batch, tuple) and len(geom_batch) == 2:
@@ -1296,9 +1316,17 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
     train_data = prepare_data_for_model(
         mname, data_train_torch, use_gs=use_gs,
         gs_sigma=gs_sigma, augment=True)
-    test_data  = prepare_data_for_model(
-        mname, data_test_torch, use_gs=use_gs,
-        gs_sigma=gs_sigma, augment=False)
+
+    # Create a validation split from training data (80/20)
+    # This prevents using the test set for early stopping / LR scheduling
+    n_train = len(train_data)
+    n_val = max(1, int(n_train * 0.2))
+    indices = np.random.permutation(n_train)
+    val_indices = indices[:n_val]
+    train_indices = indices[n_val:]
+
+    val_data = [train_data[i] for i in val_indices]
+    train_data_split = [train_data[i] for i in train_indices]
 
     # Sanity check: catch shape bugs before training starts
     sample = train_data[0] if not isinstance(train_data[0], tuple) else train_data[0][0]
@@ -1319,7 +1347,6 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
     # Fix 1: precompute geometry for TFN models
     gs_tag = 'GS' if use_gs else 'raw'
     geom_train = precompute_geometry(m, train_data, mname, tag=f'train_{gs_tag}')
-    geom_test  = precompute_geometry(m, test_data,  mname, tag=f'test_{gs_tag}')
 
     # Fix 3: torch.compile (disabled for debugging)
     # NOTE: torch.compile can cause graph capture errors with dynamic shapes.
@@ -1358,20 +1385,14 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
               f'train={len(targets_train)} test={len(targets_test)}')
     else:
         criterion = nn.MSELoss()
-        
-        # Flatten persistence vectors: if PVs are 3D (N, H, W), flatten to (N, H*W)
-        def flatten_pvs(pv_list):
-            flattened = []
-            for pv in pv_list:
-                if pv.ndim == 3:  # (N, H, W) → (N, H*W)
-                    n_samples = pv.shape[0]
-                    flattened.append(pv.reshape(n_samples, -1))
-                else:  # already (N, D)
-                    flattened.append(pv)
-            return np.hstack(flattened) if flattened else np.array([])
-        
+
         targets_train = torch.FloatTensor(flatten_pvs(PVs_train)).to(device)
         targets_test  = torch.FloatTensor(flatten_pvs(PVs_test)).to(device)
+
+    # Split targets for validation (80/20 from training set)
+    targets_val = targets_train[val_indices]
+    targets_train_split = targets_train[train_indices]
+
     try:
         scaler = torch.amp.GradScaler(device_type='cuda',
                                      enabled=(device.type == 'cuda'))
@@ -1384,18 +1405,21 @@ def train_single_model(mname, use_gs=False, gs_sigma=GS_SIGMA):
     log_every = max(1, num_epochs // 100)
     tr_loss = val_loss = 0.0
 
+    # Precompute geometry for validation split
+    geom_val = precompute_geometry(m, val_data, mname, tag=f'val_{gs_tag}')
+
     # TFN custom ops (einsum, CG tensor products) can overflow FP16 under AMP.
     # Disable AMP for TFN models; other models benefit from FP16 speedup.
     _no_amp = TFN_MODELS | {'CrossAttentionTensorFieldNetwork', 'ScalarDistanceDeepSet', 'HybridOnEquivariantTensorFieldNetwork', 'EndToEndTensorFieldNetwork'}
     use_amp = device.type == 'cuda' and mname not in _no_amp
     for epoch in tqdm(range(num_epochs), desc=f"Epochs ({label})"):
         tr_loss  = train_epoch(
-            m, train_data, targets_train, optimizer, criterion, mname,
+            m, train_data_split, targets_train_split, optimizer, criterion, mname,
             geom_cache=geom_train, batch_size=batch_size,
             scaler=scaler, use_amp=use_amp, max_grad_norm=1.0)
         val_loss = evaluate(
-            m, test_data, targets_test, criterion, mname,
-            geom_cache=geom_test, batch_size=batch_size)
+            m, val_data, targets_val, criterion, mname,
+            geom_cache=geom_val, batch_size=batch_size)
 
         if lr_schedule == 'cosine':
             scheduler.step()

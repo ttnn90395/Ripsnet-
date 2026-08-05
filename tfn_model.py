@@ -32,21 +32,15 @@ Improvement summary vs v1
 from __future__ import annotations
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
-from typing import List, Optional
+from typing import List
 
 # Core GT machinery
 from models import (
     GTTensorFieldNetwork,
-    GTTFN_RBFExpansion as RBFExpansion,
-    ChannelMixer,
-    EquivariantGate,
-    ResidualProjection,
     HierarchicalGTTFN,
     OnEquivariantWrapper,
 )
-from gt_basis import GTSignature
 
 
 # ============================================================================

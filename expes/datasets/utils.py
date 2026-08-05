@@ -133,7 +133,7 @@ def create_3_circle_noisy(N_points, N_noise):
 
 def create_multiple_circles(N_sets_train, N_points, noisy=False, N_noise=0):
 
-    data_train, PD_train = [[] for _ in range(N_sets_train)], []
+    data_train = [[] for _ in range(N_sets_train)]
     label_train = np.zeros((N_sets_train,))
 
     if not noisy:

@@ -1,7 +1,6 @@
 
 import numpy as np
 from tqdm import tqdm
-import gudhi as gd
 
 
 ####################################
@@ -155,7 +154,7 @@ def data_augmentation_by_isometries(data_train, label_train, n_augment_per_sampl
 
 def create_multiple_circles(N_sets_train, N_points, noisy=False, N_noise=0, n_augment_per_sample = 0):
 
-    data_train, PD_train = [[] for _ in range(N_sets_train)], []
+    data_train = [[] for _ in range(N_sets_train)]
     label_train = np.zeros((N_sets_train,))
 
     if not noisy:
@@ -193,6 +192,7 @@ def create_multiple_circles(N_sets_train, N_points, noisy=False, N_noise=0, n_au
 
 
 def compute_PD(dataset, i):
+    import gudhi as gd
     u = np.array(dataset[i])
     rcX = gd.AlphaComplex(points=u).create_simplex_tree()
     rcX.persistence()

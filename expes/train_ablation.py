@@ -7,7 +7,11 @@ multiple trials, average. Tests generalization capacity with limited data.
 Usage:
     python train_ablation.py <dataset> <model> <fraction_pct> <trial> <epochs> <identifier>
 """
-import os, sys, numpy as np
+import os
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+import sys, numpy as np
 import dill as pck
 import torch
 import torch.nn as nn
@@ -24,7 +28,6 @@ from models import (_move_basis_tensors,
     OnEquivariantTensorFieldNetwork, AttentionTensorFieldNetwork,
     StochasticTensorFieldNetwork, CrossAttentionTensorFieldNetwork,
     RelaxedOnEquivariantTensorFieldNetwork, HybridOnEquivariantTensorFieldNetwork)
-from sklearn.preprocessing import LabelEncoder
 from xgboost import XGBClassifier
 
 os.makedirs('results', exist_ok=True)

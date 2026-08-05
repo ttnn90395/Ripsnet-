@@ -1,14 +1,11 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.optim import Adamax
 from torch import amp
 from torch.utils.checkpoint import checkpoint as grad_checkpoint
 from sklearn.metrics import accuracy_score
-from sklearn.preprocessing import LabelEncoder
 from tqdm import tqdm
-from typing import List, Tuple
-import gc
+from typing import List
 
 # ---------------------------------------------------------------------------
 # Global Parameters

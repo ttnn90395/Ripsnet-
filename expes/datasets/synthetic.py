@@ -1,15 +1,10 @@
 import sys
 import dill as pck
-import pandas as pd
 import numpy as np
 import gudhi as gd
-import matplotlib.pyplot as plt
-import time
 import utils
 from sklearn.metrics import pairwise_distances
-from sklearn.impute import SimpleImputer
-from gudhi.point_cloud.timedelay import TimeDelayEmbedding
-from gudhi.representations import DiagramSelector, PersistenceImage, Landscape, BirthPersistenceTransform
+from gudhi.representations import DiagramSelector, PersistenceImage, Landscape
 
 print(sys.argv)
 

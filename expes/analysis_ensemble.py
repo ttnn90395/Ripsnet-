@@ -13,8 +13,7 @@ Example:
 import os, sys, json, importlib.util
 import numpy as np
 import torch
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.neighbors import KNeighborsClassifier
+from sklearn.metrics import pairwise_distances
 from sklearn.preprocessing import LabelEncoder
 from xgboost import XGBClassifier
 
@@ -25,11 +24,7 @@ if ROOT_DIR not in sys.path:
 os.makedirs('results', exist_ok=True)
 
 from models import (
-    TensorFieldNetwork, GTTensorFieldNetwork, GTTensorFieldNetworkV2,
-    HierarchicalGTTFN, HierarchicalTensorFieldNetwork,
-    OnEquivariantTensorFieldNetwork, PointNet3D,
-    ScalarDistanceDeepSet, PointNetTutorial, ScalarInputMLP, MultiInputModel,
-    DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,
+    TensorFieldNetwork,
 )
 
 MODEL_NAMES = [
@@ -92,11 +87,9 @@ y_test  = le.transform(label_classif_test)
 print("\n--- Computing Gudhi baselines ---")
 import gudhi as gd
 from gudhi.representations import PersistenceImage, Landscape, DiagramSelector
-from scipy.spatial import distance
 import velour
 
 PD_gudhi = []
-import gudhi as gd
 for i, pc in enumerate(data_sets):
     rcX = gd.AlphaComplex(points=pc).create_simplex_tree()
     rcX.persistence()

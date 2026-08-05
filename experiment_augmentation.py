@@ -1,7 +1,6 @@
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
-from matplotlib import gridspec
 from sklearn.metrics import pairwise_distances
 from sklearn.preprocessing import LabelEncoder
 from tqdm import tqdm
@@ -9,14 +8,8 @@ import gudhi as gd
 from gudhi.representations import DiagramSelector, Landscape, PersistenceImage
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.utils.rnn import pad_sequence
 from torch.optim import Adamax
 from xgboost import XGBClassifier
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.optim import Adamax
 
 class DenseRagged(nn.Module):
     def __init__(self, in_features=None, out_features=30, activation='relu', use_bias=True):
@@ -156,11 +149,6 @@ class DistanceMatrixRaggedModel(nn.Module):
 
         out = self.rho(aggregated)
         return out
-
-
-import numpy as np
-from tqdm import tqdm
-import gudhi as gd
 
 
 ####################################
@@ -321,7 +309,7 @@ def augment_permutations(pc, n, rng):
 
 def create_multiple_circles(N_sets_train, N_points, noisy=False, N_noise=0, n_augment_per_sample = 0):
 
-    data_train, PD_train = [[] for _ in range(N_sets_train)], []
+    data_train = [[] for _ in range(N_sets_train)]
     label_train = np.zeros((N_sets_train,))
 
     if not noisy:
@@ -484,6 +472,41 @@ def combine_augmentations(point_cloud, n_augment_per_sample, rng):
 
 print("Combined augmentation function `combine_augmentations` defined.")
 
+
+def gaussian_smoothing(pc, sigma=0.1, k=5):
+    """
+    Smooth a point cloud by replacing each point with a Gaussian-weighted
+    average of itself and its k nearest neighbours.
+
+    Weights are exp(-d^2 / (2*sigma^2)) over squared neighbour distances.
+    Returns a numpy array of the same shape as pc (identity if sigma <= 0).
+    """
+    pc = np.asarray(pc, dtype=float)
+    if pc.ndim == 1:
+        pc = pc.reshape(-1, 1)
+    n = pc.shape[0]
+    if n == 0 or sigma is None or sigma <= 0:
+        return pc.copy()
+
+    diff = pc[:, None, :] - pc[None, :, :]
+    d2 = (diff ** 2).sum(axis=-1)
+
+    if k is not None and k > 0:
+        k = min(k, n)
+        knn = np.argpartition(d2, kth=k - 1, axis=1)[:, :k]
+        rows = np.arange(n)[:, None]
+        w = np.exp(-d2[rows, knn] / (2.0 * sigma * sigma))
+        w /= w.sum(axis=1, keepdims=True)
+        smoothed = np.zeros_like(pc)
+        for i in range(n):
+            smoothed[i] = (w[i, :, None] * pc[knn[i]]).sum(axis=0)
+        return smoothed
+
+    w = np.exp(-d2 / (2.0 * sigma * sigma))
+    w /= w.sum(axis=1, keepdims=True)
+    return w @ pc
+
+
 def compute_smoothed_robustness_score(pc, model, augmentation_fn, n_augment_per_score, sigma, k, device, descriptor_type, seed=42):
     rng = np.random.default_rng(seed)
     model.eval()
@@ -542,7 +565,7 @@ def compute_smoothed_robustness_score(pc, model, augmentation_fn, n_augment_per_
     else:
         return 0.0, 0.0
 
-def compute_smoothed_ensemble_robustness(pc, ensemble_model, augmentation_fn, n_augment_per_score, sigma, k, device, descriptor_type, seed=42):
+def compute_smoothed_ensemble_robustness(pc, ensemble_model, augmentation_fn, n_augment_per_score, sigma, k, device, descriptor_type, base_models, seed=42):
     rng = np.random.default_rng(seed)
 
     if isinstance(ensemble_model, torch.nn.Module):
@@ -552,7 +575,7 @@ def compute_smoothed_ensemble_robustness(pc, ensemble_model, augmentation_fn, n_
     smoothed_pc_original = gaussian_smoothing(pc, sigma=sigma, k=k)
 
     # Get ensemble input for the original smoothed point cloud
-    ensemble_input_original = get_ensemble_input_from_pc(smoothed_pc_original, device, descriptor_type)
+    ensemble_input_original = get_ensemble_input_from_pc(smoothed_pc_original, device, descriptor_type, base_models)
     pred_original_ensemble = ensemble_model.predict_proba(ensemble_input_original.reshape(1, -1)).flatten()
 
     # 2. Generate augmented point clouds
@@ -564,7 +587,7 @@ def compute_smoothed_ensemble_robustness(pc, ensemble_model, augmentation_fn, n_
         smoothed_aug_pc = gaussian_smoothing(aug_pc, sigma=sigma, k=k)
 
         # Get ensemble input for the smoothed augmented point cloud
-        ensemble_input_augmented = get_ensemble_input_from_pc(smoothed_aug_pc, device, descriptor_type)
+        ensemble_input_augmented = get_ensemble_input_from_pc(smoothed_aug_pc, device, descriptor_type, base_models)
         pred_augmented_ensemble = ensemble_model.predict_proba(ensemble_input_augmented.reshape(1, -1)).flatten()
 
         # 4. Calculate L2 (Euclidean) distance
@@ -579,12 +602,30 @@ def compute_smoothed_ensemble_robustness(pc, ensemble_model, augmentation_fn, n_
 print("Smoothed robustness functions defined.")
 
 
-def get_ensemble_input_from_pc(pc, device, descriptor_type):
+def get_ensemble_input_from_pc(pc, device, descriptor_type, base_models):
+    """
+    Build the ensemble feature vector for a point cloud from three base
+    feature models (RipsNet, distance-matrix, PointNet) and their fitted
+    XGBoost classifiers.
+
+    base_models: dict with keys
+        rn, dm, pn        : feature models (input: list of tensors -> output tensor)
+        classif_rn,
+        classif_dm,
+        classif_pn        : fitted XGBoost classifiers (must expose predict_proba)
+    descriptor_type      : 'pi' (persistence image) or 'pl' (persistence landscape)
+    """
     # pc is a numpy array
-    # descriptor_type: 'pi' or 'pl'
 
     # Ensure PC is a list of tensors for models expecting ragged inputs
     pc_tensor_list = [torch.tensor(pc, dtype=torch.float32).to(device)]
+
+    feature_rn = base_models['rn']
+    feature_dm = base_models['dm']
+    feature_pn = base_models['pn']
+    classif_rn = base_models['classif_rn']
+    classif_dm = base_models['classif_dm']
+    classif_pn = base_models['classif_pn']
 
     # --- 1. Get raw descriptors/predictions from base models ---
     # Gudhi (requires re-computation of PD and then PI/PL transform)
@@ -598,11 +639,11 @@ def get_ensemble_input_from_pc(pc, device, descriptor_type):
 
     if descriptor_type == 'pi':
         gudhi_descriptor = PI.transform(pds_pc)
-        rn_descriptor = model_PI(pc_tensor_list).detach().cpu().numpy()
+        rn_descriptor = feature_rn(pc_tensor_list).detach().cpu().numpy()
         # Distance Matrix model
         dm = distance_matrix(pc)
-        dm_descriptor = model_dm_pi([torch.tensor(dm, dtype=torch.float32).to(device)]).detach().cpu().numpy()
-        pn_descriptor = model_PN_PI(pc_tensor_list).detach().cpu().numpy()
+        dm_descriptor = feature_dm([torch.tensor(dm, dtype=torch.float32).to(device)]).detach().cpu().numpy()
+        pn_descriptor = feature_pn(pc_tensor_list).detach().cpu().numpy()
 
         # Ensure outputs are normalized consistently with training data for XGBoost
         gudhi_descriptor = gudhi_descriptor / MPI
@@ -617,17 +658,17 @@ def get_ensemble_input_from_pc(pc, device, descriptor_type):
         pn_descriptor = pn_descriptor.reshape(1, -1)
 
         # --- 2. Get probabilities from base XGBoost classifiers ---
-        proba_ripsnet = model_classif_RN_pi_base.predict_proba(rn_descriptor)
-        proba_dm = model_classif_dm_pi_base.predict_proba(dm_descriptor)
-        proba_pointnet = model_classif_PN_pi_base.predict_proba(pn_descriptor)
+        proba_ripsnet = classif_rn.predict_proba(rn_descriptor)
+        proba_dm = classif_dm.predict_proba(dm_descriptor)
+        proba_pointnet = classif_pn.predict_proba(pn_descriptor)
 
     elif descriptor_type == 'pl':
         gudhi_descriptor = PL.transform(pds_pc)
-        rn_descriptor = model_PL(pc_tensor_list).detach().cpu().numpy()
+        rn_descriptor = feature_rn(pc_tensor_list).detach().cpu().numpy()
         # Distance Matrix model
         dm = distance_matrix(pc)
-        dm_descriptor = model_dm_pl([torch.tensor(dm, dtype=torch.float32).to(device)]).detach().cpu().numpy()
-        pn_descriptor = model_PN_PL(pc_tensor_list).detach().cpu().numpy()
+        dm_descriptor = feature_dm([torch.tensor(dm, dtype=torch.float32).to(device)]).detach().cpu().numpy()
+        pn_descriptor = feature_pn(pc_tensor_list).detach().cpu().numpy()
 
         # Ensure outputs are normalized consistently with training data for XGBoost
         gudhi_descriptor = gudhi_descriptor / MPL
@@ -642,9 +683,9 @@ def get_ensemble_input_from_pc(pc, device, descriptor_type):
         pn_descriptor = pn_descriptor.reshape(1, -1)
 
         # --- 2. Get probabilities from base XGBoost classifiers ---
-        proba_ripsnet = model_classif_RN_pl_base.predict_proba(rn_descriptor)
-        proba_dm = model_classif_dm_pl_base.predict_proba(dm_descriptor)
-        proba_pointnet = model_classif_PN_pl_base.predict_proba(pn_descriptor)
+        proba_ripsnet = classif_rn.predict_proba(rn_descriptor)
+        proba_dm = classif_dm.predict_proba(dm_descriptor)
+        proba_pointnet = classif_pn.predict_proba(pn_descriptor)
     else:
         raise ValueError("descriptor_type must be 'pi' or 'pl'")
 
@@ -653,14 +694,14 @@ def get_ensemble_input_from_pc(pc, device, descriptor_type):
     ensemble_input = np.concatenate([proba_ripsnet, proba_dm, proba_pointnet], axis=1)
     return ensemble_input.flatten()
 
-def compute_ensemble_robustness(pc, ensemble_model, augmentation_fn, n_augment_per_score, device, descriptor_type, seed=42):
+def compute_ensemble_robustness(pc, ensemble_model, augmentation_fn, n_augment_per_score, device, descriptor_type, base_models, seed=42):
     rng = np.random.default_rng(seed)
     # LogisticRegression does not have an 'eval' mode like torch.nn.Module, so skip if not applicable
     if isinstance(ensemble_model, torch.nn.Module):
         ensemble_model.eval()
 
     # Get ensemble input for the original point cloud
-    ensemble_input_original = get_ensemble_input_from_pc(pc, device, descriptor_type)
+    ensemble_input_original = get_ensemble_input_from_pc(pc, device, descriptor_type, base_models)
 
     # Predict probabilities with the ensemble model
     # LogisticRegression expects 2D array, so reshape if needed
@@ -671,7 +712,7 @@ def compute_ensemble_robustness(pc, ensemble_model, augmentation_fn, n_augment_p
     euclidean_distances = []
     for aug_pc in augmented_pcs:
         # Get ensemble input for the augmented point cloud
-        ensemble_input_augmented = get_ensemble_input_from_pc(aug_pc, device, descriptor_type)
+        ensemble_input_augmented = get_ensemble_input_from_pc(aug_pc, device, descriptor_type, base_models)
         # Predict probabilities with the ensemble model
         pred_augmented_ensemble = ensemble_model.predict_proba(ensemble_input_augmented.reshape(1, -1)).flatten()
 
@@ -685,13 +726,6 @@ def compute_ensemble_robustness(pc, ensemble_model, augmentation_fn, n_augment_p
         return 0.0, 0.0
 
 print("Helper functions for ensemble robustness defined.")
-
-def augment_permutations(pc, n, rng):
-    augmented = []
-    for _ in range(n):
-        shuffled_pc = rng.permutation(pc, axis=0) # Permute rows (points) of the point cloud
-        augmented.append(shuffled_pc)
-    return augmented
 
 def compute_permutation_robustness_score(pc, model, n_augment_per_score, device, seed=42):
     """
@@ -808,7 +842,7 @@ noisy_permutation_robustness_scores = []
 subset_size_for_robustness = 50
 
 print(f"Defined n_augment_levels: {n_augment_levels}")
-print(f"Initialized empty lists for accuracies and robustness scores.")
+print("Initialized empty lists for accuracies and robustness scores.")
 print(f"Set subset_size_for_robustness to: {subset_size_for_robustness}")
 
 
@@ -994,7 +1028,7 @@ for n_augment in tqdm(n_augment_levels, desc="Augmentation Levels"):
     dm_train_augmented = []
     for X in tqdm(data_train_augmented, desc="Computing augmented DM"):
         dm_train_augmented.append(distance_matrix(X))
-    print(f"Computed distance matrices for augmented training data.")
+    print("Computed distance matrices for augmented training data.")
 
     # 4. Compute Persistence Images for the augmented training data (as targets for the regression model)
     PD_train_augmented = []
@@ -1011,7 +1045,7 @@ for n_augment in tqdm(n_augment_levels, desc="Augmentation Levels"):
     PI_train_augmented /= MPI  # Normalize with original MPI
     PI_train_augmented_tensor = torch.tensor(PI_train_augmented, dtype=torch.float32)
 
-    print(f"Computed Persistence Images for augmented training data.")
+    print("Computed Persistence Images for augmented training data.")
 
     # 5. Re-instantiate and train model_dm_pi (DistanceMatrixRaggedModel)
     output_dim_pi = PI_train.shape[1]

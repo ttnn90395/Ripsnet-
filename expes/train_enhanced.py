@@ -2,7 +2,7 @@
 Enhanced TFN Training Script
 ============================
 Improved training with:
-  - MLP head (end-to-end) OR XGBoost (original paper comparison)
+  - MLP head (end-to-end) OR XGBoost (baseline comparison)
   - Multi-scale persistence diagrams
   - Data augmentation
   - Configurable hidden dimensions
@@ -12,7 +12,7 @@ Usage:
     python train_enhanced.py <dataset> <model> <fraction_pct> <trial> <epochs> <identifier> [options]
 
 Options:
-    --classifier xgboost|mlp     (default: mlp; xgboost for paper comparison)
+    --classifier xgboost|mlp     (default: mlp; xgboost for baseline comparison)
     --augment                    Enable data augmentation
     --multi-scale                Use multi-scale persistence
     --scale-factor FLOAT         Scale factor for multi-scale (default: 0.5)
@@ -46,8 +46,7 @@ from models import (
     RelaxedOnEquivariantTensorFieldNetwork, HybridOnEquivariantTensorFieldNetwork,
 )
 from tfn_enhancements import (
-    MLPClassifierHead, MultiScalePersistenceEncoder, PointCloudAugmenter,
-    AttentionPooling, PersistenceGNN, EnhancedTFN, EnsembleClassifier,
+    MLPClassifierHead, PointCloudAugmenter,
 )
 
 os.makedirs('results', exist_ok=True)
@@ -64,7 +63,7 @@ parser.add_argument('epochs', type=int)
 parser.add_argument('identifier', type=str, nargs='?', default='run1')
 parser.add_argument('--classifier', type=str, default='mlp',
                     choices=['xgboost', 'mlp'],
-                    help='Classifier type: mlp (end-to-end) or xgboost (paper comparison)')
+                    help='Classifier type: mlp (end-to-end) or xgboost (baseline comparison)')
 parser.add_argument('--augment', action='store_true',
                     help='Enable data augmentation during training')
 parser.add_argument('--multi-scale', action='store_true',

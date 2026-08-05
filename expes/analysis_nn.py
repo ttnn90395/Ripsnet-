@@ -8,17 +8,13 @@ import matplotlib.pyplot as plt
 import dill as pck
 import numpy as np
 import torch
-import torch.nn as nn
-from IPython.display import SVG
 import gudhi as gd
 from gudhi.representations import PersistenceImage, Landscape, DiagramSelector
 from scipy.spatial import distance
 import velour
 from tqdm import tqdm
 from time import time
-from scipy.stats import ks_2samp
 import sys
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import pairwise_distances
@@ -63,8 +59,7 @@ TFN_MODELS = {
     'HierarchicalTensorFieldNetwork', 'OnEquivariantTensorFieldNetwork',
     'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
     'RelaxedOnEquivariantTensorFieldNetwork',
-    # CrossAttentionTensorFieldNetwork uses its own forward (no _encode_single)
-    # HybridOnEquivariantTensorFieldNetwork uses custom forward
+    'CrossAttentionTensorFieldNetwork',
 }
 
 # -------------------------------------------------------------------------
@@ -328,7 +323,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
         return CrossAttentionTensorFieldNetwork(
             num_classes=output_dim,
             n=n_dim,
-            max_order=extra.get('max_order', 1),
+            max_order=extra.get('max_order', 0),
             hidden_channels=hidden_channels or 64,
             num_layers=num_layers or 6,
             num_heads=extra.get('num_heads', 4),
@@ -343,7 +338,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
     if name == 'RelaxedOnEquivariantTensorFieldNetwork':
         return RelaxedOnEquivariantTensorFieldNetwork(
             num_classes=output_dim,
-            max_order=extra.get('max_order', 1),
+            max_order=extra.get('max_order', 0),
             hidden_channels=hidden_channels or 32,
             num_layers=num_layers or 3,
             num_rbf=num_rbf or 64,
@@ -355,7 +350,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
     if name == 'HybridOnEquivariantTensorFieldNetwork':
         return HybridOnEquivariantTensorFieldNetwork(
             num_classes=output_dim,
-            max_order=extra.get('max_order', 1),
+            max_order=extra.get('max_order', 0),
             hidden_channels=hidden_channels or 32,
             num_layers=num_layers or 3,
             num_rbf=num_rbf or 64,
@@ -706,6 +701,13 @@ def forward_single(model, prepared_x, mname, geom=None, stage_geom=None):
         return model([pc], scalar)
     if mname == 'ScalarInputMLP':
         return model(prepared_x)
+
+    if mname == 'CrossAttentionTensorFieldNetwork' and geom is not None:
+        rbf, gt_edge, nbr_idx = [t.to(prepared_x.device) if isinstance(t, torch.Tensor) else t for t in geom]
+        if rbf.ndim == 4:     rbf      = rbf.squeeze(0)
+        if gt_edge.ndim == 4: gt_edge  = gt_edge.squeeze(0)
+        if nbr_idx.ndim == 3: nbr_idx  = nbr_idx.squeeze(0)
+        return model([prepared_x], precomputed_geom=[(rbf, gt_edge, nbr_idx)])
 
     if geom is not None and mname in TFN_MODELS:
         rbf, gt_edge, nbr_idx = [t.to(prepared_x.device) if isinstance(t, torch.Tensor) else t for t in geom]

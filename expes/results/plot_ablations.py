@@ -157,4 +157,66 @@ if density_data:
 else:
     print("No density ablation results found.")
 
+# ─── Experiment 3: Isometry robustness ────────────────────────────────────────
+iso_files = glob.glob(os.path.join(results_dir, 'isometry_*.json'))
+iso_data = []
+for f in iso_files:
+    try:
+        d = json.load(open(f))
+        if not np.isnan(d.get('mean_l2_dist', float('nan'))):
+            iso_data.append(d)
+    except Exception:
+        pass
+
+if iso_data:
+    df_iso = pd.DataFrame(iso_data)
+    print(f"\nIsometry robustness: {len(df_iso)} results")
+    print(f"  Datasets: {df_iso['dataset'].nunique()}")
+    print(f"  Models: {df_iso['model_label'].nunique()}")
+
+    datasets_iso = sorted(df_iso['dataset'].unique())
+    models_iso = sorted(df_iso['model_label'].unique())
+
+    # 1. Per-dataset bar chart: L2 distance
+    for ds in datasets_iso:
+        sub = df_iso[df_iso['dataset'] == ds].sort_values('mean_l2_dist')
+        fig, ax = plt.subplots(figsize=(max(8, len(sub) * 0.5), 5))
+        colors = ['#2ca02c' if not gs else '#1f77b4' for gs in sub['has_gs']]
+        bars = ax.barh(range(len(sub)), sub['mean_l2_dist'], xerr=sub['std_l2_dist'],
+                       color=colors, capsize=3)
+        ax.set_yticks(range(len(sub)))
+        ax.set_yticklabels(sub['model_label'], fontsize=8)
+        ax.set_xlabel('Mean L2 distance (PV space)')
+        ax.set_title(f'{ds} — Isometry robustness (lower = more robust)')
+        ax.grid(True, alpha=0.3, axis='x')
+        fig.tight_layout()
+        fig.savefig(f'ablation_plots/isometry_{ds}.png', dpi=150)
+        plt.close(fig)
+        print(f"  Saved ablation_plots/isometry_{ds}.png")
+
+    # 2. Summary: mean L2 distance per model across datasets
+    print("\n=== Isometry: Mean L2 distance across datasets ===")
+    iso_summary = df_iso.groupby('model_label')['mean_l2_dist'].agg(['mean', 'std']).sort_values('mean')
+    for ml, row in iso_summary.iterrows():
+        print(f"  {ml:45s}  L2={row['mean']:.4f}±{row['std']:.4f}")
+
+    # 3. Overall summary plot
+    fig, ax = plt.subplots(figsize=(10, 6))
+    summary = df_iso.groupby(['model_label', 'has_gs'])['mean_l2_dist'].agg(['mean', 'std']).reset_index()
+    summary = summary.sort_values('mean')
+    x_pos = range(len(summary))
+    colors = ['#2ca02c' if not gs else '#1f77b4' for gs in summary['has_gs']]
+    ax.barh(list(x_pos), summary['mean'], xerr=summary['std'], color=colors, capsize=3)
+    ax.set_yticks(list(x_pos))
+    ax.set_yticklabels(summary['model_label'], fontsize=8)
+    ax.set_xlabel('Mean L2 distance in PV space')
+    ax.set_title('Isometry robustness (lower = more robust)')
+    ax.grid(True, alpha=0.3, axis='x')
+    fig.tight_layout()
+    fig.savefig(f'ablation_plots/isometry_overall.png', dpi=150)
+    plt.close(fig)
+    print(f"  Saved ablation_plots/isometry_overall.png")
+else:
+    print("No isometry robustness results found.")
+
 print("\nDone.")

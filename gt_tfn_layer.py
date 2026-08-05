@@ -20,13 +20,14 @@ Public API (unchanged)
 """
 
 from __future__ import annotations
-import math
 from typing import Dict, List, Tuple, Optional
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from gt_basis import GTSignature, GTBasis, CGCoefficients
+from gt_basis import (
+    GTSignature, GTBasis, CGCoefficients,
+    vector_basis_change, vector_feature,
+)
 
 FeatureDict = Dict[GTSignature, torch.Tensor]
 
@@ -73,12 +74,82 @@ def pairwise_geometry(
     return rbf, gt_edge, mask
 
 
+def dtm_rank_distance(
+    dist:         torch.Tensor,   # (..., N, N) or (N, N), inf on diagonal
+    m:            int = 10,
+    alpha:        float = 1.0,
+    eps:          float = 1e-8,
+) -> torch.Tensor:
+    """
+    DTM-scaled ranking distance: points in low-density (high-DTM) regions
+    are pushed further away during neighbor selection, so isolated outlier
+    points are excluded from k-NN neighborhoods.  The *true* inter-point
+    distances are kept for the selected edges — only the ranking changes.
+
+    Returns a tensor with the same shape as *dist* whose values rank
+    neighbors robustly (inf entries preserved).
+    """
+    if alpha <= 0.0:
+        return dist
+    N = dist.shape[-1]
+    m = min(m, N - 1)
+    flat = dist.reshape(-1, N, N)
+    # Per-point DTM = mean distance to its m nearest neighbors (self=inf)
+    knn = flat.topk(m, dim=-1, largest=False).values.mean(dim=-1)   # (G, N)
+    med = knn.median(dim=-1, keepdim=True).values + eps             # (G, 1)
+    # Neighbor side density scale; source scale is a row constant and does
+    # not affect the per-row ranking, so it is omitted.
+    scale = 1.0 + alpha * (knn / med)                               # (G, N)
+    out = dist.clone()
+    out = out.reshape(-1, N, N)
+    out = out * scale.unsqueeze(1)
+    return out.reshape(dist.shape)
+
+
+def dtm_readout_weights(
+    pos:   torch.Tensor,       # (N, n) or (B, N, n)
+    m:     int = 10,
+    gamma: float = 4.0,
+    thr:   float = 1.5,
+    eps:   float = 1e-8,
+) -> torch.Tensor:
+    """
+    Per-point soft weights for the invariant readout, derived from DTM
+    (distance-to-measure).  Points in low-density regions (outliers, which
+    have high DTM) receive near-zero weight, so their corrupted invariant
+    features are suppressed in the global descriptor sum without removing
+    them from the point cloud.
+
+    Soft-cap form (mild on inliers, hard on outliers):
+        w_i = 1 / (1 + (dtm_i / (thr * median_dtm))^gamma)
+    so points at the DTM median keep ~full weight and only the sparse tail
+    beyond `thr * median` is attenuated.
+
+    Returns weights of shape (N,) or (B, N) that sum to 1 per cloud.
+    """
+    leading = pos.shape[:-2]
+    N = pos.shape[-2]
+    flat = pos.reshape(-1, N, pos.shape[-1])
+    diff = flat.unsqueeze(1) - flat.unsqueeze(2)          # (G, N, N, n)
+    dist = diff.norm(dim=-1)                              # (G, N, N)
+    mask = torch.eye(N, dtype=torch.bool, device=pos.device)
+    dist = dist.masked_fill(mask, float('inf'))
+    m = min(m, N - 1)
+    dtm = dist.topk(m, dim=-1, largest=False).values.mean(dim=-1)   # (G, N)
+    med = dtm.median(dim=-1, keepdim=True).values + eps
+    w = 1.0 / (1.0 + (dtm / (thr * med)) ** gamma)        # high DTM → ~0
+    w = w / w.sum(dim=-1, keepdim=True)
+    return w.reshape(*leading, N)
+
+
 def knn_geometry(
     pos:         torch.Tensor,    # (N, n)
     rbf_encoder: RBFExpansion,
     gt_basis:    GTBasis,
     k:           int,
     chunk_size:  int = 0,
+    robust_alpha: float = 0.0,
+    robust_m:    int = 10,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Sparse k-NN geometry.  O(N·k) memory for the result; peak memory is
@@ -112,6 +183,8 @@ def knn_geometry(
         dist_cpu = diff_cpu.norm(dim=-1)
         mask_cpu = torch.eye(N_cpu, dtype=torch.bool)
         dist_masked_cpu = dist_cpu.masked_fill(mask_cpu, float('inf'))
+        if robust_alpha > 0:
+            dist_masked_cpu = dtm_rank_distance(dist_masked_cpu, m=robust_m, alpha=robust_alpha)
         _, nbr_idx_cpu = dist_masked_cpu.topk(k, dim=-1, largest=False)
         nbr_idx = nbr_idx_cpu.to(dev)
     else:
@@ -120,6 +193,8 @@ def knn_geometry(
             dist = diff.norm(dim=-1)
             mask = torch.eye(N, dtype=torch.bool, device=dev)
             dist_masked = dist.masked_fill(mask, float('inf'))
+            if robust_alpha > 0:
+                dist_masked = dtm_rank_distance(dist_masked, m=robust_m, alpha=robust_alpha)
             _, nbr_idx = dist_masked.topk(k, dim=-1, largest=False)
         else:
             nbr_idx = torch.empty(N, k, dtype=torch.long, device=dev)
@@ -130,6 +205,8 @@ def knn_geometry(
                 dist_c = diff_c.norm(dim=-1)
                 for i in range(start, end):
                     dist_c[i - start, i] = float('inf')
+                if robust_alpha > 0:
+                    dist_c = dtm_rank_distance(dist_c, m=robust_m, alpha=robust_alpha)
                 _, idx_c = dist_c.topk(k, dim=-1, largest=False)
                 nbr_idx[start:end] = idx_c
 
@@ -239,18 +316,27 @@ class ChannelMixer(nn.Module):
     matrix applied independently to each of the d irrep components (so it
     commutes with rotations).
 
-    Optionally applies a SiLU between two linear layers (hidden_factor > 1).
+    A nonlinearity (SiLU) may only be used for type-0 (scalar) features:
+    the rotation group acts by *mixing* the components of a type-l>0 irrep,
+    so any nonlinear function applied per component does not commute with
+    that action.  Higher-type channels are therefore mixed with a single
+    linear layer (bias-free), which is the correct equivariant operation.
     """
     def __init__(self, feat_types: Dict[GTSignature, int], hidden_factor: int = 2):
         super().__init__()
         self.mlps = nn.ModuleDict()
         for sig, c in feat_types.items():
-            h = max(c, c * hidden_factor)
-            self.mlps[_sig_key(sig)] = nn.Sequential(
-                nn.Linear(c, h, bias=False),
-                nn.SiLU(),
-                nn.Linear(h, c, bias=False),
-            )
+            if sig.lam[0] == 0 and sig.dim() == 1:
+                # scalar type: nonlinear channel MLP is equivariant (d=1)
+                h = max(c, c * hidden_factor)
+                self.mlps[_sig_key(sig)] = nn.Sequential(
+                    nn.Linear(c, h, bias=False),
+                    nn.SiLU(),
+                    nn.Linear(h, c, bias=False),
+                )
+            else:
+                # non-scalar irrep: linear only (nonlinearity breaks equivariance)
+                self.mlps[_sig_key(sig)] = nn.Linear(c, c, bias=False)
 
     def forward(self, feats: FeatureDict) -> FeatureDict:
         out = {}
@@ -578,9 +664,15 @@ class GTTensorFieldNetwork(nn.Module):
         use_gate:        bool  = True,
         use_residual:    bool  = True,
         use_channel_mix: bool  = True,
+        use_attention_pool: bool = False,
         node_attr_dim:   int   = 0,
-        classifier_dims: List[int] = [128, 64],
+        classifier_dims: Optional[List[int]] = None,
         radial_hidden:   int   = 64,
+        robust_readout:  bool  = False,
+        robust_m:        int   = 10,
+        robust_gamma:    float = 4.0,
+        readout_pool:    str   = 'sum',
+        norm_readout:    bool  = False,
     ):
         super().__init__()
         self.n              = n
@@ -591,6 +683,16 @@ class GTTensorFieldNetwork(nn.Module):
         self.num_rbf        = num_rbf
         self.cutoff         = cutoff
         self.k_neighbors    = k_neighbors
+        self.use_attention_pool = use_attention_pool
+        self.robust_readout = robust_readout
+        self.robust_m       = robust_m
+        self.robust_gamma   = robust_gamma
+        self.readout_pool   = readout_pool
+        self.norm_readout   = norm_readout
+        if readout_pool not in ('sum', 'mean', 'max'):
+            raise ValueError(f"readout_pool must be 'sum', 'mean' or 'max', got {readout_pool}")
+        if classifier_dims is None:
+            classifier_dims = [128, 64]
 
         # Shared geometry encoders
         self.rbf      = RBFExpansion(num_rbf=num_rbf, cutoff=cutoff)
@@ -600,6 +702,14 @@ class GTTensorFieldNetwork(nn.Module):
         all_sigs   = self.gt_basis.signatures
         scalar_sig = GTSignature.scalar(n)
         vector_sig = GTSignature.vector(n)
+
+        # Change-of-basis between geometric coordinates and the GT/SH basis
+        # used by the edge harmonics and CG tensors.  The initial vector
+        # feature must live in that same convention or the whole network
+        # is not rotation-equivariant (see _compute_vec_basis_matrix).
+        self._vector_sig = vector_sig
+        self.register_buffer(
+            "_vec_change", self._compute_vec_basis_matrix(), persistent=False)
 
         init_scalar_c = 1 + node_attr_dim
         self.node_attr_dim = node_attr_dim
@@ -630,11 +740,41 @@ class GTTensorFieldNetwork(nn.Module):
 
         self.rho = nn.Sequential(
             nn.Linear(inv_dim, 64), nn.SiLU(), nn.LayerNorm(64),
+            nn.Dropout(0.1),
             nn.Linear(64, num_classes),
         )
 
         self._scalar_sig = scalar_sig
-        self._vector_sig = vector_sig
+
+        # Attention pooling (optional replacement for sum/max-pool)
+        if use_attention_pool:
+            self._attn_pool = nn.Sequential(
+                nn.Linear(inv_dim, 64), nn.GELU(), nn.Linear(64, 1),
+            )
+        else:
+            self._attn_pool = None
+
+    # ------------------------------------------------------------------
+    def _compute_vec_basis_matrix(self, num_samples: int = 4096) -> Optional[torch.Tensor]:
+        """
+        Linear map M with Y(x) = M·x on unit vectors x, where Y is the
+        vector-irrep slice of ``self.gt_basis``.
+
+        The vector irrep of SO(n) is the standard representation, so its
+        GT-basis functions are exactly linear.  The CG tensors and edge
+        harmonics live in this basis, so the initial vector feature must be
+        expressed in it too; otherwise the model is not rotation-equivariant
+        (e.g. for n=3 the real-SH ordering differs from (x, y, z) by a
+        fixed permutation).
+
+        M is recovered by least squares over random unit directions (which
+        avoids the numerically degenerate points near the poles).
+        """
+        return vector_basis_change(self.gt_basis, num_samples=num_samples)
+
+    def _vector_feature(self, pos: torch.Tensor) -> torch.Tensor:
+        """Normalized direction feature expressed in the GT-basis convention."""
+        return vector_feature(pos, self._vec_change)
 
     # ------------------------------------------------------------------
     def _encode_batch(
@@ -664,9 +804,7 @@ class GTTensorFieldNetwork(nn.Module):
         f0 = torch.cat(f0_parts, dim=-1).unsqueeze(-1)                   # (B, N, C, 1)
 
         # Reshape: need (B, N, C, d)
-        pos_norm = pos.norm(dim=-1, keepdim=True)
-        pos_safe = pos / pos_norm.where(pos_norm > 0, torch.ones_like(pos_norm))
-        f1 = pos_safe.unsqueeze(2)  # (B, N, 1, n)
+        f1 = self._vector_feature(pos).unsqueeze(2)  # (B, N, 1, n)
         feats: FeatureDict = {sc: f0, vc: f1}
 
         # Need to re-read precomputed_geom after extracting rbf for f0_parts
@@ -703,7 +841,21 @@ class GTTensorFieldNetwork(nn.Module):
                 parts.append(f.norm(dim=-1))      # (B, N, C)
 
         node_inv = torch.cat(parts, dim=-1)        # (B, N, inv_dim)
-        descs = node_inv.sum(dim=1)                 # (B, inv_dim)
+        if self.norm_readout:
+            node_inv = node_inv / node_inv.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+        if self.robust_readout:
+            w = dtm_readout_weights(pos, m=self.robust_m, gamma=self.robust_gamma)  # (B, N)
+            node_inv = w.unsqueeze(-1) * node_inv
+        if self._attn_pool is not None:
+            w = self._attn_pool(node_inv).squeeze(-1)  # (B, N)
+            w = torch.softmax(w, dim=1)
+            descs = (w.unsqueeze(-1) * node_inv).sum(dim=1)  # (B, inv_dim)
+        elif self.readout_pool == 'max':
+            descs = node_inv.max(dim=1).values          # (B, inv_dim)
+        elif self.readout_pool == 'mean':
+            descs = node_inv.mean(dim=1)                # (B, inv_dim)
+        else:
+            descs = node_inv.sum(dim=1)                 # (B, inv_dim)
         return descs if return_descriptors else self.rho(descs)
 
     # ------------------------------------------------------------------
@@ -723,10 +875,8 @@ class GTTensorFieldNetwork(nn.Module):
             f0_parts.append(self.attr_proj(node_attr))
         f0 = torch.cat(f0_parts, dim=-1).unsqueeze(-1)  # (N, C, 1)
 
-        # (N, 1, n) — C=1 vector feature
-        pos_norm = pos.norm(dim=-1, keepdim=True)
-        pos_safe = pos / pos_norm.where(pos_norm > 0, torch.ones_like(pos_norm))
-        f1 = pos_safe.unsqueeze(1)  # (N, 1, n)
+        # (N, 1, n) — C=1 vector feature in the GT-basis convention
+        f1 = self._vector_feature(pos).unsqueeze(1)  # (N, 1, n)
 
         feats: FeatureDict = {sc: f0, vc: f1}
 
@@ -764,7 +914,20 @@ class GTTensorFieldNetwork(nn.Module):
                 parts.append(f.norm(dim=-1))      # (N, C)
 
         node_inv = torch.cat(parts, dim=-1)        # (N, inv_dim)
-        return node_inv.sum(dim=0)                 # (inv_dim,)
+        if self.norm_readout:
+            node_inv = node_inv / node_inv.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+        if self.robust_readout:
+            w = dtm_readout_weights(pos, m=self.robust_m, gamma=self.robust_gamma)  # (N,)
+            node_inv = w.unsqueeze(-1) * node_inv
+        if self._attn_pool is not None:
+            w = self._attn_pool(node_inv).squeeze(-1)  # (N,)
+            w = torch.softmax(w, dim=0)
+            return (w.unsqueeze(-1) * node_inv).sum(dim=0)  # (inv_dim,)
+        if self.readout_pool == 'max':
+            return node_inv.max(dim=0).values        # (inv_dim,)
+        if self.readout_pool == 'mean':
+            return node_inv.mean(dim=0)              # (inv_dim,)
+        return node_inv.sum(dim=0)                   # (inv_dim,)
 
     # ------------------------------------------------------------------
     def forward(
@@ -806,7 +969,6 @@ class GTTensorFieldNetwork(nn.Module):
             return torch.stack(descriptors)
 
         # Build output buffer and fill per group
-        device = batch[0].device
         descriptors = [None] * len(batch)
         for sz, idxs in size_to_idx.items():
             if len(idxs) == 1:
@@ -855,6 +1017,9 @@ if __name__ == "__main__":
             use_channel_mix=True, node_attr_dim=4,
         )
         print(f"  Params: {sum(p.numel() for p in model.parameters()):,}")
+        # The rho head contains Dropout, so forward must run in eval() mode
+        # for the invariance checks to be meaningful.
+        model.eval()
 
         batch = [torch.randn(sz, n) for sz in [32, 48, 40]]
         attrs = [torch.randn(sz, 4) for sz in [32, 48, 40]]

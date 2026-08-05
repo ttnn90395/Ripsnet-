@@ -15,20 +15,19 @@ These are designed to be composable:
 """
 
 from __future__ import annotations
-import math
 from typing import Dict, List, Tuple, Optional
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from gt_basis import GTSignature, GTBasis, CGCoefficients
+from gt_basis import GTSignature, GTBasis, CGCoefficients, vector_basis_change, vector_feature
 from gt_tfn_layer import (
     GTTFNLayer, GTTensorFieldNetwork, 
     RBFExpansion,
     ChannelMixer, EquivariantGate, ResidualProjection,
-    knn_geometry, knn_geometry_batch,
-    pairwise_geometry, pairwise_geometry_batch,
+    knn_geometry,
+    pairwise_geometry,
     FeatureDict, _sig_key, _interaction_key,
 )
 
@@ -60,8 +59,11 @@ def farthest_point_sample(pos: torch.Tensor, n_samples: int) -> torch.Tensor:
     selected = torch.zeros(n_samples, dtype=torch.long, device=device)
     dist     = torch.full((N,), float('inf'), device=device)
 
-    # Start from a random point
-    current = torch.randint(0, N, (), device=device, dtype=torch.long)
+    # Deterministic start (index 0).  Points keep their indices under rigid
+    # motions, so this makes the sampled set a rotation-covariant function of
+    # the cloud.  A random start would break equivariance of the whole
+    # hierarchical encoder.
+    current = torch.zeros((), dtype=torch.long, device=device)
     for i in range(n_samples):
         selected[i] = current
         current_pos = pos[current]                    # (d,)
@@ -87,7 +89,7 @@ def ball_query(
     Returns (M, k) index tensor; invalid entries are filled with the
     center's own index (a common convention for padding).
     """
-    M, N = centers.shape[0], pos.shape[0]
+    N = pos.shape[0]
     diff  = centers.unsqueeze(1) - pos.unsqueeze(0)   # (M, N, d)
     dist2 = (diff ** 2).sum(dim=-1)                   # (M, N)
 
@@ -133,64 +135,37 @@ class HierPoolStage(nn.Module):
 
     def __init__(
         self,
-        n:              int,
         n_centroids:    int,
         radius:         float,
         k_local:        int,
         feat_types:     Dict[GTSignature, int],
-        num_rbf:        int,
-        cg:             CGCoefficients,
-        gt_basis:       GTBasis,
-        radial_hidden:  int = 64,
     ):
         super().__init__()
         self.n_centroids = n_centroids
         self.radius      = radius
         self.k_local     = k_local
 
-        self.rbf_enc = RBFExpansion(num_rbf=num_rbf, cutoff=radius)
-        self.layer   = GTTFNLayer(
-            n=n, in_types=feat_types, out_types=feat_types,
-            num_rbf=num_rbf, cg=cg, gt_basis=gt_basis,
-            use_gate=True, use_residual=False,
-            radial_hidden=radial_hidden,
-        )
         self.mixer   = ChannelMixer(feat_types)
-        self.gt_basis = gt_basis
 
     def precompute_geometry(self, pos: torch.Tensor) -> dict:
         """
         Precompute all geometry-dependent tensors for this pool stage.
 
-        Returns a dict with keys: cent_idx, centroids, nbr_idx, rbf, gt_edge.
+        Returns a dict with keys: cent_idx, centroids, nbr_idx.
         These depend only on *pos* and can be cached across training epochs.
         """
         N = pos.shape[0]
         M = min(self.n_centroids, N)
-        dev = pos.device
 
         cent_idx  = farthest_point_sample(pos, M)
         centroids = pos[cent_idx]
 
         nbr_idx   = ball_query(pos, centroids, self.radius, self.k_local)
 
-        K = nbr_idx.shape[1]
-        pos_j      = pos[nbr_idx.reshape(-1)].reshape(M, K, pos.shape[-1])
-        diff       = centroids.unsqueeze(1) - pos_j
-        dist       = diff.norm(dim=-1).clamp(min=1e-8)
-        r_hat      = diff / dist.unsqueeze(-1)
-        rbf        = self.rbf_enc(dist)
-        n_dim      = pos.shape[-1]
-        gt_edge    = self.gt_basis(
-            r_hat.reshape(M * K, n_dim)
-        ).reshape(M, K, -1)
-
         return {
             'cent_idx':  cent_idx,
             'centroids': centroids,
             'nbr_idx':   nbr_idx,
-            'rbf':       rbf,
-            'gt_edge':   gt_edge,
         }
 
     def forward(
@@ -209,39 +184,37 @@ class HierPoolStage(nn.Module):
             cent_idx  = precomputed['cent_idx']
             centroids = precomputed['centroids']
             nbr_idx   = precomputed['nbr_idx']
-            rbf       = precomputed['rbf']
-            gt_edge   = precomputed['gt_edge']
         else:
             N     = pos.shape[0]
             M     = min(self.n_centroids, N)
-            dev   = pos.device
 
             cent_idx  = farthest_point_sample(pos, M)
             centroids = pos[cent_idx]
 
             nbr_idx   = ball_query(pos, centroids, self.radius, self.k_local)
 
-            K = nbr_idx.shape[1]
-            pos_j      = pos[nbr_idx.reshape(-1)].reshape(M, K, pos.shape[-1])
-            diff       = centroids.unsqueeze(1) - pos_j
-            dist       = diff.norm(dim=-1).clamp(min=1e-8)
-            r_hat      = diff / dist.unsqueeze(-1)
-            rbf        = self.rbf_enc(dist)
-            n_dim      = pos.shape[-1]
-            gt_edge    = self.gt_basis(
-                r_hat.reshape(M * K, n_dim)
-            ).reshape(M, K, -1)
-
         K = nbr_idx.shape[1]
+        M = centroids.shape[0]
 
-        # Feature aggregation: max-pool over neighbors
-        out_feats: FeatureDict = {}
-        for sig, f in feats.items():
-            f_nbr    = f[nbr_idx.reshape(-1)].reshape(
-                centroids.shape[0], K, f.shape[1], f.shape[2])
-            f_pooled = f_nbr.max(dim=1).values
-            out_feats[sig] = f_pooled
+        # Rotation-equivariant pooling: soft-attention weighted sum over the
+        # neighbours.  A per-component max-pool is NOT equivariant for l>0
+        # features (max over neighbours does not commute with rotation), so we
+        # weight each neighbour by the (rotation-invariant) magnitude of its
+        # features and sum.
+        f_nbrs = {
+            sig: f[nbr_idx.reshape(-1)].reshape(M, K, *f.shape[1:])
+            for sig, f in feats.items()
+        }
+        mag = torch.cat(
+            [fn.reshape(M, K, -1) for fn in f_nbrs.values()],
+            dim=-1,
+        ).norm(dim=-1)                                  # (M, K) rotation-invariant
+        w   = torch.softmax(mag / mag.max(dim=-1, keepdim=True).values.clamp_min(1e-8), dim=-1)
 
+        out_feats: FeatureDict = {
+            sig: torch.einsum('mk,mkc...->mc...', w, fn)
+            for sig, fn in f_nbrs.items()
+        }
         out_feats = self.mixer(out_feats)
         return centroids, out_feats
 
@@ -329,9 +302,8 @@ class HierarchicalGTTFN(nn.Module):
         assert len(stage_sizes) == len(stage_radii)
         for stage_r, stage_size in zip(stage_radii, stage_sizes):
             self.pool_stages.append(HierPoolStage(
-                n=n, n_centroids=stage_size, radius=stage_r,
+                n_centroids=stage_size, radius=stage_r,
                 k_local=k_local, feat_types=hidden_types,
-                num_rbf=num_rbf, cg=self.cg, gt_basis=self.gt_basis,
             ))
             stage_mp = nn.ModuleList()
             for _ in range(num_layers_per_stage):
@@ -352,6 +324,8 @@ class HierarchicalGTTFN(nn.Module):
 
         self._scalar_sig = scalar_sig
         self._vector_sig = vector_sig
+        self.register_buffer(
+            "_vec_change", vector_basis_change(self.gt_basis), persistent=False)
         self._all_sigs   = all_sigs
         self._hidden_types = hidden_types
 
@@ -360,9 +334,8 @@ class HierarchicalGTTFN(nn.Module):
         Precompute all geometry for every hierarchical stage.
 
         Returns a list of dicts (one per pool stage) with keys for both the
-        pool aggregation (``cent_idx``, ``centroids``, ``nbr_idx``, ``rbf``,
-        ``gt_edge``) and the post-pool message-passing (``post_rbf``,
-        ``post_gt``, ``post_nbr``).
+        pool aggregation (``cent_idx``, ``centroids``, ``nbr_idx``) and the
+        post-pool message-passing (``post_rbf``, ``post_gt``, ``post_nbr``).
         """
         stage_geom = []
         cur_pos = pos
@@ -398,7 +371,7 @@ class HierarchicalGTTFN(nn.Module):
         if node_attr is not None and self.node_attr_dim > 0:
             f0_parts.append(self.attr_proj(node_attr))
         f0 = torch.cat(f0_parts, dim=-1).unsqueeze(1).reshape(N, -1, 1)
-        f1 = (pos / pos.norm(dim=-1, keepdim=True).clamp(min=1e-8)).unsqueeze(1)
+        f1 = vector_feature(pos, self._vec_change).unsqueeze(1)
 
         feats: FeatureDict = {sc: f0, vc: f1}
 
@@ -755,13 +728,15 @@ class GTTFNAttentionLayer(nn.Module):
 # GTTensorFieldNetworkWithAttention — full model with attention layers
 # ============================================================================
 
-class GTTensorFieldNetworkWithAttention(nn.Module):
+class GTTensorFieldNetworkWithAttention(GTTensorFieldNetwork):
     """
     GTTensorFieldNetwork with multi-head cross-attention message passing.
 
     Same interface as GTTensorFieldNetwork but replaces each GTTFNLayer with
     a GTTFNAttentionLayer that weights neighbour contributions via learned
-    attention over radial features.
+    attention over radial features.  Geometry, feature encoding and readout
+    are inherited from GTTensorFieldNetwork; only the message-passing stack
+    is swapped out.
 
     Parameters
     ----------
@@ -800,30 +775,22 @@ class GTTensorFieldNetworkWithAttention(nn.Module):
         classifier_dims: List[int] = [128, 64],
         radial_hidden:   int   = 64,
     ):
-        super().__init__()
-        self.n            = n
-        self.num_classes  = num_classes
-        self.max_order    = max_order
-        self.k_neighbors  = k_neighbors
+        super().__init__(
+            n=n, num_classes=num_classes, max_order=max_order,
+            hidden_channels=hidden_channels, num_layers=num_layers,
+            num_rbf=num_rbf, cutoff=cutoff, k_neighbors=k_neighbors,
+            use_gate=use_gate, use_residual=use_residual,
+            use_channel_mix=use_channel_mix, node_attr_dim=node_attr_dim,
+            classifier_dims=classifier_dims, radial_hidden=radial_hidden,
+        )
 
-        self.rbf      = RBFExpansion(num_rbf=num_rbf, cutoff=cutoff)
-        self.gt_basis = GTBasis(n=n, max_order=max_order)
-        self.cg       = CGCoefficients(n=n, max_order=max_order)
-
-        all_sigs   = self.gt_basis.signatures
-        scalar_sig = GTSignature.scalar(n)
-        vector_sig = GTSignature.vector(n)
-
+        all_sigs      = self.gt_basis.signatures
         init_scalar_c = 1 + node_attr_dim
-        self.node_attr_dim = node_attr_dim
-        if node_attr_dim > 0:
-            self.attr_proj = nn.Linear(node_attr_dim, node_attr_dim, bias=False)
+        init_types    = {GTSignature.scalar(n): init_scalar_c, GTSignature.vector(n): 1}
+        hidden_types  = {sig: hidden_channels for sig in all_sigs}
 
-        init_types   = {scalar_sig: init_scalar_c, vector_sig: 1}
-        hidden_types = {sig: hidden_channels for sig in all_sigs}
-
-        self.mp_layers   = nn.ModuleList()
-        self.mix_layers  = nn.ModuleList() if use_channel_mix else None
+        self.mp_layers  = nn.ModuleList()
+        self.mix_layers = nn.ModuleList() if use_channel_mix else None
         in_types = init_types
 
         for i in range(num_layers):
@@ -836,177 +803,6 @@ class GTTensorFieldNetworkWithAttention(nn.Module):
             if use_channel_mix and self.mix_layers is not None:
                 self.mix_layers.append(ChannelMixer(hidden_types))
             in_types = hidden_types
-
-        inv_dim = hidden_channels * len(all_sigs)
-        self.rho = nn.Sequential(
-            nn.Linear(inv_dim, 64), nn.SiLU(), nn.LayerNorm(64),
-            nn.Linear(64, num_classes),
-        )
-
-        self._scalar_sig = scalar_sig
-        self._vector_sig = vector_sig
-
-    # ------------------------------------------------------------------
-    def _encode_batch(
-        self,
-        pos:       torch.Tensor,
-        node_attr: Optional[torch.Tensor] = None,
-        precomputed_geom = None,
-        return_descriptors: bool = False,
-    ) -> torch.Tensor:
-        """Batch-encode point clouds with attention-based message passing."""
-        if pos.ndim != 3:
-            raise ValueError("pos must be a batched tensor of shape (B, N, n)")
-        B, N = pos.shape[0], pos.shape[1]
-        sc = self._scalar_sig
-        vc = self._vector_sig
-
-        f0_parts = [pos.norm(dim=-1, keepdim=True)]
-        if node_attr is not None and self.node_attr_dim > 0:
-            f0_parts.append(self.attr_proj(node_attr))
-        f0 = torch.cat(f0_parts, dim=-1).unsqueeze(-1)
-
-        pos_norm = pos.norm(dim=-1, keepdim=True)
-        pos_safe = pos / pos_norm.where(pos_norm > 0, torch.ones_like(pos_norm))
-        f1 = pos_safe.unsqueeze(2)
-        feats: FeatureDict = {sc: f0, vc: f1}
-
-        if precomputed_geom is not None:
-            rbf, gt_edge, nbr_idx = precomputed_geom
-            use_sparse = True
-        else:
-            use_sparse = (self.k_neighbors is not None and self.k_neighbors < N - 1)
-            if use_sparse:
-                rbf, gt_edge, nbr_idx = knn_geometry_batch(
-                    pos, self.rbf, self.gt_basis, self.k_neighbors)
-            else:
-                rbf, gt_edge, mask = pairwise_geometry_batch(
-                    pos, self.rbf, self.gt_basis)
-
-        for i, layer in enumerate(self.mp_layers):
-            if use_sparse:
-                feats = layer(feats, rbf, gt_edge, nbr_idx, sparse=True)
-            else:
-                feats = layer(feats, rbf, gt_edge, mask, sparse=False)
-            if self.mix_layers is not None:
-                feats = self.mix_layers[i](feats)
-
-        parts = []
-        for sig in self.gt_basis.signatures:
-            if sig not in feats:
-                parts.append(torch.zeros(B, N, feats[sc].shape[2], device=pos.device))
-                continue
-            f = feats[sig]
-            if sig == sc:
-                parts.append(f.squeeze(-1))
-            else:
-                parts.append(f.norm(dim=-1))
-
-        node_inv = torch.cat(parts, dim=-1)
-        descs = node_inv.sum(dim=1)
-        return descs if return_descriptors else self.rho(descs)
-
-    # ------------------------------------------------------------------
-    def _encode_single(
-        self,
-        pos:       torch.Tensor,
-        node_attr: Optional[torch.Tensor] = None,
-        precomputed_geom = None,
-    ) -> torch.Tensor:
-        N = pos.shape[0]
-        sc = self._scalar_sig
-        vc = self._vector_sig
-
-        f0_parts = [pos.norm(dim=-1, keepdim=True)]
-        if node_attr is not None and self.node_attr_dim > 0:
-            f0_parts.append(self.attr_proj(node_attr))
-        f0 = torch.cat(f0_parts, dim=-1).unsqueeze(-1)
-
-        pos_norm = pos.norm(dim=-1, keepdim=True)
-        pos_safe = pos / pos_norm.where(pos_norm > 0, torch.ones_like(pos_norm))
-        f1 = pos_safe.unsqueeze(1)
-        feats: FeatureDict = {sc: f0, vc: f1}
-
-        if precomputed_geom is not None:
-            rbf, gt_edge, nbr_idx = precomputed_geom
-            use_sparse = True
-        else:
-            use_sparse = (self.k_neighbors is not None and self.k_neighbors < N - 1)
-            if use_sparse:
-                rbf, gt_edge, nbr_idx = knn_geometry(pos, self.rbf, self.gt_basis, self.k_neighbors)
-            else:
-                rbf, gt_edge, mask = pairwise_geometry(pos, self.rbf, self.gt_basis)
-
-        for i, layer in enumerate(self.mp_layers):
-            if use_sparse:
-                feats = layer(feats, rbf, gt_edge, nbr_idx, sparse=True)
-            else:
-                feats = layer(feats, rbf, gt_edge, mask, sparse=False)
-            if self.mix_layers is not None:
-                feats = self.mix_layers[i](feats)
-
-        parts = []
-        for sig in self.gt_basis.signatures:
-            if sig not in feats:
-                parts.append(torch.zeros(N, feats[sc].shape[1], device=pos.device))
-                continue
-            f = feats[sig]
-            if sig == sc:
-                parts.append(f.squeeze(-1))
-            else:
-                parts.append(f.norm(dim=-1))
-
-        node_inv = torch.cat(parts, dim=-1)
-        return node_inv.sum(dim=0)
-
-    # ------------------------------------------------------------------
-    def forward(
-        self,
-        batch:      List[torch.Tensor],
-        node_attrs: Optional[List[torch.Tensor]] = None,
-    ) -> torch.Tensor:
-        """Forward pass: encode batch and apply classifier head."""
-        if len(batch) == 0:
-            return torch.empty(0, self.num_classes, device=next(self.parameters()).device)
-        descriptors = self._encode_grouped_batch(batch, node_attrs)
-        return self.rho(descriptors)
-
-    # ------------------------------------------------------------------
-    def _encode_grouped_batch(
-        self,
-        batch:      List[torch.Tensor],
-        node_attrs: Optional[List[torch.Tensor]] = None,
-    ) -> torch.Tensor:
-        """Group variable-length point clouds by size and encode each subgroup."""
-        size_to_idx: Dict[int, List[int]] = {}
-        for i, pc in enumerate(batch):
-            sz = pc.shape[0]
-            size_to_idx.setdefault(sz, []).append(i)
-
-        has_groups = any(len(v) > 1 for v in size_to_idx.values())
-        if not has_groups:
-            descriptors = []
-            for i, pc in enumerate(batch):
-                attr = node_attrs[i] if node_attrs is not None else None
-                descriptors.append(self._encode_single(pc, attr))
-            return torch.stack(descriptors)
-
-        device = batch[0].device
-        descriptors = [None] * len(batch)
-        for sz, idxs in size_to_idx.items():
-            if len(idxs) == 1:
-                i = idxs[0]
-                attr = node_attrs[i] if node_attrs is not None else None
-                descriptors[i] = self._encode_single(batch[i], attr)
-            else:
-                sub_batch = torch.stack([batch[i] for i in idxs])
-                sub_attrs = None
-                if node_attrs is not None:
-                    sub_attrs = torch.stack([node_attrs[i] for i in idxs])
-                descs = self._encode_batch(sub_batch, sub_attrs, return_descriptors=True)
-                for off, i in enumerate(idxs):
-                    descriptors[i] = descs[off]
-        return torch.stack(descriptors)
 
 
 # ============================================================================
@@ -1124,6 +920,8 @@ class TemporalCrossAttentionTFN(nn.Module):
 
         self._scalar_sig = scalar_sig
         self._vector_sig = vector_sig
+        self.register_buffer(
+            "_vec_change", vector_basis_change(self.gt_basis), persistent=False)
 
     # ------------------------------------------------------------------
     def _encode_point_descriptors(
@@ -1143,9 +941,7 @@ class TemporalCrossAttentionTFN(nn.Module):
 
         f0 = pos.norm(dim=-1, keepdim=True).unsqueeze(-1)  # (N, 1, 1) -- standard scalar init
 
-        pos_norm = pos.norm(dim=-1, keepdim=True)
-        pos_safe = pos / pos_norm.where(pos_norm > 0, torch.ones_like(pos_norm))
-        f1 = pos_safe.unsqueeze(1)
+        f1 = vector_feature(pos, self._vec_change).unsqueeze(1)
         feats: FeatureDict = {sc: f0, vc: f1}
 
         if precomputed_geom is not None:
@@ -1218,19 +1014,6 @@ class TemporalCrossAttentionTFN(nn.Module):
     def _encode_single(self, pos, precomputed_geom=None, **kwargs):
         """Standard TFN-compatible single-sample encoding interface."""
         return self._encode_point_descriptors(pos, precomputed_geom=precomputed_geom)
-
-    # ------------------------------------------------------------------
-    def to(self, *args, **kwargs):
-        super().to(*args, **kwargs)
-        return self
-
-    def cuda(self, device=None):
-        super().cuda(device)
-        return self
-
-    def cpu(self):
-        super().cpu()
-        return self
 
 
 # ============================================================================
@@ -1493,6 +1276,8 @@ class StochasticEquivariantTFN(nn.Module):
 
         self._scalar_sig = scalar_sig
         self._vector_sig = vector_sig
+        self.register_buffer(
+            "_vec_change", vector_basis_change(self.gt_basis), persistent=False)
 
     # ------------------------------------------------------------------
     def _encode_features(self, pos, node_attr, precomputed_geom):
@@ -1505,9 +1290,7 @@ class StochasticEquivariantTFN(nn.Module):
             f0_parts.append(self.attr_proj(node_attr))
         f0 = torch.cat(f0_parts, dim=-1).unsqueeze(-1)
 
-        pos_norm = pos.norm(dim=-1, keepdim=True)
-        pos_safe = pos / pos_norm.where(pos_norm > 0, torch.ones_like(pos_norm))
-        f1 = pos_safe.unsqueeze(1)
+        f1 = vector_feature(pos, self._vec_change).unsqueeze(1)
         feats: FeatureDict = {sc: f0, vc: f1}
 
         if precomputed_geom is not None:
@@ -1588,21 +1371,6 @@ class StochasticEquivariantTFN(nn.Module):
         weights = F.softmax(logits, dim=-1)                     # (B, K)
         mean_pred = (weights.unsqueeze(-1) * mu).sum(dim=1)      # (B, C)
         return mean_pred
-
-    def nll_loss(self, target: torch.Tensor, dist: dict) -> torch.Tensor:
-        """Negative log-likelihood loss under the predicted mixture."""
-        mu     = dist['mu']       # (B, K, C)
-        logvar = dist['logvar']   # (B, K, C)
-        logits = dist['logits']   # (B, K)
-
-        var = logvar.exp().clamp(min=1e-6)
-        diff = target.unsqueeze(1) - mu                         # (B, K, C)
-        log_prob = -0.5 * (diff.pow(2) / var + logvar + math.log(2 * math.pi))
-        log_prob = log_prob.sum(dim=-1)                          # (B, K)
-
-        log_weights = F.log_softmax(logits, dim=-1)
-        log_mix = torch.logsumexp(log_weights + log_prob, dim=-1)  # (B,)
-        return -log_mix.mean()
 
 
 # ============================================================================
@@ -1717,24 +1485,25 @@ class GTMambaLayer(nn.Module):
             rad = rad.reshape(N, k, c_in, c_out)
             fCG = torch.einsum("jci,ieo->jceo", f_in, cg_t)          # (N, Ci, de, do)
 
-            # Selective scan over neighbours
+            # Per-neighbour message (neighbours are NOT summed yet)
             fCG_nbr = fCG[nbr_idx]                                   # (N, k, Ci, de, do)
             contracted = torch.einsum("ije,ijceo->ijco", e_f, fCG_nbr)  # (N, k, Ci, do)
+            msg_j = torch.einsum("ijco,ijcd->ijod", rad, contracted) # (N, k, Co, do)
 
-            # State-space recurrence: h_j = (1-g) * h_{j-1} + g * msg_j
-            # where g is the selective gate and msg_j = rad * contracted
-            msg = torch.einsum("ijco,ijcd->iod", rad, contracted)    # (N, Co, do)
-
-            # Cumulative scan with selective gate
-            h = msg.new_zeros(N, 1, *msg.shape[1:])
-            h_l = h.clone()
+            # State-space recurrence over neighbours (in scan order):
+            #   h_j = (1-g_j)·h_{j-1} + g_j·msg_j
+            # with g the per-channel selective gate.  Gates are scalars per
+            # channel, so they commute with the rotation action on the irrep
+            # components (do) — the scan is rotation-equivariant.
+            h  = msg_j.new_zeros(N, c_out, *msg_j.shape[3:])
+            h_out = msg_j.new_zeros(N, c_out, *msg_j.shape[3:])
             for j in range(k):
-                g_j = gate[:, j:j+1, None, :].transpose(-1, -2)      # (N, 1, Co, 1)
-                h_l = (1 - g_j) * h_l + g_j * msg[:, j:j+1]          # (N, 1, Co, do)
-                h = h + h_l
-            h = h / k                                                 # average over steps
+                g_j = gate[:, j].unsqueeze(-1)                       # (N, Co, 1)
+                h = (1 - g_j) * h + g_j * msg_j[:, j]
+                h_out = h_out + h
+            h_out = h_out / k
 
-            out[sig_out] = out[sig_out] + h.squeeze(1)
+            out[sig_out] = out[sig_out] + h_out
 
         out = self._apply_norm(out)
         if self.gate is not None:
@@ -1834,6 +1603,8 @@ class EquivariantGraphMambaNetwork(nn.Module):
 
         self._scalar_sig = scalar_sig
         self._vector_sig = vector_sig
+        self.register_buffer(
+            "_vec_change", vector_basis_change(self.gt_basis), persistent=False)
 
     # ------------------------------------------------------------------
     def _encode_single(
@@ -1845,9 +1616,7 @@ class EquivariantGraphMambaNetwork(nn.Module):
         sc, vc = self._scalar_sig, self._vector_sig
 
         f0 = pos.norm(dim=-1, keepdim=True).unsqueeze(-1)
-        pos_norm = pos.norm(dim=-1, keepdim=True)
-        pos_safe = pos / pos_norm.where(pos_norm > 0, torch.ones_like(pos_norm))
-        f1 = pos_safe.unsqueeze(1)
+        f1 = vector_feature(pos, self._vec_change).unsqueeze(1)
         feats: FeatureDict = {sc: f0, vc: f1}
 
         if precomputed_geom is not None:
@@ -1957,6 +1726,7 @@ class RelaxedOnEquivariantTensorFieldNetwork(nn.Module):
     def __init__(
         self,
         num_classes: int,
+        n: int = 3,
         max_order: int = 1,
         hidden_channels: int = 32,
         num_layers: int = 3,
@@ -1972,6 +1742,7 @@ class RelaxedOnEquivariantTensorFieldNetwork(nn.Module):
         from models import TensorFieldNetwork
         base = TensorFieldNetwork(
             num_classes=num_classes,
+            n=n,
             max_order=max_order,
             hidden_channels=hidden_channels,
             num_layers=num_layers,
@@ -1980,26 +1751,11 @@ class RelaxedOnEquivariantTensorFieldNetwork(nn.Module):
             k_neighbors=k_neighbors,
             classifier_dims=classifier_dims,
         )
-        self._inner = RelaxedEquivariantTFN(base, n=3, max_order=max_order,
+        self._inner = RelaxedEquivariantTFN(base, n=n, max_order=max_order,
                                             skip_init=skip_init)
 
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
         return self._inner(batch)
-
-    def to(self, *args, **kwargs):
-        super().to(*args, **kwargs)
-        self._inner.to(*args, **kwargs)
-        return self
-
-    def cuda(self, device=None):
-        super().cuda(device)
-        self._inner.cuda(device)
-        return self
-
-    def cpu(self):
-        super().cpu()
-        self._inner.cpu()
-        return self
 
     @property
     def rho(self):    return self._inner.base.rho
@@ -2033,6 +1789,7 @@ class HybridTFNClassifier(nn.Module):
     def __init__(
         self,
         tfn_backbone: nn.Module,
+        input_dim: int = 3,
         non_eq_dim: int = 128,
         fusion_dims: Optional[List[int]] = None,
         output_dim: int = 10,
@@ -2042,8 +1799,8 @@ class HybridTFNClassifier(nn.Module):
         if fusion_dims is None:
             fusion_dims = [256, 128]
 
-        # Non-equivariant point-wise MLP (processes raw (N,3) coords)
-        in_dim = 3
+        # Non-equivariant point-wise MLP (processes raw (N,input_dim) coords)
+        in_dim = input_dim
         neq_dims = [in_dim, 64, 128, non_eq_dim]
         neq_layers = []
         for i in range(len(neq_dims) - 1):
@@ -2058,7 +1815,7 @@ class HybridTFNClassifier(nn.Module):
         if hasattr(tfn_inner, '_encode_single'):
             # Probe with a dummy input to get invariant feature dim
             with torch.no_grad():
-                dummy = torch.zeros(1, 3)
+                dummy = torch.zeros(1, input_dim)
                 d = tfn_inner._encode_single(dummy)
                 eq_dim = d.shape[-1]
         else:
@@ -2075,6 +1832,7 @@ class HybridTFNClassifier(nn.Module):
                 fusion_layers.append(nn.LayerNorm(fd[i + 1]))
         self.fusion = nn.Sequential(*fusion_layers)
         self._eq_dim = eq_dim
+        self._input_dim = input_dim
 
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
         # TFN branch: get equivariant invariant descriptor (before rho)
@@ -2092,7 +1850,7 @@ class HybridTFNClassifier(nn.Module):
         # Non-equivariant branch: per-point MLP → max-pool
         neq_feats = []
         for pc in batch:
-            raw = pc[:, :3] if pc.shape[1] >= 3 else pc
+            raw = pc[:, :self._input_dim] if pc.shape[1] >= self._input_dim else pc
             h = self.neq_phi(raw)
             h = h.max(dim=0).values
             neq_feats.append(h)
@@ -2111,6 +1869,7 @@ class HybridOnEquivariantTensorFieldNetwork(nn.Module):
     def __init__(
         self,
         num_classes: int,
+        n: int = 3,
         max_order: int = 1,
         hidden_channels: int = 32,
         num_layers: int = 3,
@@ -2129,6 +1888,7 @@ class HybridOnEquivariantTensorFieldNetwork(nn.Module):
         from models import TensorFieldNetwork
         base = TensorFieldNetwork(
             num_classes=num_classes,
+            n=n,
             max_order=max_order,
             hidden_channels=hidden_channels,
             num_layers=num_layers,
@@ -2137,27 +1897,13 @@ class HybridOnEquivariantTensorFieldNetwork(nn.Module):
             k_neighbors=k_neighbors,
             classifier_dims=classifier_dims,
         )
-        self._inner = HybridTFNClassifier(base, non_eq_dim=non_eq_dim,
+        self._inner = HybridTFNClassifier(base, input_dim=n, non_eq_dim=non_eq_dim,
                                           fusion_dims=fusion_dims,
                                           output_dim=num_classes)
 
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
         return self._inner(batch)
 
-    def to(self, *args, **kwargs):
-        super().to(*args, **kwargs)
-        self._inner.to(*args, **kwargs)
-        return self
-
-    def cuda(self, device=None):
-        super().cuda(device)
-        self._inner.cuda(device)
-        return self
-
-    def cpu(self):
-        super().cpu()
-        self._inner.cpu()
-        return self
 
 
 # ============================================================================
@@ -2367,18 +2113,3 @@ class EndToEndTensorFieldNetwork(nn.Module):
 
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
         return self._inner(batch)
-
-    def to(self, *args, **kwargs):
-        super().to(*args, **kwargs)
-        self._inner.to(*args, **kwargs)
-        return self
-
-    def cuda(self, device=None):
-        super().cuda(device)
-        self._inner.cuda(device)
-        return self
-
-    def cpu(self):
-        super().cpu()
-        self._inner.cpu()
-        return self

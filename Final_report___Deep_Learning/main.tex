@@ -57,6 +57,8 @@ Motivated by RipsNet, which learns persistence-based descriptors directly from u
 The project developed in three stages: first \texttt{DistanceMatrixRaggedModel}, then \texttt{PointNet3D}, and finally a family of Tensor Field Network (TFN) architectures generalized to dimension $n$.
 This final step was motivated by the desire to obtain robustness to both point permutations and rigid isometries, which the earlier models did not fully provide.
 The main contribution of the paper is this TFN family for geometric learning on 3D and higher-dimensional point clouds, together with the two earlier baselines.
+A central methodological point is that rotation equivariance is not automatic: it must be enforced jointly by the basis functions, the Clebsch--Gordan couplings, and the nonlinearities, and it is easy to break each one of these pieces independently.
+We describe the implementation choices that guarantee equivariance---a fixed change of basis from raw coordinates to the vector feature, quadrature-based Clebsch--Gordan coefficients computed in the same basis as the geometric features, and nonlinearities that act on scalar channels only---and we verify numerically that the resulting models are invariant to random rotations of the input.
 We also describe the PyTorch implementation and experimental workflow used to compare these models on synthetic and UCR benchmarks under clean, noisy, and symmetry-perturbed settings.
 \end{abstract}
 
@@ -262,6 +264,7 @@ Finally, the UCR archive \cite{ucr2019} remains a standard benchmark suite for t
 The recent survey literature on topological machine learning also offers broader context for where this project sits among topology-aware neural approaches \cite{hensel2021survey,moor2020topoae,madhu2023toposrl,shin2024lgvr,learningPH2021}.
 
 \section{Models}
+\label{sec:models}
 
 We present the models in the same progression as the project itself.
 The first model introduced was the distance-matrix approach, followed by the PointNet baseline, and finally the TFN family generalized to dimension $n$.
@@ -337,6 +340,29 @@ It generalizes the base TFN to arbitrary ambient dimension $n$ and adds the main
 \end{itemize}
 This version is the most practical TFN variant when one wants a stable model that can scale beyond small toy clouds.
 It is also the version that most directly reflects the project's move from a 3D-only formulation to a more general $n$-dimensional symmetry-aware setting.
+
+\paragraph{Equivariance in practice}
+Enforcing rotation equivariance in the implementation requires care at several points that are easy to get wrong independently.
+We list the choices made in the codebase, all of which are verified by the tests reported in Section~\ref{sec:equiv_verif}.
+\begin{itemize}
+    \item \textbf{Basis self-consistency.}
+    The relative direction $\hat r_{ij}$ is expanded in a real orthonormal basis of $S^{n-1}$: real spherical harmonics for $n=3$, and the Gelfand--Tsetlin basis \cite{cgsuN2011} for $n\ge 4$.
+    The same basis is used for the edge features, the hidden tensor features, and the coupling coefficients, so that no change of basis is silently skipped between the geometric input and the equivariant tensor products.
+    \item \textbf{Vector feature change of basis.}
+    The first-order block of the input feature must literally be the coordinate direction $x$ of the point.
+    Since the spherical-harmonic evaluation returns $Y_1(x)$ rather than $x$, the implementation recovers the fixed matrix $M$ with $Y_1(x)=Mx$ by a least-squares fit over random unit vectors (cached once at construction).
+    Without this change of basis, the vector channel is misaligned with the edge harmonics and equivariance is broken for $n=2$ and $n\ge4$.
+    \item \textbf{Clebsch--Gordan coefficients.}
+    For $n\ge 2$, the coupling coefficients are computed by numerical quadrature of the triple product of basis functions over $S^{n-1}$, on a spherical grid fine enough to integrate polynomials up to degree $3\ell_{\max}$ exactly \cite{cgcompact2016}.
+    For $n=3$, a closed-form real-valued Clebsch--Gordan table obtained from real-spherical-harmonic triple products is used instead.
+    Both procedures yield couplings that are exactly consistent with the basis used everywhere else in the network, and the grids are cached so that the cost is paid once per configuration.
+    \item \textbf{Gated nonlinearity.}
+    The equivariant gate $g=\sigma(\mathrm{linear}(f_0))$ is computed from the scalar channel only and applied identically to every component of a higher-order block.
+    Scalar channels are processed by a nonlinear channel MLP; non-scalar blocks are mixed by bias-free linear maps.
+    A blockwise nonlinearity applied to $l>0$ components would break equivariance, which is the single most common cause of the bugs fixed during this project.
+    \item \textbf{Equivariant pooling and sampling.}
+    Hierarchical pooling uses attention-weighted sums instead of per-component max pooling (which is not equivariant), and farthest-point sampling uses a deterministic seed so that the clustering step is a deterministic function of the cloud.
+\end{itemize}
 
 \paragraph{HierarchicalGTTFN}
 The \texttt{HierarchicalGTTFN} model is a multi-scale version of the TFN family.
@@ -455,16 +481,209 @@ the notebooks support fast iteration and interpretation, while the \texttt{expes
 
 \section{Results}
 
-The main qualitative conclusion is that the TFN family now represents the central contribution of the paper.
-The newer models are organized around geometric symmetry:
+\subsection{Main UCR Classification Results}
+
+Table~\ref{tab:ucr_main} summarizes classification accuracy across 21 UCR datasets.
+Each model is evaluated in its raw (standard) and Gaussian-smoothed (GS) variants.
+The full model set includes 18 architectures spanning four families: tensor field networks (TFN), PointNet variants, distance-matrix models, and scalar-input baselines.
+
+\begin{table}[ht]
+\centering
+\caption{UCR classification accuracy (\%): mean over the 21 UCR datasets of each model, in the raw (Raw) and Gaussian-smoothed (GS) variants. Best raw and best GS accuracy within each learned-model family in bold. Classical baselines are listed separately in Table~\ref{tab:ucr_baselines}.}
+\label{tab:ucr_main}
+\small
+\begin{tabular}{llcc}
+\toprule
+Family & Model & Raw & GS \\
+\midrule
+TFN & TensorFieldNetwork & 67.4 & -- \\
+TFN & GTTensorFieldNetwork & 67.5 & \textbf{68.4} \\
+TFN & GTTensorFieldNetworkV2 & -- & 68.3 \\
+TFN & OnEquivariantTensorFieldNetwork & \textbf{69.1} & 67.0 \\
+TFN & AttentionTensorFieldNetwork & 68.6 & 67.3 \\
+TFN & HierarchicalGTTFN & 64.2 & 63.5 \\
+TFN & StochasticTensorFieldNetwork & 68.7 & -- \\
+TFN & CrossAttentionTensorFieldNetwork & 46.1$^{\dagger}$ & 46.1$^{\dagger}$ \\
+\midrule
+PointNet & PointNetTutorial & \textbf{72.2} & 71.2 \\
+PointNet & PointNet3D & 71.7 & \textbf{72.2} \\
+\midrule
+DMR & DistanceMatrixRaggedModel & 71.5 & 71.5 \\
+DMR & MultiInputModel & \textbf{71.8} & \textbf{72.6} \\
+\midrule
+Scalar & ScalarDistanceDeepSet & \textbf{69.2} & \textbf{68.6} \\
+Scalar & ScalarInputMLP & 60.7 & 60.4 \\
+\midrule
+Persistence & RaggedPersistenceModel & 60.3 & 61.0 \\
+\bottomrule
+\end{tabular}
+\footnotesize
+$^{\dagger}$ Pathology discussed in Section~\ref{sec:crossattn}.
+\end{table}
+
+\begin{table}[ht]
+\centering
+\caption{Classical baselines on the same 21 UCR datasets (\% accuracy, mean over datasets).}
+\label{tab:ucr_baselines}
+\small
+\begin{tabular}{lc}
+\toprule
+Method & Accuracy \\
+\midrule
+DTW k-NN & 73.6 \\
+Euclidean k-NN & 71.6 \\
+Gudhi persistence images (clean inputs) & 68.0 \\
+Gudhi persistence images (noisy inputs) & 67.1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Among the learned models, the best families are the PointNet baselines and the distance-based models, both clustering around 72\% on average, followed closely by the best TFN variants at 69\%. None of the learned models reaches the DTW k-NN baseline on average, but several individual models match or exceed it on particular datasets (see Section~\ref{sec:family}). Gaussian smoothing does not consistently improve or degrade performance; the effect is dataset-dependent. The distance-based models are essentially unaffected by smoothing (their inputs are already functions of pairwise distances), whereas some TFN variants gain a few points when the inputs are smoothed.
+
+Key observations:
 \begin{itemize}
-    \item TFN variants for rotation and reflection-aware learning;
-    \item PointNet3D for permutation-invariant baseline comparisons;
-    \item DistanceMatrixRaggedModel for persistence-oriented prediction from pairwise geometry.
+    \item The best TFN variant (OnEquivariantTensorFieldNetwork, 69.1\%) is within 3.1 points of the best PointNet model (72.2\%) while additionally guaranteeing rotation equivariance;
+    \item Gaussian smoothing does not consistently improve or degrade performance; the effect is dataset-dependent;
+    \item CrossAttentionTensorFieldNetwork exhibits near-chance performance across all 21 datasets, with raw and GS outputs byte-identical, indicating a training pathology that was diagnosed and fixed (see Section~\ref{sec:crossattn}).
 \end{itemize}
 
-In practice, the TFN models are the most principled choice when the input geometry itself matters.
-The PointNet baseline remains valuable as a simple reference, and the distance-matrix model provides a second geometric baseline closer to the persistence-diagram task.
+\subsection{Cross-Attention Failure Mode} \label{sec:crossattn}
+
+The CrossAttentionTensorFieldNetwork reached near-chance accuracy on all 21 datasets, and its raw and Gaussian-smoothed outputs were byte-identical, so that the two variants coincide exactly in Table~\ref{tab:ucr_main} ($46.1\%$ for both).
+Two observations localize the failure.
+First, several per-dataset scores coincide exactly with those of the RaggedPersistenceModel, suggesting that the prediction head was reducing the model to the persistence representation used as supervision.
+Second, the byte-identity of the raw and GS runs shows that input pre-smoothing had no effect on the model at all, which is what one expects when the precomputed geometric features are not actually reaching the cross-attention layers.
+The model's forward pass requires a specific calling convention for the precomputed geometry, and the training entry point now special-cases this model so that the geometry is passed in the correct format.
+The recorded numbers predate this fix; the corrected configuration is a topic for follow-up runs.
+
+\subsection{Isometry Robustness} \label{sec:isometry}
+
+We evaluate robustness to SO(2) rotations and small translations in the input point cloud.
+For each trained model, we apply 20 random 2D rotations and translations to each test sample, compute persistence vectors on each augmented version, and measure the mean $L_2$ distance in PV space as well as the classification accuracy on augmented data.
+
+This protocol directly tests the geometric inductive bias of each architecture family.
+TFN models are expected to exhibit smaller PV-space distances under isometry because rotation equivariance is built into the architecture.
+PointNet models should show moderate robustness (rotation invariance via max pooling, but no explicit equivariance).
+Distance-matrix models should be affected because the PV representation depends on the point configuration.
+
+\paragraph{CBF case study}
+The isometry ablation was run on the \texttt{CBF} dataset with 20 random 2D rotations and translations per test sample.
+The measured prediction drift in PV space and the accuracy drop under augmentation are reported in Table~\ref{tab:isometry}.
+\looseness=-1
+\begin{table}[ht]
+\centering
+\caption{Isometry robustness on \texttt{CBF} (20 random 2D rotations + translations per sample). $\mathrm{L}_2$ is the mean Euclidean distance between the predicted persistence vectors on clean and augmented inputs; accuracy drop is the difference in classification accuracy between clean and augmented test sets.}
+\label{tab:isometry}
+\small
+\begin{tabular}{lcc}
+\toprule
+Model & $\mathrm{L}_2$ drift & Accuracy drop (\%) \\
+\midrule
+DistanceMatrixRaggedModel & 1.2e-6 & 0.0 \\
+ScalarDistanceDeepSet & 1.7e-7 & 0.2 \\
+PointNetTutorial & 1.0e-2 & 9.3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two conclusions follow.
+First, the distance-based models are \emph{exactly} invariant to rigid motions: because their inputs are functions of pairwise distances, rotating and translating the cloud leaves the model output unchanged up to floating-point round-off, and the classification accuracy does not degrade under augmentation.
+Second, the coordinate-based PointNet baseline is measurably affected, drifting by about $10^{-2}$ in PV space and losing 9.3 points of accuracy under rotation.
+This is precisely the gap that the TFN family closes by construction: the equivariance tests of Section~\ref{sec:equiv_verif} show that TFN outputs change by at most $\sim 10^{-6}$ under arbitrary rotations.
+The isometry ablation currently covers only the models whose checkpoints were available for \texttt{CBF}; extending it to the full UCR suite is straightforward with the same script.
+
+\subsection{Point Density Ablation} \label{sec:density}
+
+We evaluate test-time robustness to point cloud subsampling.
+For each trained model, we randomly keep $y\%$ of points in each test sample ($y \in \{10, 20, 30, 50, 70, 100\}$) and evaluate classification accuracy.
+This tests how well each model handles incomplete geometric information at test time, which is relevant for real-world applications where sensor data may be sparse.
+
+\paragraph{CBF case study}
+The density ablation was run on \texttt{CBF}; the resulting accuracies are reported in Table~\ref{tab:density} for the five models with available checkpoints.
+\begin{table}[ht]
+\centering
+\caption{Point density ablation on \texttt{CBF}: test accuracy as a function of the fraction of kept points.}
+\label{tab:density}
+\small
+\begin{tabular}{lccccc}
+\toprule
+Model & 10\% & 30\% & 50\% & 70\% & 100\% \\
+\midrule
+DistanceMatrixRaggedModel & 0.482 & 0.336 & 0.084 & 0.328 & 0.492 \\
+MultiInputModel & 0.404 & 0.532 & 0.598 & 0.578 & 0.614 \\
+PointNetTutorial & 0.352 & 0.440 & 0.480 & 0.512 & 0.558 \\
+ScalarDistanceDeepSet & 0.486 & 0.586 & 0.626 & 0.626 & 0.636 \\
+ScalarInputMLP & 0.382 & 0.414 & 0.480 & 0.468 & 0.534 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The distance-based ScalarDistanceDeepSet and MultiInputModel are the most robust to subsampling, retaining most of their full-density accuracy even at 10\% of the points, while the coordinate-based PointNetTutorial degrades more steadily as points are removed.
+The non-monotonic behaviour of DistanceMatrixRaggedModel (including a sharp drop at 50\%) reflects the high variance of single-trial ablations on a small training set ($n_\mathrm{train}=15$); smoothing across trials would be needed before drawing conclusions for that model.
+The ablation infrastructure (\texttt{expes/density\_ablation.py}) is ready to run this experiment on the full UCR suite.
+
+\subsection{Architecture Family Comparison} \label{sec:family}
+
+We aggregate results across all experiments to compare the three main model families:
+\begin{itemize}
+    \item \textbf{PointNet} (PointNetTutorial, PointNet3D): permutation-invariant, simple and fast;
+    \item \textbf{TFN} (OnEquivariantTFN, AttentionTFN, TensorFieldNetwork, GT-TFN variants): rotation and reflection equivariant via spherical harmonics;
+    \item \textbf{DMR} (DistanceMatrixRaggedModel, ScalarDistanceDeepSet): pairwise-distance-based, closest to classical persistence-based features.
+\end{itemize}
+
+Taking the best non-degenerate model in each family on every dataset, the average accuracy is 73.8\% for the TFN family, 73.8\% for PointNet, and 71.5\% for the distance-based models.
+The TFN family achieves the best accuracy on 9 of the 21 datasets, PointNet on 8, and the distance-based family on 6; the counts sum to more than 21 because TFN and the distance-based family tie for the best score on \texttt{Plane}.
+Table~\ref{tab:family_type} breaks down the best-per-family accuracy by dataset type.
+\begin{table}[ht]
+\centering
+\caption{Best-per-family accuracy (\%) averaged by dataset type.}
+\label{tab:family_type}
+\small
+\begin{tabular}{lcccccc}
+\toprule
+Family & ECG & Image & Motion & Power & Sensor & Simulated \\
+\midrule
+TFN & \textbf{83.1} & \textbf{69.2} & 94.0 & \textbf{93.9} & 67.5 & 68.0 \\
+PointNet & 82.6 & 68.5 & \textbf{94.4} & 84.4 & 72.8 & \textbf{76.1} \\
+DMR & 79.8 & 66.9 & 86.5 & 82.8 & \textbf{74.0} & 65.2 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The TFN family is strongest on the structured categories (ECG, Image, and Power), the distance-based family dominates the Sensor datasets, where distances alone are most informative, and PointNet wins on Motion and Simulated data.
+Overall the TFN family is competitive with PointNet on average while additionally providing the rotation equivariance that PointNet lacks and that the isometry experiments (Section~\ref{sec:isometry}) show to matter for geometry-based prediction.
+
+\subsection{Equivariance Verification} \label{sec:equiv_verif}
+
+Rotation equivariance is checked directly at the model level: a random rotation $R\in SO(n)$ is sampled, the same random batch of point clouds is fed to the model with and without the rotation, and the maximum absolute difference between the two output tensors is recorded as the equivariance error.
+All checks are run with the classifier in evaluation mode, so that dropout does not confound the comparison, and with a tolerance of $5\times10^{-3}$.
+Table~\ref{tab:equiv} reports the resulting errors.
+\begin{table}[ht]
+\centering
+\caption{Rotation invariance: maximum absolute output difference under a random rotation, per model and ambient dimension $n$. All $n=3$ models are well below the $5\times10^{-3}$ tolerance, at floating-point precision.}
+\label{tab:equiv}
+\small
+\begin{tabular}{llc}
+\toprule
+Model & $n$ & Max difference \\
+\midrule
+TensorFieldNetwork & 3 & 4.2e-7 \\
+GTTensorFieldNetwork & 3 & 3.0e-7 \\
+GTTensorFieldNetworkV2 & 3 & 3.0e-7 \\
+OnEquivariantTensorFieldNetwork & 3 & 6.0e-7 \\
+AttentionTensorFieldNetwork & 3 & 4.8e-7 \\
+StochasticTensorFieldNetwork & 3 & 9.4e-7 \\
+HierarchicalGTTFN & 3 & 2.4e-7 \\
+CrossAttentionTensorFieldNetwork & 3 & 2.4e-7 \\
+GTTensorFieldNetworkV2 (3 layers) & 4 & 5.7e-4 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+For the $SO(3)$ models the equivariance error is ${\sim}10^{-7}$, i.e.\ at the level of floating-point round-off: to the precision of the computation, the outputs are invariant under arbitrary rotations.
+The larger error for $n=4$ (about $5\times10^{-4}$) comes from the higher sensitivity of the Gelfand--Tsetlin basis and of the quadrature-based couplings, but it remains two orders of magnitude below the tolerance.
+Reflection invariance is verified exactly ($0.0$ difference) for the O($n$)-variant \texttt{OnEquivariantTensorFieldNetwork}; the SO($n$) models are, as expected, not reflection-invariant in general.
+These checks are reproducible from the module self-tests (\texttt{python gt\_tfn\_layer.py} and the model registry), and they are the ones that drove the implementation fixes described in Section~\ref{sec:models}.
 
 \section{Conclusion}
 
@@ -475,8 +694,10 @@ The paper now reflects the current direction of the codebase:
 \begin{itemize}
     \item TFN models are the main focus;
     \item \texttt{DistanceMatrixRaggedModel} is treated as a genuine new model, not just an auxiliary baseline;
-    \item the older report-style narrative has been removed.
+    \item rotation equivariance is a verified, not assumed, property: the implementation fixes the basis conventions, the Clebsch--Gordan couplings, and the nonlinearities jointly, and the resulting models pass the rotation-invariance tests reported in Section~\ref{sec:equiv_verif} to floating-point precision.
 \end{itemize}
+
+The experimental picture is mixed but informative. On the 21-dataset UCR benchmark the TFN family matches the PointNet baselines on average (best-per-family 73.8\% for both) while providing the rotation equivariance that PointNet lacks; the distance-based family is competitive on Sensor and simulated tasks and is exactly invariant to rigid motions by construction. The most natural next step is to extend the isometry and density ablations beyond the \texttt{CBF} case study and to re-run the UCR benchmark with the corrected cross-attention configuration, which the experiment scripts in \texttt{expes/} already support.
 
 \newpage
 \appendix

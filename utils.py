@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim import Adamax
 
 class DenseRagged(nn.Module):
     def __init__(self, in_features=None, out_features=30, activation='relu', use_bias=True):

@@ -6,7 +6,7 @@ Import structure (no circular imports):
                         ChannelMixer, EquivariantGate, ResidualProjection
   gt_improvements.py → HierarchicalGTTFN, OnEquivariantWrapper
   THIS file          → GTTensorFieldNetworkV2, TensorFieldNetwork, PointNet3D,
-                        and all notebook/ragged models.
+                        RipsPointNet, AttnRipsPointNet, and all notebook/ragged models.
 
   tfn_model.py imports FROM this file (one-way): no circular deps.
 
@@ -39,26 +39,41 @@ GTTensorFieldNetworkV2 overrides .to() to call _move_basis_tensors().
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 from typing import List, Optional
+
+def compute_persistence_diagram(point_cloud, homology_dim=1):
+    """
+    Compute H1 persistence diagram from a point cloud using gudhi AlphaComplex.
+
+    Args:
+        point_cloud: numpy array of shape (N, d) or torch.Tensor
+        homology_dim: homology dimension (default 1 = loops)
+
+    Returns:
+        torch.Tensor of shape (K, 2) with (birth, death) pairs,
+        or empty tensor if no features found.
+    """
+    import gudhi as gd
+    import numpy as np
+    if isinstance(point_cloud, torch.Tensor):
+        point_cloud = point_cloud.detach().cpu().numpy()
+    pc = np.asarray(point_cloud, dtype=np.float64)
+    if pc.shape[0] < 3:
+        return torch.zeros(0, 2)
+    ac = gd.AlphaComplex(points=pc).create_simplex_tree()
+    ac.persistence()
+    dgm = ac.persistence_intervals_in_dimension(homology_dim)
+    if dgm is None or len(dgm) == 0:
+        return torch.zeros(0, 2)
+    return torch.tensor(np.array(dgm, dtype=np.float32))
+
 
 # ---------------------------------------------------------------------------
 # Low-level building blocks
 # ---------------------------------------------------------------------------
-from TFN import (
-    RBFExpansion as TFN_RBFExpansion,
-    TFNLayer,
-    TensorFieldNetwork as TFNTensorFieldNetwork,
-)
-from gt_tfn_layer import (
-    RBFExpansion as GTTFN_RBFExpansion,
-    GTTFNLayer,
-    ChannelMixer,
-    EquivariantGate,
-    ResidualProjection,
-    GTTensorFieldNetwork as _GTTensorFieldNetworkBase,
-)
+from TFN import TensorFieldNetwork as TFNTensorFieldNetwork
+from gt_tfn_layer import GTTensorFieldNetwork as _GTTensorFieldNetworkBase
 # gt_improvements imports models.py (circular if done at top level).
 # Imported lazily at the bottom of this file, after all classes are defined.
 
@@ -104,9 +119,10 @@ def _act(name: str = 'gelu') -> nn.Module:
 def _build_mlp(dims: List[int],
                activation: str = 'gelu',
                norm: str = 'ln',
-               final_activation: Optional[str] = None) -> nn.Sequential:
+               final_activation: Optional[str] = None,
+               dropout: float = 0.0) -> nn.Sequential:
     """
-    Build a fully-connected MLP with optional normalisation.
+    Build a fully-connected MLP with optional normalisation and dropout.
 
     dims             : [in, h1, h2, ..., out]
     activation       : activation after each hidden layer
@@ -117,6 +133,7 @@ def _build_mlp(dims: List[int],
                        'none' no normalisation
     final_activation : optional activation after the last linear layer
                        (e.g. 'sigmoid' for bounded outputs)
+    dropout          : dropout probability after each hidden layer (0 = disabled)
 
     Note: 'bn' is accepted as an alias for 'ln' for checkpoint compatibility
     (old code saved norm='bn'; we silently upgrade to LayerNorm which has the
@@ -136,6 +153,8 @@ def _build_mlp(dims: List[int],
             if norm in ('ln', 'bn'):
                 layers.append(nn.LayerNorm(dims[i + 1]))
             # norm == 'none': no normalisation layer added
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
     return nn.Sequential(*layers)
 
 
@@ -193,32 +212,9 @@ def _tfn_forward(self, batch, node_attrs, base_cls):
 
 # Device-aware wrappers for the base models imported from external modules
 class GTTensorFieldNetwork(_GTTensorFieldNetworkBase):
-    """SO(n) base model with device-aware forward pass."""
+    """SO(n) base model."""
     def forward(self, batch, node_attrs=None):
-        return _tfn_forward(self, batch, node_attrs, _GTTensorFieldNetworkBase)
-
-    def to(self, *args, **kwargs):
-        super().to(*args, **kwargs)
-        device = None
-        if args:
-            first = args[0]
-            if isinstance(first, (str, torch.device)):
-                device = torch.device(first)
-        if 'device' in kwargs:
-            device = torch.device(kwargs['device'])
-        if device is not None:
-            _move_basis_tensors(self, device)
-        return self
-
-    def cuda(self, device=None):
-        super().cuda(device)
-        _move_basis_tensors(self, torch.device('cuda', device or 0))
-        return self
-
-    def cpu(self):
-        super().cpu()
-        _move_basis_tensors(self, torch.device('cpu'))
-        return self
+        return _GTTensorFieldNetworkBase.forward(self, batch, node_attrs)
 
 
 # HierarchicalGTTFN defined at the bottom after the lazy gt_improvements import.
@@ -226,7 +222,6 @@ class GTTensorFieldNetwork(_GTTensorFieldNetworkBase):
 class GTTensorFieldNetworkV2(_GTTensorFieldNetworkBase):
     """
     Recommended GT-TFN with all improvements ON by default.
-    Device-fix overrides ensure GTBasis/CG tensors move with the model.
     Inherits _DeviceAwareMixin so that every forward() call moves basis
     tensors to the correct device before message passing.
     """
@@ -244,10 +239,13 @@ class GTTensorFieldNetworkV2(_GTTensorFieldNetworkBase):
         use_gate:        bool      = True,
         use_residual:    bool      = True,
         use_channel_mix: bool      = True,
+        use_attention_pool: bool   = False,
         node_attr_dim:   int       = 0,
-        classifier_dims: List[int] = [256, 128],
+        classifier_dims: Optional[List[int]] = None,
         radial_hidden:   int       = 128,
     ):
+        if classifier_dims is None:
+            classifier_dims = [256, 128]
         super().__init__(
             n=n, num_classes=num_classes,
             max_order=max_order,
@@ -259,36 +257,14 @@ class GTTensorFieldNetworkV2(_GTTensorFieldNetworkBase):
             use_gate=use_gate,
             use_residual=use_residual,
             use_channel_mix=use_channel_mix,
+            use_attention_pool=use_attention_pool,
             node_attr_dim=node_attr_dim,
             classifier_dims=classifier_dims,
             radial_hidden=radial_hidden,
         )
 
-    def to(self, *args, **kwargs):
-        super().to(*args, **kwargs)
-        device = None
-        if args:
-            first = args[0]
-            if isinstance(first, (str, torch.device)):
-                device = torch.device(first)
-        if 'device' in kwargs:
-            device = torch.device(kwargs['device'])
-        if device is not None:
-            _move_basis_tensors(self, device)
-        return self
-
-    def cuda(self, device=None):
-        super().cuda(device)
-        _move_basis_tensors(self, torch.device('cuda', device or 0))
-        return self
-
-    def cpu(self):
-        super().cpu()
-        _move_basis_tensors(self, torch.device('cpu'))
-        return self
-
     def forward(self, batch, node_attrs=None):
-        return _tfn_forward(self, batch, node_attrs, _GTTensorFieldNetworkBase)
+        return _GTTensorFieldNetworkBase.forward(self, batch, node_attrs)
 
 
 # ---------------------------------------------------------------------------
@@ -301,17 +277,20 @@ class TensorFieldNetwork(nn.Module):
     def __init__(
         self,
         num_classes:     int,
+        n:               int       = 3,
         max_order:       int       = 1,
         hidden_channels: int       = 64,
         num_layers:      int       = 6,
         num_rbf:         int       = 64,
         cutoff:          float     = 2.0,
         k_neighbors:     int       = 16,
-        classifier_dims: List[int] = [256, 128],
+        classifier_dims: Optional[List[int]] = None,
     ):
         super().__init__()
+        if classifier_dims is None:
+            classifier_dims = [256, 128]
         self._inner = GTTensorFieldNetworkV2(
-            n=3, num_classes=num_classes,
+            n=n, num_classes=num_classes,
             max_order=max_order,
             hidden_channels=hidden_channels,
             num_layers=num_layers,
@@ -323,21 +302,6 @@ class TensorFieldNetwork(nn.Module):
 
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
         return self._inner(batch)
-
-    def to(self, *args, **kwargs):
-        super().to(*args, **kwargs)
-        self._inner.to(*args, **kwargs)
-        return self
-
-    def cuda(self, device=None):
-        super().cuda(device)
-        self._inner.cuda(device)
-        return self
-
-    def cpu(self):
-        super().cpu()
-        self._inner.cpu()
-        return self
 
     @property
     def rho(self):    return self._inner.rho
@@ -359,10 +323,12 @@ class PointNet3D(nn.Module):
     """
 
     def __init__(self, output_dim,
+                 input_dim: int = 3,
                  phi_dims=(64, 128, 256), rho_dims=(256, 128),
                  activation: str = 'gelu', norm: str = 'bn'):
         super().__init__()
-        self.phi_layers = _build_mlp([3] + list(phi_dims),
+        self._input_dim = input_dim
+        self.phi_layers = _build_mlp([input_dim] + list(phi_dims),
                                      activation=activation, norm=norm)
         self.rho_layers = _build_mlp([phi_dims[-1]] + list(rho_dims) + [output_dim],
                                      activation=activation, norm=norm,
@@ -378,7 +344,7 @@ class PointNet3D(nn.Module):
         for i, pc in enumerate(batch):
             mask[i, :len(pc)] = True
         B, N, _ = padded.shape
-        phi = self.phi_layers(padded.reshape(B * N, 3)).reshape(B, N, -1)
+        phi = self.phi_layers(padded.reshape(B * N, self._input_dim)).reshape(B, N, -1)
         phi = phi.masked_fill(~mask.unsqueeze(-1), torch.finfo(phi.dtype).min)
         agg, _ = phi.max(dim=1)
         return self.rho_layers(agg)
@@ -462,6 +428,265 @@ class PointNetTutorial(nn.Module):
         phi = phi.masked_fill(~mask.unsqueeze(-1), torch.finfo(phi.dtype).min)
         agg, _ = phi.max(dim=1)
         return self.rho_layers(agg)
+
+
+class RipsPointNet(nn.Module):
+    """
+    PointNet + Persistence Diagram fusion model.
+
+    Two branches:
+      1. PointNet branch — MLP on raw coordinates → max-pool
+      2. PD branch — MLP on H1 persistence diagram pairs → max-pool
+
+    Branches are concatenated → classifier head.
+
+    The persistence diagram is precomputed externally (gudhi AlphaComplex)
+    and passed as a list of (K_i, 2) tensors of (birth, death) pairs.
+
+    Usage:
+        model = RipsPointNet(output_dim=num_classes)
+        # In prepare_data, compute PDs via gudhi and pass as second arg
+        logits = model(point_clouds, precomputed_pd)
+    """
+
+    def __init__(self, output_dim,
+                 input_dim: int = 3,
+                 phi_dims=(64, 128, 256),
+                 rho_dims=(256, 128),
+                 pd_dims=(32, 64, 128),
+                 pd_rho_dims=(128, 64),
+                 fusion_dims=(256, 128),
+                 max_pd_pairs: int = 128,
+                 activation: str = 'gelu', norm: str = 'bn'):
+        super().__init__()
+        self._input_dim = input_dim
+        self.max_pd_pairs = max_pd_pairs
+
+        # Branch 1: PointNet on raw coordinates
+        self.phi_layers = _build_mlp([input_dim] + list(phi_dims),
+                                     activation=activation, norm=norm)
+        self.rho_layers = _build_mlp([phi_dims[-1]] + list(rho_dims) + [rho_dims[-1]],
+                                     activation=activation, norm=norm,
+                                     final_activation=None)
+
+        # Branch 2: MLP on (birth, death) pairs
+        self.pd_layers = _build_mlp([2] + list(pd_dims),
+                                    activation=activation, norm=norm)
+        self.pd_rho = _build_mlp([pd_dims[-1]] + list(pd_rho_dims) + [pd_rho_dims[-1]],
+                                 activation=activation, norm=norm,
+                                 final_activation=None)
+
+        # Fusion head
+        pointnet_out = rho_dims[-1]
+        pd_out = pd_rho_dims[-1]
+        self.fusion = _build_mlp([pointnet_out + pd_out] + list(fusion_dims) + [output_dim],
+                                 activation=activation, norm=norm,
+                                 final_activation=None)
+
+    def forward(self, batch: List[torch.Tensor],
+                precomputed_pd: Optional[List[torch.Tensor]] = None) -> torch.Tensor:
+        if len(batch) == 0:
+            return torch.empty(0, _last_out(self.fusion),
+                               device=next(self.parameters()).device)
+
+        device = next(self.parameters()).device
+
+        # --- Branch 1: PointNet ---
+        padded = pad_sequence(batch, batch_first=True, padding_value=0.0)
+        mask = torch.zeros(padded.shape[:2], dtype=torch.bool, device=device)
+        for i, pc in enumerate(batch):
+            mask[i, :len(pc)] = True
+        B, N, _ = padded.shape
+        phi = self.phi_layers(padded.reshape(B * N, self._input_dim)).reshape(B, N, -1)
+        phi = phi.masked_fill(~mask.unsqueeze(-1), torch.finfo(phi.dtype).min)
+        pt_feat, _ = phi.max(dim=1)
+        pt_feat = self.rho_layers(pt_feat)
+
+        # --- Branch 2: Persistence Diagram ---
+        if precomputed_pd is not None and len(precomputed_pd) > 0:
+            # Pad PDs to max_pd_pairs
+            pd_batch = []
+            pd_mask = []
+            for pd in precomputed_pd:
+                if pd is None or pd.shape[0] == 0:
+                    pd_batch.append(torch.zeros(self.max_pd_pairs, 2, device=device))
+                    pd_mask.append(torch.zeros(self.max_pd_pairs, dtype=torch.bool, device=device))
+                else:
+                    k = min(pd.shape[0], self.max_pd_pairs)
+                    padded_pd = torch.zeros(self.max_pd_pairs, 2, device=device)
+                    padded_pd[:k] = pd[:k].to(device)
+                    pd_batch.append(padded_pd)
+                    m = torch.zeros(self.max_pd_pairs, dtype=torch.bool, device=device)
+                    m[:k] = True
+                    pd_mask.append(m)
+            pd_padded = torch.stack(pd_batch)  # (B, max_pd_pairs, 2)
+            pd_m = torch.stack(pd_mask)        # (B, max_pd_pairs)
+
+            B_pd, K, _ = pd_padded.shape
+            pd_feat = self.pd_layers(pd_padded.reshape(B_pd * K, 2)).reshape(B_pd, K, -1)
+            pd_feat = pd_feat.masked_fill(~pd_m.unsqueeze(-1), torch.finfo(pd_feat.dtype).min)
+            pd_feat, _ = pd_feat.max(dim=1)
+            pd_feat = self.pd_rho(pd_feat)
+        else:
+            # No PD provided — zero features (degrades to pure PointNet)
+            pd_feat = torch.zeros(B, 64, device=device)
+
+        # --- Fusion ---
+        combined = torch.cat([pt_feat, pd_feat], dim=1)
+        return self.fusion(combined)
+
+
+class AttnRipsPointNet(nn.Module):
+    """Enhancer-context model for per-enhancer attribution (EPIRips).
+
+    Architecture (ripsnet family):
+      phi MLP (per enhancer) → optional learned positional encoding
+      → optional TransformerEncoder layers (enhancer-enhancer context)
+      → attention pooling (single vector or multi-head) → rho MLP
+      → fusion with optional persistence-diagram (PD) branch.
+
+    The attention weights from the pooling layer are the per-enhancer
+    importance scores; `forward(..., return_attn=True)` returns them.
+
+    Config mapping (used by benchmark_improve.py):
+      attn          : pooling='attn',  num_layers=0, d=256
+      mhead         : pooling='mhead', num_layers=0, d=128, num_heads=4
+      transformer   : pooling='attn',  num_layers=2, d=128, num_heads=4
+      tfmhead       : pooling='mhead', num_layers=2, d=128, num_heads=4
+    """
+
+    def __init__(self, output_dim, input_dim: int = 5,
+                 pooling: str = 'attn', num_layers: int = 0, num_heads: int = 4,
+                 d: int = 128, ff: int = 256, phi_dims: Optional[List[int]] = None,
+                 rho_dims: Optional[List[int]] = None,
+                 use_pd: bool = False,
+                 pd_dims=(32, 64, 128), pd_rho_dims=(128, 64),
+                 max_pd_pairs: int = 128, use_count: bool = False,
+                 fusion_dims: Optional[List[int]] = None,
+                 dropout: float = 0.1, activation: str = 'gelu'):
+        super().__init__()
+        assert pooling in ('attn', 'mhead')
+        if fusion_dims is None:
+            fusion_dims = [128]
+        self.pooling = pooling
+        self.num_heads = num_heads
+        self.use_pd = use_pd
+        self.use_count = use_count
+        self.max_pd_pairs = max_pd_pairs
+
+        if phi_dims is None:
+            phi_dims = [64]
+        self.phi_layers = _build_mlp([input_dim] + list(phi_dims) + [d], activation=activation,
+                                     norm='ln', dropout=dropout)
+        self.d = d
+        if num_layers > 0:
+            self.pos_emb = nn.Embedding(256, d)
+            layer = nn.TransformerEncoderLayer(d_model=d, nhead=num_heads,
+                                               dim_feedforward=ff, dropout=dropout,
+                                               batch_first=True, activation=activation)
+            self.transformer = nn.TransformerEncoder(layer, num_layers=num_layers)
+        else:
+            self.pos_emb = None
+            self.transformer = None
+
+        if pooling == 'mhead':
+            self.attn_vectors = nn.Parameter(torch.randn(num_heads, d) * 0.01)
+            rho_in = num_heads * d
+        else:
+            self.attn_vector = nn.Parameter(torch.randn(d) * 0.01)
+            rho_in = d
+        if rho_dims is None:
+            rho_dims = [256, 128]
+        rho_out = rho_dims[-1]
+        self.rho_layers = _build_mlp([rho_in] + list(rho_dims), activation=activation,
+                                     norm='ln', dropout=dropout)
+
+        if use_pd:
+            self.pd_layers = _build_mlp([2] + list(pd_dims), activation=activation,
+                                        norm='ln', dropout=dropout)
+            self.pd_rho = _build_mlp([pd_dims[-1]] + list(pd_rho_dims) + [pd_rho_dims[-1]],
+                                     activation=activation, norm='ln',
+                                     final_activation=None, dropout=dropout)
+            pd_out = pd_rho_dims[-1]
+        else:
+            self.pd_layers = None
+            self.pd_rho = None
+            pd_out = 0
+
+        fusion_in = rho_out + pd_out + (1 if use_count else 0)
+        self.fusion = _build_mlp([fusion_in] + list(fusion_dims) + [output_dim],
+                                 activation=activation, norm='ln',
+                                 final_activation=None, dropout=dropout)
+
+    def forward(self, batch: List[torch.Tensor],
+                precomputed_pd: Optional[List[torch.Tensor]] = None,
+                return_attn: bool = False):
+        if len(batch) == 0:
+            return torch.empty(0, _last_out(self.fusion),
+                               device=next(self.parameters()).device)
+        device = next(self.parameters()).device
+        B = len(batch)
+        padded = pad_sequence(batch, batch_first=True, padding_value=0.0).to(device)
+        N = padded.shape[1]
+        mask = torch.zeros(B, N, dtype=torch.bool, device=device)
+        for i, pc in enumerate(batch):
+            mask[i, :len(pc)] = True
+
+        x = self.phi_layers(padded.reshape(B * N, -1)).reshape(B, N, -1)
+        x = x * mask.unsqueeze(-1)
+
+        if self.transformer is not None:
+            x = x + self.pos_emb(torch.arange(N, device=device)).unsqueeze(0)
+            x = self.transformer(x, src_key_padding_mask=~mask)
+            x = x * mask.unsqueeze(-1)
+
+        if self.pooling == 'mhead':
+            scores = torch.einsum('bnd,hd->bnh', x, self.attn_vectors)
+            scores = scores.masked_fill(~mask.unsqueeze(-1), -1e9)
+            w = torch.softmax(scores, dim=1)
+            pooled = torch.einsum('bnh,bnd->bhd', w, x).reshape(B, self.num_heads * x.shape[-1])
+            attn_weights = w.mean(dim=-1)
+        else:
+            attn_scores = x @ self.attn_vector
+            attn_scores = attn_scores.masked_fill(~mask, -1e9)
+            attn_weights = torch.softmax(attn_scores, dim=1)
+            pooled = (attn_weights.unsqueeze(-1) * x).sum(dim=1)
+        pt_feat = self.rho_layers(pooled)
+
+        if self.use_pd and precomputed_pd is not None and len(precomputed_pd) > 0:
+            pd_batch, pd_mask = [], []
+            for pd in precomputed_pd:
+                if pd is None or pd.shape[0] == 0:
+                    pd_batch.append(torch.zeros(self.max_pd_pairs, 2, device=device))
+                    pd_mask.append(torch.zeros(self.max_pd_pairs, dtype=torch.bool, device=device))
+                else:
+                    k = min(pd.shape[0], self.max_pd_pairs)
+                    padded_pd = torch.zeros(self.max_pd_pairs, 2, device=device)
+                    padded_pd[:k] = pd[:k].to(device)
+                    pd_batch.append(padded_pd)
+                    m = torch.zeros(self.max_pd_pairs, dtype=torch.bool, device=device)
+                    m[:k] = True
+                    pd_mask.append(m)
+            pd_padded = torch.stack(pd_batch)
+            pd_m = torch.stack(pd_mask)
+            B_pd, K = pd_padded.shape[:2]
+            pd_feat = self.pd_layers(pd_padded.reshape(B_pd * K, -1)).reshape(B_pd, K, -1)
+            pd_feat = pd_feat * pd_m.unsqueeze(-1)
+            pd_feat = pd_feat.sum(dim=1) / pd_m.sum(dim=1, keepdim=True).clamp(min=1)
+            pd_feat = self.pd_rho(pd_feat)
+        else:
+            pd_feat = torch.zeros(B, 0, device=device)
+
+        if self.use_count:
+            counts = torch.log1p(mask.sum(dim=1, keepdim=True).float())
+            combined = torch.cat([pt_feat, pd_feat, counts], dim=1)
+        else:
+            combined = torch.cat([pt_feat, pd_feat], dim=1)
+        out = self.fusion(combined)
+
+        if return_attn:
+            return out, attn_weights
+        return out
 
 
 class ScalarInputMLP(nn.Module):
@@ -704,7 +929,7 @@ class DistanceMatrixRaggedModel(nn.Module):
 # ---------------------------------------------------------------------------
 
 def _load_gt_improvements():
-    """Import all models from gt_improvements and wrap with device-aware forward."""
+    """Import all models from gt_improvements."""
     from gt_improvements import (
         HierarchicalGTTFN as _HierarchicalGTTFNBase,
         OnEquivariantWrapper as _OnEquivariantWrapperBase,
@@ -723,126 +948,18 @@ def _load_gt_improvements():
         build_enhanced_pointcloud,
     )
 
-    def _batch_device(batch):
-        if isinstance(batch, (list, tuple)):
-            return batch[0].device if batch else None
-        return batch.device
+    # All gt_improvements classes inherit from nn.Module and store
+    # GTBasis/CGCoefficients as submodules.  Since those are now
+    # nn.Module subclasses with register_buffer, model.to(device)
+    # moves everything automatically — no manual _move_basis_tensors needed.
 
-    class HierarchicalGTTFN(_HierarchicalGTTFNBase):
-        """Hierarchical GT-TFN with device-aware forward pass."""
-        def forward(self, batch, node_attrs=None):
-            dev = _batch_device(batch)
-            if dev is not None:
-                _move_basis_tensors(self, dev)
-            return _HierarchicalGTTFNBase.forward(self, batch, node_attrs)
-
-    class GTTFNEncoder(_GTTFNEncoderBase):
-        """Device-aware TFN encoder wrapper."""
-        def forward(self, batch, node_attrs=None):
-            dev = _batch_device(batch)
-            if dev is not None:
-                _move_basis_tensors(self, dev)
-            return _GTTFNEncoderBase.forward(self, batch, node_attrs)
-
-    class GTTensorFieldNetworkWithAttention(_GTTFNWABase):
-        """GT-TFN with multi-head cross-attention, device-aware."""
-        def forward(self, batch, node_attrs=None):
-            dev = _batch_device(batch)
-            if dev is not None:
-                _move_basis_tensors(self, dev)
-            return _GTTFNWABase.forward(self, batch, node_attrs)
-
-    class EquivariantSetTransformer(_EquivariantSetTransformerBase):
-        """Equivariant set transformer, device-aware."""
-        def forward(self, context_batch, query_batch):
-            dev = _batch_device(context_batch)
-            if dev is not None:
-                _move_basis_tensors(self, dev)
-            return _EquivariantSetTransformerBase.forward(self, context_batch, query_batch)
-
-    class StochasticEquivariantTFN(_StochasticEquivariantTFNBase):
-        """Stochastic equivariant TFN, device-aware."""
-        def forward(self, batch, node_attrs=None, return_dist=False):
-            dev = _batch_device(batch)
-            if dev is not None:
-                _move_basis_tensors(self, dev)
-            return _StochasticEquivariantTFNBase.forward(self, batch, node_attrs, return_dist)
-
-    class EquivariantGraphMambaNetwork(_EquivariantGraphMambaBase):
-        """Equivariant Graph Mamba network, device-aware."""
-        def forward(self, batch, node_attrs=None, precomputed_geom=None):
-            dev = _batch_device(batch)
-            if dev is not None:
-                _move_basis_tensors(self, dev)
-            return _EquivariantGraphMambaBase.forward(self, batch, node_attrs, precomputed_geom)
-
-    class TemporalCrossAttentionTFN(_TemporalCrossAttentionTFNBase):
-        """Temporal cross-attention TFN, device-aware."""
-        def forward(self, batch):
-            dev = _batch_device(batch)
-            if dev is not None:
-                _move_basis_tensors(self, dev)
-            return _TemporalCrossAttentionTFNBase.forward(self, batch)
-
-    class RelaxedEquivariantTFN(_RelaxedEquivariantTFNBase):
-        """Relaxed O(3) TFN, device-aware."""
-        def forward(self, batch, **kwargs):
-            dev = _batch_device(batch)
-            if dev is not None:
-                base = self.base
-                inner = getattr(base, '_inner', base)
-                _move_basis_tensors(inner, dev)
-            return _RelaxedEquivariantTFNBase.forward(self, batch, **kwargs)
-
-    class RelaxedOnEquivariantTensorFieldNetwork(_RelaxedOnEquivariantTFNBase):
-        """Relaxed O(3) TFN wrapper, device-aware."""
-        def forward(self, batch):
-            dev = _batch_device(batch)
-            if dev is not None:
-                _move_basis_tensors(self._inner, dev)
-            return _RelaxedOnEquivariantTFNBase.forward(self, batch)
-
-    class HybridTFNClassifier(_HybridTFNClassifierBase):
-        """Hybrid TFN + non-equivariant classifier, device-aware."""
-        def forward(self, batch):
-            dev = _batch_device(batch)
-            if dev is not None:
-                inner = getattr(self.tfn_backbone, '_inner', self.tfn_backbone)
-                _move_basis_tensors(inner, dev)
-            return _HybridTFNClassifierBase.forward(self, batch)
-
-    class HybridOnEquivariantTensorFieldNetwork(_HybridOnEquivariantTFNBase):
-        """Hybrid O(3) TFN wrapper, device-aware."""
-        def forward(self, batch):
-            dev = _batch_device(batch)
-            if dev is not None:
-                _move_basis_tensors(self._inner, dev)
-            return _HybridOnEquivariantTFNBase.forward(self, batch)
-
-    class EndToEndClassifier(_EndToEndClassifierBase):
-        """End-to-end classifier wrapper, device-aware."""
-        def forward(self, batch):
-            dev = _batch_device(batch)
-            if dev is not None:
-                inner = getattr(self.tfn_backbone, '_inner', self.tfn_backbone)
-                _move_basis_tensors(inner, dev)
-            return _EndToEndClassifierBase.forward(self, batch)
-
-    class EndToEndTensorFieldNetwork(_EndToEndTFNBase):
-        """End-to-end TFN classifier, device-aware."""
-        def forward(self, batch):
-            dev = _batch_device(batch)
-            if dev is not None:
-                _move_basis_tensors(self._inner, dev)
-            return _EndToEndTFNBase.forward(self, batch)
-
-    return (HierarchicalGTTFN, _OnEquivariantWrapperBase, GTTFNEncoder,
-            GTTensorFieldNetworkWithAttention, EquivariantSetTransformer,
-            StochasticEquivariantTFN, EquivariantGraphMambaNetwork,
-            TemporalCrossAttentionTFN,
-            RelaxedEquivariantTFN, RelaxedOnEquivariantTensorFieldNetwork,
-            HybridTFNClassifier, HybridOnEquivariantTensorFieldNetwork,
-            EndToEndClassifier, EndToEndTensorFieldNetwork,
+    return (_HierarchicalGTTFNBase, _OnEquivariantWrapperBase, _GTTFNEncoderBase,
+            _GTTFNWABase, _EquivariantSetTransformerBase,
+            _StochasticEquivariantTFNBase, _EquivariantGraphMambaBase,
+            _TemporalCrossAttentionTFNBase,
+            _RelaxedEquivariantTFNBase, _RelaxedOnEquivariantTFNBase,
+            _HybridTFNClassifierBase, _HybridOnEquivariantTFNBase,
+            _EndToEndClassifierBase, _EndToEndTFNBase,
             build_enhanced_pointcloud)
 
 
@@ -862,6 +979,7 @@ class HierarchicalTensorFieldNetwork(nn.Module):
     def __init__(
         self,
         num_classes: int,
+        n: int = 3,
         max_order: int = 1,
         hidden_channels: int = 64,
         stage_sizes: Optional[List[int]] = None,
@@ -882,7 +1000,7 @@ class HierarchicalTensorFieldNetwork(nn.Module):
         if classifier_dims is None:
             classifier_dims = [256, 128]
         self._inner = HierarchicalGTTFN(
-            n=3,
+            n=n,
             num_classes=num_classes,
             max_order=max_order,
             hidden_channels=hidden_channels,
@@ -898,24 +1016,7 @@ class HierarchicalTensorFieldNetwork(nn.Module):
         )
 
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
-        if batch:
-            _move_basis_tensors(self._inner, batch[0].device)
         return self._inner(batch)
-
-    def to(self, *args, **kwargs):
-        super().to(*args, **kwargs)
-        self._inner.to(*args, **kwargs)
-        return self
-
-    def cuda(self, device=None):
-        super().cuda(device)
-        self._inner.cuda(device)
-        return self
-
-    def cpu(self):
-        super().cpu()
-        self._inner.cpu()
-        return self
 
 
 class OnEquivariantTensorFieldNetwork(nn.Module):
@@ -924,6 +1025,7 @@ class OnEquivariantTensorFieldNetwork(nn.Module):
     def __init__(
         self,
         num_classes: int,
+        n: int = 3,
         max_order: int = 1,
         hidden_channels: int = 32,
         num_layers: int = 4,
@@ -937,6 +1039,7 @@ class OnEquivariantTensorFieldNetwork(nn.Module):
             classifier_dims = [128, 64]
         base = TensorFieldNetwork(
             num_classes=num_classes,
+            n=n,
             max_order=max_order,
             hidden_channels=hidden_channels,
             num_layers=num_layers,
@@ -949,21 +1052,6 @@ class OnEquivariantTensorFieldNetwork(nn.Module):
 
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
         return self._inner(batch)
-
-    def to(self, *args, **kwargs):
-        super().to(*args, **kwargs)
-        self._inner.to(*args, **kwargs)
-        return self
-
-    def cuda(self, device=None):
-        super().cuda(device)
-        self._inner.cuda(device)
-        return self
-
-    def cpu(self):
-        super().cpu()
-        self._inner.cpu()
-        return self
 
 
 # ---------------------------------------------------------------------------
@@ -1006,21 +1094,6 @@ class AttentionTensorFieldNetwork(nn.Module):
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
         return self._inner(batch)
 
-    def to(self, *args, **kwargs):
-        super().to(*args, **kwargs)
-        self._inner.to(*args, **kwargs)
-        return self
-
-    def cuda(self, device=None):
-        super().cuda(device)
-        self._inner.cuda(device)
-        return self
-
-    def cpu(self):
-        super().cpu()
-        self._inner.cpu()
-        return self
-
 
 class CrossAttentionTensorFieldNetwork(nn.Module):
     """GT-TFN with temporal transformer cross-attention over point sequence."""
@@ -1058,24 +1131,21 @@ class CrossAttentionTensorFieldNetwork(nn.Module):
             radial_hidden=radial_hidden,
             dropout=dropout,
         )
+        self.k_neighbors = k_neighbors
+        self.rbf = self._inner.rbf
+        self.gt_basis = self._inner.gt_basis
+        self.classifier_dims = classifier_dims
 
-    def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
-        return self._inner(batch)
+    def forward(self, batch: List[torch.Tensor],
+                precomputed_geom=None) -> torch.Tensor:
+        return self._inner(batch, precomputed_geom=precomputed_geom)
 
-    def to(self, *args, **kwargs):
-        super().to(*args, **kwargs)
-        self._inner.to(*args, **kwargs)
-        return self
+    def _encode_single(self, pc, precomputed_geom=None, **kwargs):
+        return self._inner._encode_point_descriptors(pc, precomputed_geom=precomputed_geom)
 
-    def cuda(self, device=None):
-        super().cuda(device)
-        self._inner.cuda(device)
-        return self
-
-    def cpu(self):
-        super().cpu()
-        self._inner.cpu()
-        return self
+    @property
+    def rho(self):
+        return self._inner.rho
 
 
 class StochasticTensorFieldNetwork(nn.Module):
@@ -1084,6 +1154,7 @@ class StochasticTensorFieldNetwork(nn.Module):
     def __init__(
         self,
         num_classes: int,
+        n: int = 3,
         num_mixtures: int = 3,
         max_order: int = 1,
         hidden_channels: int = 32,
@@ -1097,7 +1168,7 @@ class StochasticTensorFieldNetwork(nn.Module):
         if encoder_dims is None:
             encoder_dims = [256, 128]
         self._inner = StochasticEquivariantTFN(
-            n=3, num_classes=num_classes,
+            n=n, num_classes=num_classes,
             num_mixtures=num_mixtures,
             max_order=max_order,
             hidden_channels=hidden_channels,
@@ -1110,21 +1181,6 @@ class StochasticTensorFieldNetwork(nn.Module):
 
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
         return self._inner(batch)
-
-    def to(self, *args, **kwargs):
-        super().to(*args, **kwargs)
-        self._inner.to(*args, **kwargs)
-        return self
-
-    def cuda(self, device=None):
-        super().cuda(device)
-        self._inner.cuda(device)
-        return self
-
-    def cpu(self):
-        super().cpu()
-        self._inner.cpu()
-        return self
 
 
 class SetTransformerTensorFieldNetwork(nn.Module):
@@ -1162,21 +1218,6 @@ class SetTransformerTensorFieldNetwork(nn.Module):
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
         return self._inner(batch)
 
-    def to(self, *args, **kwargs):
-        super().to(*args, **kwargs)
-        self._inner.to(*args, **kwargs)
-        return self
-
-    def cuda(self, device=None):
-        super().cuda(device)
-        self._inner.cuda(device)
-        return self
-
-    def cpu(self):
-        super().cpu()
-        self._inner.cpu()
-        return self
-
 
 class GraphMambaTensorFieldNetwork(nn.Module):
     """Equivariant Graph Mamba network with state-space layers."""
@@ -1209,32 +1250,14 @@ class GraphMambaTensorFieldNetwork(nn.Module):
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
         return self._inner(batch)
 
-    def to(self, *args, **kwargs):
-        super().to(*args, **kwargs)
-        self._inner.to(*args, **kwargs)
-        return self
-
-    def cuda(self, device=None):
-        super().cuda(device)
-        self._inner.cuda(device)
-        return self
-
-    def cpu(self):
-        super().cpu()
-        self._inner.cpu()
-        return self
-
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 __all__ = [
-    # Low-level TFN blocks
-    'TFN_RBFExpansion', 'TFNLayer', 'TFNTensorFieldNetwork',
-    # Low-level GT blocks
-    'GTTFN_RBFExpansion', 'GTTFNLayer',
-    'ChannelMixer', 'EquivariantGate', 'ResidualProjection',
+    # TFN re-export (used by expes/analysis_nn.py)
+    'TFNTensorFieldNetwork',
     # Main equivariant models
     'TensorFieldNetwork',
     'GTTensorFieldNetwork',
@@ -1245,6 +1268,7 @@ __all__ = [
     'OnEquivariantTensorFieldNetwork',
     'GTTFNEncoder',
     'PointNet3D',
+    'RipsPointNet',
     # New TFN-derived models
     'GTTensorFieldNetworkWithAttention',
     'AttentionTensorFieldNetwork',

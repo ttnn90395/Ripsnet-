@@ -10,16 +10,12 @@ Uses circle generation from datasets/utils.py.
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.optim import Adamax
 from torch import amp
-from torch.utils.checkpoint import checkpoint as grad_checkpoint
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import LabelEncoder
-from tqdm import tqdm
-from typing import List, Tuple
+from typing import List
 import gc
-import gudhi as gd
 
 # Import all models from centralized models.py
 from models import (
@@ -29,11 +25,7 @@ from models import (
     HierarchicalGTTFN,
     # Notebook models
     ScalarDistanceDeepSet,
-    PointNetTutorial,
-    ScalarInputMLP,
-    MultiInputModel,
-    DenseRagged,
-    PermopRagged,
+    RipsPointNet,
     RaggedPersistenceModel,
     DistanceMatrixRaggedModel,
 )
@@ -41,13 +33,6 @@ from models import (
 # Import data generation from datasets/utils.py
 from datasets.utils import (
     create_multiple_circles,
-    create_1_circle_clean,
-    create_2_circle_clean,
-    create_3_circle_clean,
-    create_1_circle_noisy,
-    create_2_circle_noisy,
-    create_3_circle_noisy,
-    compute_PD,
 )
 
 # ---------------------------------------------------------------------------
@@ -174,8 +159,8 @@ def create_model(model_name, num_classes):
         base_model = ScalarDistanceDeepSet(output_dim=128)
         return ClassificationWrapper(base_model, num_classes, feature_dim=128)
 
-    elif model_name == 'PointNetTutorial':
-        base_model = PointNetTutorial(output_dim=128)  # Feature dimension
+    elif model_name == 'RipsPointNet':
+        base_model = RipsPointNet(output_dim=128)  # Feature dimension
         return ClassificationWrapper(base_model, num_classes, feature_dim=128)
 
     elif model_name == 'DistanceMatrixRaggedModel':
@@ -197,7 +182,7 @@ def prepare_data_for_model(model_name, data_list):
     if model_name == 'TensorFieldNetwork':
         return to_3d_numpy(data_list)
 
-    elif model_name in ['GTTensorFieldNetwork', 'HierarchicalGTTFN', 'PointNetTutorial']:
+    elif model_name in ['GTTensorFieldNetwork', 'HierarchicalGTTFN', 'RipsPointNet']:
         # These models expect 2D point clouds
         return [pc[:, :2] if pc.shape[1] > 2 else pc for pc in data_list]
 
@@ -375,7 +360,7 @@ def test_all_models():
         'GTTensorFieldNetwork',
         'HierarchicalGTTFN',
         'ScalarDistanceDeepSet',
-        'PointNetTutorial',
+        'RipsPointNet',
         'DistanceMatrixRaggedModel',
         'RaggedPersistenceModel',
     ]

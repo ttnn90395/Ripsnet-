@@ -6,7 +6,7 @@ Provides: GTSignature, weyl_dim, GTBasis, CGCoefficients
 from __future__ import annotations
 import math, itertools
 from typing import List, Tuple, Dict, Optional
-import torch, numpy as np
+import torch, torch.nn as nn, numpy as np
 try:
     from scipy.special import sph_harm_y as _scipy_sph
     # New API: sph_harm_y(n, m, polar, azimuth)
@@ -41,8 +41,6 @@ class GTSignature:
     def lam(self)  -> Tuple[int,...]: return self._lam
     @property
     def n(self)    -> int:            return self._n
-    @property
-    def rank(self) -> int:            return self._n // 2
     def __repr__(self)  -> str:  return f"GTSignature(lam={self._lam}, n={self._n})"
     def __eq__(self, o) -> bool: return isinstance(o,GTSignature) and self._lam==o._lam and self._n==o._n
     def __hash__(self)  -> int:  return hash((self._lam, self._n))
@@ -205,12 +203,15 @@ def _real_sph_harm_torch(l_max: int, theta: torch.Tensor, phi: torch.Tensor
 
 # ── GTBasis ──────────────────────────────────────────────────────────────────
 
-class GTBasis:
+class GTBasis(nn.Module):
     """
     GT harmonic basis functions on S^{n-1}.
     n=3: real spherical harmonics (scipy). n>=4: Gegenbauer recursion.
+    Inherits nn.Module so that it is properly tracked as a submodule and
+    moves to the correct device when model.to(device) is called.
     """
     def __init__(self, n: int, max_order: int):
+        super().__init__()
         self.n = n; self.max_order = max_order
         self.signatures: List[GTSignature] = _enum_sigs(n, max_order)
         self.dims:       List[int]         = [s.dim() for s in self.signatures]
@@ -274,6 +275,13 @@ class GTBasis:
                 off+=d2
             return torch.zeros(M,dim,device=dirs.device)
         # n>=4
+        res = self._eval_sig_unnorm(dirs, sig)
+        nrm = self._col_norms(sig)
+        return res / nrm
+
+    def _eval_sig_unnorm(self, dirs: torch.Tensor, sig: GTSignature) -> torch.Tensor:
+        """GT recursion for *sig* (sub-signatures normalized, this level not)."""
+        n, M = sig.n, dirs.shape[0]
         z     = dirs[:,-1].clamp(-1+1e-7,1-1e-7)
         sin_t = torch.sqrt(1-z**2).clamp(min=1e-8)
         omega = dirs[:,:-1]/sin_t.unsqueeze(-1)
@@ -282,19 +290,106 @@ class GTBasis:
             Cv = _gegenbauer(sig.lam[0]-mu.lam[0], mu.dim()+(n-3)/2, z)
             Yr = GTBasis(n-1,mu.lam[0])._eval_sig(omega,mu)
             cols.append((Cv*sin_t**mu.lam[0]).unsqueeze(-1)*Yr)
-        if not cols: return torch.zeros(M,dim,device=dirs.device)
-        res=torch.cat(cols,dim=-1); nrm=res.norm(dim=0,keepdim=True).clamp(min=1e-8)
-        return res/nrm
+        if not cols: return torch.zeros(M,sig.dim(),device=dirs.device)
+        return torch.cat(cols,dim=-1)
+
+    def _col_norms(self, sig: GTSignature) -> torch.Tensor:
+        """
+        Fixed per-column L2 norms of the (unnormalized) basis functions,
+        computed once over a fixed random sample of S^{n-1}.
+
+        Normalizing by constants keeps the basis a rotation-equivariant
+        function of its input: normalizing over the *input* points instead
+        would make each column's scale depend on the cloud, which is not
+        rotation-covariant.
+        """
+        key = (self.n, self.max_order, sig.lam)
+        if key in _basis_norm_cache:
+            return _basis_norm_cache[key]
+        n = sig.n
+        g = torch.Generator().manual_seed(1)
+        X = torch.randn(4096, n, generator=g)
+        X = X / X.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+        with torch.no_grad():
+            raw = self._eval_sig_unnorm(X, sig)
+        nrm = raw.norm(dim=0).clamp(min=1e-8)
+        _basis_norm_cache[key] = nrm
+        return nrm
+
+
+_basis_norm_cache: Dict[Tuple[int, int, Tuple], torch.Tensor] = {}
+
+_vec_basis_cache: Dict[Tuple[int, int], Optional[torch.Tensor]] = {}
+
+def vector_basis_change(gt_basis: GTBasis, num_samples: int = 4096) -> Optional[torch.Tensor]:
+    """
+    Linear map M such that Y(x) = M·x for unit vectors x, where Y is the
+    vector-irrep slice of *gt_basis*.
+
+    The vector irrep of SO(n) is the standard representation, so its GT-basis
+    functions are exactly linear.  Edge harmonics and the CG tensors live in
+    this basis, hence any initial vector feature must be expressed in it too;
+    otherwise the model is not rotation-equivariant (e.g. for n=3 the real-SH
+    ordering of the l=1 block differs from (x, y, z) by a fixed permutation).
+
+    M is recovered by least squares over random unit directions (avoiding the
+    numerically degenerate points near the poles) and cached per (n, order).
+    """
+    key = (gt_basis.n, gt_basis.max_order)
+    if key in _vec_basis_cache:
+        return _vec_basis_cache[key]
+    n = gt_basis.n
+    vsig = GTSignature.vector(n)
+    offset, vec_dim = 0, None
+    for s, d in zip(gt_basis.signatures, gt_basis.dims):
+        if s == vsig:
+            vec_dim = d
+            break
+        offset += d
+    M: Optional[torch.Tensor] = None
+    if vec_dim is not None:
+        g = torch.Generator().manual_seed(0)
+        X = torch.randn(num_samples, n, generator=g)
+        X = X / X.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+        with torch.no_grad():
+            Y = gt_basis(X)[:, offset:offset + vec_dim]           # (K, n)
+        XtX = X.T @ X + 1e-6 * torch.eye(n)                       # (n, n)
+        M = torch.linalg.solve(XtX, X.T @ Y).T.detach()           # (n, n)
+    _vec_basis_cache[key] = M
+    return M
+
+
+def vector_feature(pos: torch.Tensor, change: Optional[torch.Tensor]) -> torch.Tensor:
+    """Unit-direction feature expressed in the GT-basis (edge/CG) convention."""
+    pos_norm = pos.norm(dim=-1, keepdim=True)
+    pos_safe = pos / pos_norm.where(pos_norm > 0, torch.ones_like(pos_norm))
+    if change is not None:
+        pos_safe = pos_safe @ change.T
+    return pos_safe
 
 
 # ── CGCoefficients ───────────────────────────────────────────────────────────
 
-class CGCoefficients:
-    """Clebsch-Gordan tensors for SO(n), built recursively and cached."""
+class CGCoefficients(nn.Module):
+    """Clebsch-Gordan tensors for SO(n), built recursively and cached.
+
+    Inherits nn.Module and registers all CG tensors as buffers so that
+    model.to(device) automatically moves them.  This eliminates the need
+    for the ``_move_basis_tensors`` workaround in the forward pass.
+    """
     def __init__(self, n: int, max_order: int):
+        super().__init__()
         self.n=n; self.max_order=max_order
         self._cache: Dict[Tuple,torch.Tensor] = {}
         self._precompute()
+
+    @staticmethod
+    def _key_to_name(key: Tuple) -> str:
+        """Convert (l1_lam, l2_lam, l3_lam) tuple to a valid buffer name."""
+        parts = []
+        for lam in key:
+            parts.append('_'.join(str(x) for x in lam))
+        return 'cg_' + '__'.join(parts)
 
     def _precompute(self):
         sigs = _enum_sigs(self.n, self.max_order)
@@ -304,50 +399,30 @@ class CGCoefficients:
                 for s3 in _enum_sigs(self.n, cap):
                     key=(s1.lam,s2.lam,s3.lam)
                     if key not in self._cache:
-                        self._cache[key]=self._compute_cg(s1,s2,s3)
+                        cg_tensor = self._compute_cg(s1,s2,s3)
+                        self._cache[key]=cg_tensor
+                        buf_name = self._key_to_name(key)
+                        self.register_buffer(buf_name, cg_tensor, persistent=False)
 
     def get(self, l1:GTSignature, l2:GTSignature, l3:GTSignature) -> Optional[torch.Tensor]:
-        return self._cache.get((l1.lam,l2.lam,l3.lam))
-
-    def tensor_product_irreps(self, l1:GTSignature, l2:GTSignature) -> List[GTSignature]:
-        cap=min(self.max_order,l1.lam[0]+l2.lam[0])
-        return [s for s in _enum_sigs(self.n,cap)
-                if self._cache.get((l1.lam,l2.lam,s.lam),torch.zeros(1)).norm()>1e-8]
+        key = (l1.lam,l2.lam,l3.lam)
+        if key in self._cache:
+            return self._cache[key]
+        return None
 
     def _compute_cg(self, s1,s2,s3) -> torch.Tensor:
-        d1,d2,d3=s1.dim(),s2.dim(),s3.dim()
+        # Real CG by numerical quadrature of the *model's* basis functions on
+        # S^{n-1}, self-consistent for every n>=2.  (The old n==2 branch
+        # returned scalar ones/zeros with the wrong shapes, e.g. (1,1,1) for
+        # the (0,1,1) identity coupling that must be (1,2,2); the resulting
+        # implicit einsum broadcasting silently broke rotation equivariance.)
         if self.n==2:
-            return (torch.ones(1,1,1) if s1.lam[0]+s2.lam[0]==s3.lam[0]
-                    else torch.zeros(1,1,1))
+            return _cg_quadrature(self.n, self.max_order, s1, s2, s3)
         if self.n==3:
-            l1,l2,l3=s1.lam[0],s2.lam[0],s3.lam[0]
-            Cc=_so3_cg_complex(l1,l2,l3)
-            if Cc is None: return torch.zeros(d1,d2,d3)
-            U1,U2,U3=_real2complex(l1),_real2complex(l2),_real2complex(l3)
-            Cr=np.einsum('am,bn,mno,co->abc',U1,U2,Cc,U3.conj())
-            if (l1+l2+l3)%2==1:
-                Cr=-np.imag(Cr)
-            else:
-                Cr=np.real(Cr)
-            return torch.from_numpy(Cr.astype(np.float32))
-        # n>=4: GT recursion
-        C=torch.zeros(d1,d2,d3)
-        b1,b2,b3=s1.restrict(),s2.restrict(),s3.restrict()
-        o1,o2,o3=_branch_offs(s1),_branch_offs(s2),_branch_offs(s3)
-        sub=CGCoefficients(self.n-1,self.max_order)
-        for i1,mu1 in enumerate(b1):
-            w1=_isoscalar(s1,mu1); sl1=slice(o1[i1],o1[i1]+mu1.dim())
-            for i2,mu2 in enumerate(b2):
-                w2=_isoscalar(s2,mu2); sl2=slice(o2[i2],o2[i2]+mu2.dim())
-                for i3,mu3 in enumerate(b3):
-                    cg_sub=sub.get(mu1,mu2,mu3)
-                    if cg_sub is None: continue
-                    w3=_isoscalar(s3,mu3); sl3=slice(o3[i3],o3[i3]+mu3.dim())
-                    C[sl1,sl2,sl3]+=w1*w2*w3*cg_sub
-        mat=C.reshape(d1*d2,d3)
-        if mat.shape[0]>=mat.shape[1] and mat.norm()>1e-10:
-            Q,_=torch.linalg.qr(mat); C=Q.reshape(d1,d2,d3)
-        return C
+            return _so3_cg_real(s1.lam[0], s2.lam[0], s3.lam[0])
+        # n>=4: GT basis recursion + numerical quadrature on S^{n-1}.
+        # (Self-consistent with the edge-harmonic basis by construction.)
+        return _cg_quadrature(self.n, self.max_order, s1, s2, s3)
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -369,76 +444,137 @@ def _gegenbauer(order:int,alpha:float,x:torch.Tensor)->torch.Tensor:
         C2=(2*x*(k+alpha-1)*C1-(k+2*alpha-2)*C0)/k; C0,C1=C1,C2
     return C1
 
-def _branch_offs(sig:GTSignature)->List[int]:
-    offs,pos=[],0
-    for mu in sig.restrict(): offs.append(pos); pos+=mu.dim()
-    return offs
 
-def _isoscalar(parent:GTSignature,child:GTSignature)->float:
-    branches=parent.restrict(); total=sum(b.dim() for b in branches)
-    if total==0 or child not in branches: return 0.
-    return math.sqrt(child.dim()/total)
+# ── SO(3) real CG by numerical quadrature ─────────────────────────────────────
 
+_sph_quad_cache: Dict[Tuple[int,int], Tuple[torch.Tensor, torch.Tensor]] = {}
 
-# ── SO(3) CG in complex basis ────────────────────────────────────────────────
+def _sph_quad_grid(nt: int, nphi: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Spherical quadrature grid (Gauss–Legendre in θ, uniform in φ).
 
-def _so3_cg_complex(l1:int,l2:int,l3:int):
+    Returns unit vectors X of shape (nt*nphi, 3) and solid-angle weights w
+    of shape (nt*nphi,), exact for products of spherical harmonics up to the
+    degree supported by the grid.
     """
-    Validated Condon-Shortley two-pass recursion.
-    Returns numpy complex64 (d1,d2,d3) or None.
-    Pass 1: GS top-rung against ALL previous columns (ensures global unitarity).
-    Pass 2: J- recursion fills each block; every new column joins GS basis.
+    key = (nt, nphi)
+    if key in _sph_quad_cache:
+        return _sph_quad_cache[key]
+    xg, wg = np.polynomial.legendre.leggauss(nt)
+    xg = torch.tensor(xg, dtype=torch.float32)
+    wg = torch.tensor(wg, dtype=torch.float32)
+    theta = torch.acos(xg.clamp(-1 + 1e-6, 1 - 1e-6))
+    phi = torch.linspace(0.0, 2.0 * math.pi, nphi + 1)[:-1]
+    TH, PH = torch.meshgrid(theta, phi, indexing='ij')
+    X = torch.stack([
+        torch.sin(TH) * torch.cos(PH),
+        torch.sin(TH) * torch.sin(PH),
+        torch.cos(TH),
+    ], dim=-1).reshape(-1, 3)
+    w = (wg[:, None] * (2.0 * math.pi / nphi)).expand(nt, nphi).reshape(-1)
+    _sph_quad_cache[key] = (X, w)
+    return _sph_quad_cache[key]
+
+
+# ── General SO(n) real CG by spherical quadrature ─────────────────────────────
+
+def _sphere_grid(n: int, nt: int, nphi: int) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    if abs(l1-l2)>l3 or l3>l1+l2: return None
-    d1,d2=2*l1+1,2*l2+1
-    def idx(l,m): return int(m+l)
-    def Jm(l,m):  return math.sqrt(max(l*(l+1)-m*(m-1),0.))
-    all_cols: List[np.ndarray]=[]
-    tables:   Dict[int,np.ndarray]={}
-    for l3c in range(l1+l2,abs(l1-l2)-1,-1):
-        d3c=2*l3c+1; C=np.zeros((d1,d2,d3c),dtype=np.complex128)
-        pairs=[(m1,l3c-m1) for m1 in range(-l1,l1+1) if -l2<=l3c-m1<=l2]
-        v=None
-        for m1s,m2s in pairs:
-            cand=np.zeros(d1*d2,dtype=np.complex128)
-            cand[idx(l1,m1s)*d2+idx(l2,m2s)]=1.
-            for u in all_cols: cand-=np.dot(u.conj(),cand)*u
-            nc=np.linalg.norm(cand)
-            if nc>1e-10: v=cand/nc; break
-        if v is None: continue
-        best=max(pairs,key=lambda p:abs(v[idx(l1,p[0])*d2+idx(l2,p[1])]))
-        c=v[idx(l1,best[0])*d2+idx(l2,best[1])]
-        if abs(c)>1e-12: v*=abs(c)/c
-        for m1 in range(-l1,l1+1):
-            for m2 in range(-l2,l2+1):
-                C[idx(l1,m1),idx(l2,m2),idx(l3c,l3c)]=v[idx(l1,m1)*d2+idx(l2,m2)]
-        all_cols.append(v.copy())
-        for m3 in range(l3c,-l3c,-1):
-            den=Jm(l3c,m3)
-            if den<1e-14: continue
-            for m1 in range(-l1,l1+1):
-                for m2 in range(-l2,l2+1):
-                    val=0.
-                    if -l1<=m1+1<=l1: val+=Jm(l1,m1+1)*C[idx(l1,m1+1),idx(l2,m2),  idx(l3c,m3)]
-                    if -l2<=m2+1<=l2: val+=Jm(l2,m2+1)*C[idx(l1,m1),  idx(l2,m2+1),idx(l3c,m3)]
-                    C[idx(l1,m1),idx(l2,m2),idx(l3c,m3-1)]=val/den
-            nc=C[:,:,idx(l3c,m3-1)].reshape(-1).copy()
-            nn=np.linalg.norm(nc)
-            if nn>1e-12: all_cols.append(nc/nn)
-        tables[l3c]=C
-    if l3 not in tables: return None
-    return tables[l3].astype(np.complex64)
+    Product quadrature on S^{n-1} ⊂ R^n.
+
+    Gauss–Legendre in the n-2 polar angles (via u = cos θ ∈ [-1, 1]),
+    uniform in the azimuthal angle.  Returns unit vectors X of shape
+    (nt^(n-2) * nphi, n) and solid-angle weights w of the same length.
+    """
+    xg, wg = np.polynomial.legendre.leggauss(nt)
+    xg = torch.tensor(xg, dtype=torch.float32)
+    wg = torch.tensor(wg, dtype=torch.float32)
+    n_polar = n - 2
+    thetas = torch.acos(xg.clamp(-1 + 1e-6, 1 - 1e-6))
+    phis   = torch.linspace(0.0, 2.0 * math.pi, nphi + 1)[:-1]
+    A = torch.meshgrid(*([thetas] * n_polar + [phis]), indexing='ij')
+    shape = A[0].shape
+    X = torch.zeros(*shape, n, dtype=torch.float32)
+    prod_sin = torch.ones(shape)
+    for i in range(n_polar):
+        X[..., i] = prod_sin * torch.cos(A[i])
+        prod_sin = prod_sin * torch.sin(A[i])
+    X[..., n - 2] = prod_sin * torch.cos(A[n_polar])
+    X[..., n - 1] = prod_sin * torch.sin(A[n_polar])
+    W = torch.ones(shape)
+    ws = [wg] * n_polar + [torch.full((nphi,), 2.0 * math.pi / nphi)]
+    for wv in torch.meshgrid(*ws, indexing='ij'):
+        W = W * wv
+    return X.reshape(-1, n), W.reshape(-1)
 
 
-def _real2complex(l:int)->np.ndarray:
-    """Real-to-complex SH basis change, numpy complex128."""
-    d=2*l+1; U=np.zeros((d,d),dtype=np.complex128)
-    for m in range(-l,l+1):
-        i=m+l
-        if m<0:   U[i,(-m)+l]=1j/math.sqrt(2); U[i,m+l]=-1j/math.sqrt(2)*((-1)**m)
-        elif m>0: U[i,m+l]=1/math.sqrt(2)*((-1)**m); U[i,(-m)+l]=1/math.sqrt(2)
-        else:     U[i,l]=1.
-    return U
+_sphere_quad_cache: Dict[Tuple[int, int, int], Tuple[torch.Tensor, torch.Tensor]] = {}
+
+def _cg_quadrature(n: int, max_order: int, s1: GTSignature, s2: GTSignature,
+                   s3: GTSignature) -> torch.Tensor:
+    """
+    SO(n) real Clebsch–Gordan tensor by direct numerical integration of the
+    triple product of the model's GT basis functions over S^{n-1}:
+
+        C_{α β γ} = ∫ Y_{λ1 α} Y_{λ2 β} Y_{λ3 γ} dΩ .
+
+    Because the harmonics are evaluated with the *same* GTBasis the model
+    uses for edge features, the coupling is rotation-equivariant by
+    construction for every n (the old recursive construction in the complex
+    basis did not match the real basis convention and silently broke
+    equivariance for n≥4 and for l>1 when n=3).
+
+    The basis functions of a signature with top weight L are polynomials of
+    degree L on S^{n-1}, so the integrand has degree ≤ l1+l2+l3 ≤ 3·max_order
+    and the quadrature below is exact (Gauss–Legendre integrates polynomials
+    of degree < 2·nt exactly).
+    """
+    nt    = 3 * max_order + n + 8
+    nphi  = 4 * (3 * max_order + n) + 16
+    key = (n, nt, nphi)
+    if key not in _sphere_quad_cache:
+        _sphere_quad_cache[key] = _sphere_grid(n, nt, nphi)
+    X, w = _sphere_quad_cache[key]
+    basis = GTBasis(n, max_order)
+    with torch.no_grad():
+        Y = basis(X)                                  # (K, num_basis)
+    offs: Dict[GTSignature, int] = {}
+    off = 0
+    for s in basis.signatures:
+        offs[s] = off
+        off += s.dim()
+    Y1 = Y[:, offs[s1]:offs[s1] + s1.dim()]
+    Y2 = Y[:, offs[s2]:offs[s2] + s2.dim()]
+    Y3 = Y[:, offs[s3]:offs[s3] + s3.dim()]
+    return torch.einsum('pi,pj,pk,p->ijk', Y1, Y2, Y3, w).to(torch.float32)
+
+
+def _so3_cg_real(l1: int, l2: int, l3: int) -> torch.Tensor:
+    """
+    Real SO(3) Clebsch–Gordan tensor by direct numerical integration of the
+    triple product of real spherical harmonics:
+
+        C_{m1 m2 m3} = ∫ Y_{l1 m1} Y_{l2 m2} Y_{l3 m3} dΩ .
+
+    The harmonics are evaluated with ``_real_sph_harm_torch`` — the exact
+    convention the model's GTBasis uses for edge features — so the resulting
+    coupling is rotation-equivariant *by construction* (the earlier complex-
+    basis construction via ``_real2complex`` did not match that convention for
+    l > 1 and silently broke equivariance).
+
+    Returns a float32 tensor of shape (2l1+1, 2l2+1, 2l3+1).
+    """
+    if abs(l1 - l2) > l3 or l3 > l1 + l2 or (l1 + l2 + l3) % 2 == 1:
+        return torch.zeros(2*l1+1, 2*l2+1, 2*l3+1)
+    l_max = max(l1, l2, l3)
+    nt, nphi = 2 * l_max + 8, 4 * l_max + 16
+    X, w = _sph_quad_grid(nt, nphi)
+    theta = torch.acos(X[:, 2].clamp(-1 + 1e-7, 1 - 1e-7))
+    phi   = torch.atan2(X[:, 1], X[:, 0])
+    def block(l: int) -> torch.Tensor:
+        Y = _real_sph_harm_torch(l, theta, phi)      # (K, (l+1)^2)
+        return Y[:, l*l:(l+1)*(l+1)]
+    Y1, Y2, Y3 = block(l1), block(l2), block(l3)
+    return torch.einsum('pi,pj,pk,p->ijk', Y1, Y2, Y3, w).to(torch.float32)
 
 
 # ── self-test ────────────────────────────────────────────────────────────────
@@ -448,16 +584,6 @@ if __name__ == "__main__":
     for n,lam,exp in [(3,(0,),1),(3,(1,),3),(3,(2,),5),(4,(1,0),4),(4,(1,1),3),(5,(1,0),5)]:
         got=weyl_dim(n,lam)
         print(f"  SO({n}) {lam}: {got}  {'OK' if got==exp else f'FAIL exp={exp}'}")
-
-    print("\n=== _so3_cg_complex ===")
-    for l1,l2,l3 in [(1,1,0),(1,1,1),(1,1,2),(2,1,1),(2,2,2)]:
-        C=_so3_cg_complex(l1,l2,l3)
-        if C is None: continue
-        d1,d2,d3=2*l1+1,2*l2+1,2*l3+1
-        err=abs((C.reshape(d1*d2,d3).conj().T@C.reshape(d1*d2,d3))-np.eye(d3)).max()
-        viol=sum(1 for m1 in range(-l1,l1+1) for m2 in range(-l2,l2+1)
-                 for m3 in range(-l3,l3+1) if m1+m2!=m3 and abs(C[m1+l1,m2+l2,m3+l3])>1e-6)
-        print(f"  <{l1},{l2}|{l3}>: unit_err={err:.1e} msel={viol}")
 
     print("\n=== GTBasis n=3 ===")
     b3=GTBasis(3,2); dirs=torch.randn(5,3); dirs/=dirs.norm(dim=-1,keepdim=True)

@@ -9,10 +9,13 @@ Usage:
 
 model_label: e.g. 'OnEquivariantTensorFieldNetwork' or 'OnEquivariantTensorFieldNetwork_GS'
 """
-import os, sys, numpy as np
+import os
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+import sys, numpy as np
 import dill as pck
 import torch
-import torch.nn as nn
 from sklearn.preprocessing import LabelEncoder
 from xgboost import XGBClassifier
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -20,10 +23,9 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 from models import (
     TensorFieldNetwork, GTTensorFieldNetwork, GTTensorFieldNetworkV2,
-    HierarchicalGTTFN, HierarchicalTensorFieldNetwork,
     OnEquivariantTensorFieldNetwork, PointNet3D,
     ScalarDistanceDeepSet, PointNetTutorial, ScalarInputMLP, MultiInputModel,
-    DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,
+    DistanceMatrixRaggedModel,
     AttentionTensorFieldNetwork, StochasticTensorFieldNetwork,
     CrossAttentionTensorFieldNetwork,
     RelaxedOnEquivariantTensorFieldNetwork,
@@ -339,6 +341,16 @@ def forward_batch(model, batch, mname, geom=None):
                      torch.cat([x[1].reshape(1,-1) for x in batch]))
     if mname == 'ScalarInputMLP':
         return model(torch.cat([x.reshape(1,-1) for x in batch]))
+    if mname == 'CrossAttentionTensorFieldNetwork':
+        geom_list = None
+        if geom is not None:
+            if isinstance(geom, dict) and geom.get('uniform', False):
+                geom_list = list(zip(geom['rbf'], geom['gt_edge'], geom['nbr_idx']))
+            elif isinstance(geom, dict):
+                geom_list = geom['list']
+            else:
+                geom_list = geom
+        return model(batch, precomputed_geom=geom_list)
     if geom is not None and mname in TFN_MODELS:
         inner = getattr(model, '_inner', model)
         _move_basis_tensors(inner, device)

@@ -4,7 +4,6 @@ import dill as pck
 import pandas as pd
 import numpy as np
 import gudhi as gd
-import matplotlib.pyplot as plt
 from time import time
 
 from sklearn.metrics import pairwise_distances

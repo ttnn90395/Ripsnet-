@@ -11,22 +11,19 @@ Options:
     --models MODEL [MODEL ...]   Subset of models to ensemble (default: all TFN)
     --output FILE                Output JSON path
 """
-import os, sys, json, glob, argparse
+import os, sys, json, argparse
 import numpy as np
 import dill as pck
 import torch
 from sklearn.preprocessing import LabelEncoder
-from xgboost import XGBClassifier
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from train_enhanced import (
-    build_backbone, forward_with_geom, precompute_geom, get_geom,
-    _unwrap_tfn, _find_encoder, _is_hybrid, prepare, TFN_MODELS, _hp,
+    build_backbone, forward_with_geom, _hp,
 )
-from models import _move_basis_tensors
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
