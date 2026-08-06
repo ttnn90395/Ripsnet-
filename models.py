@@ -1231,6 +1231,7 @@ class SetTransformerTensorFieldNetwork(nn.Module):
     def __init__(
         self,
         num_classes: int,
+        n: int = 3,
         embedding_dim: int = 128,
         max_order: int = 1,
         hidden_channels: int = 32,
@@ -1245,7 +1246,7 @@ class SetTransformerTensorFieldNetwork(nn.Module):
         if decoder_dims is None:
             decoder_dims = [128, 64]
         self._inner = EquivariantSetTransformer(
-            n=3, num_classes=num_classes,
+            n=n, num_classes=num_classes,
             embedding_dim=embedding_dim,
             max_order=max_order,
             hidden_channels=hidden_channels,
