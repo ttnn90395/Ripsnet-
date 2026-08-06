@@ -418,8 +418,84 @@ def check_uniform_cache():
     print(f"ALL {len(GEOM_CASES)} UNIFORM-CACHE PATHS CONSISTENT")
 
 
+# ---------------------------------------------------------------------------
+# Hierarchical stage-geometry cache
+#
+# HierarchicalTensorFieldNetwork has no _encode_batch, so every pipeline
+# serves it per-sample geometry from the cache: the k-NN tensors plus the
+# per-stage pooling geometry produced by precompute_hierarchical_geometry().
+# This gate replays the forward_batch uniform branch (stacked rbf/gt/nbr +
+# hier list) and asserts the cached-stage shortcut is bit-identical to the
+# direct forward, which recomputes all stage geometry internally.
+# ---------------------------------------------------------------------------
+
+def check_hier_cache():
+    from gt_tfn_layer import knn_geometry
+
+    torch.manual_seed(0)
+    failures = []
+    try:
+        m = models.HierarchicalTensorFieldNetwork(
+            num_classes=4, n=3, max_order=1, hidden_channels=8,
+            stage_sizes=[32, 16], stage_radii=[0.3, 0.6],
+            k_local=8, k_global=8, num_layers_per_stage=1,
+            num_rbf=8, cutoff=1.5)
+        m.eval()
+        inner = m._inner
+        n_pc = 8
+        pcs = [torch.randn(64, 3) * 2.0 for _ in range(n_pc)]
+        geoms = [knn_geometry(pc, inner.rbf, inner.gt_basis, inner.k_neighbors)
+                 for pc in pcs]
+        stages = [inner.precompute_hierarchical_geometry(pc) for pc in pcs]
+        cache = {
+            "uniform": True,
+            "rbf":     torch.stack([g[0] for g in geoms]),
+            "gt_edge": torch.stack([g[1] for g in geoms]),
+            "nbr_idx": torch.stack([g[2] for g in geoms]),
+            "hier":    stages,
+        }
+        with torch.no_grad():
+            out_direct = m(pcs)   # recomputes all stage geometry internally
+
+            # uniform-cache route exactly as forward_batch()'s no-_encode_batch
+            # branch: per-sample rbf/gt/nbr + stage geometry from the cache
+            outs = []
+            bs = 5
+            for s in range(0, n_pc, bs):
+                descs = []
+                for i, pc in enumerate(pcs[s:s + bs]):
+                    descs.append(inner._encode_single(
+                        pc,
+                        precomputed_geom=(cache["rbf"][s + i], cache["gt_edge"][s + i],
+                                          cache["nbr_idx"][s + i]),
+                        precomputed_stage_geom=cache["hier"][s + i]))
+                outs.append(inner.rho(torch.stack(descs)))
+            out_cache = torch.cat(outs, dim=0)
+
+        if isinstance(out_direct, (list, tuple)):
+            out_direct = out_direct[0]
+        if isinstance(out_cache, (list, tuple)):
+            out_cache = out_cache[0]
+        d = (out_direct - out_cache).abs().max().item()
+        if d < 1e-5:
+            print(f"HIEROK  HierarchicalTensorFieldNetwork  cached-stage={d:.2e}")
+        else:
+            failures.append("HierarchicalTensorFieldNetwork")
+            print(f"HIERFAIL HierarchicalTensorFieldNetwork  cached-stage={d:.2e}")
+    except Exception as exc:
+        failures.append("HierarchicalTensorFieldNetwork")
+        print(f"HIERFAIL HierarchicalTensorFieldNetwork  {type(exc).__name__}: {exc}")
+
+    print()
+    if failures:
+        print(f"{len(failures)} hierarchical-cache failure(s): {', '.join(failures)}")
+        sys.exit(1)
+    print("HIERARCHICAL STAGE-GEOMETRY CACHE CONSISTENT")
+
+
 if __name__ == "__main__":
     run()
     check_geom_paths()
     check_uniform_cache()
+    check_hier_cache()
     check_backward()
