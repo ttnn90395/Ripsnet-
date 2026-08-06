@@ -212,13 +212,46 @@ def deep_to(module: nn.Module, target_device) -> nn.Module:
 # Fix 1: Geometry precomputation for TFN models
 # -------------------------------------------------------------------------
 
+def _geometry_fingerprint(model) -> str:
+    """Hash of the geometry-relevant configuration of a TFN model.
+
+    Derived from the model's actual modules (not from the CLI/env hparams),
+    so cache keys stay correct under arch-search sweeps, per-run TFN_HPARAMS
+    edits, or any other path that builds a model with different geometry:
+      - rbf num_rbf / cutoff  (controls the rbf feature values)
+      - k_neighbors           (controls the k-NN graph)
+      - gt_basis.max_order    (controls the GT harmonic features)
+      - pool_stages           (hierarchical stage geometry: FPS count,
+                               ball-query radius and k_local per stage)
+    """
+    inner = getattr(model, '_inner', model)
+    rbf   = getattr(inner, 'rbf', None)
+    basis = getattr(inner, 'gt_basis', None)
+    vals = {
+        'num_rbf':     getattr(rbf, 'num_rbf', None),
+        'cutoff':      getattr(rbf, 'cutoff', None),
+        'k_neighbors': getattr(inner, 'k_neighbors', None),
+        'max_order':   getattr(basis, 'max_order', None),
+    }
+    stages = getattr(inner, 'pool_stages', None)
+    if stages is not None:
+        vals['pool_stages'] = [
+            (getattr(s, 'n_centroids', None),
+             getattr(s, 'radius', None),
+             getattr(s, 'k_local', None))
+            for s in stages]
+    hparam_str = json.dumps(vals, sort_keys=True, default=str)
+    return hashlib.md5(hparam_str.encode()).hexdigest()[:8]
+
+
 def _geom_cache_path(dataset_name: str, model_name: str,
-                     tag: str = '') -> str:
+                     tag: str = '', model=None) -> str:
     """Path for the on-disk geometry cache for a given dataset + model.
 
-    The cache key includes a hash of geometry-relevant hyperparameters
-    (num_rbf, k_neighbors, max_order) to prevent stale cache collisions
-    when hparams change.
+    The cache key includes a hash of the model's geometry-relevant
+    configuration (see ``_geometry_fingerprint``) to prevent stale cache
+    collisions when num_rbf, cutoff, k_neighbors, max_order or the
+    hierarchical stage geometry change.
 
     Also includes the optional *TFN_MODEL_TAG* environment variable so that
     parallel fine-grained sweeps (one model per task) do not collide on the
@@ -229,11 +262,8 @@ def _geom_cache_path(dataset_name: str, model_name: str,
     mt = os.environ.get('TFN_MODEL_TAG', '')
     if mt:
         suffix += f'_{mt}'
-    geom_keys = ('num_rbf', 'k_neighbors', 'max_order')
-    hparam_str = json.dumps(
-        {k: model_hparams.get(k) for k in geom_keys}, sort_keys=True)
-    hparam_hash = hashlib.md5(hparam_str.encode()).hexdigest()[:8]
-    return f'cache/geom_{dataset_name}_{model_name}{suffix}_{hparam_hash}.pth'
+    fp = _geometry_fingerprint(model)
+    return f'cache/geom_{dataset_name}_{model_name}{suffix}_{fp}.pth'
 
 
 def precompute_geometry(model, data_list, mname, tag=''):
@@ -256,7 +286,7 @@ def precompute_geometry(model, data_list, mname, tag=''):
         return None
 
     # ----- disk-cache lookup -----
-    cache_path = _geom_cache_path(dataset_name, mname, tag=tag)
+    cache_path = _geom_cache_path(dataset_name, mname, tag=tag, model=model)
     try:
         cached = torch.load(cache_path, map_location=device)
         print(f'  Geometry cache hit → {cache_path}')
