@@ -22,6 +22,7 @@ torch.set_grad_enabled(False)
 
 X  = torch.randn(24, 3) * 2.0
 X2 = torch.randn(18, 3) * 2.0
+X2d = torch.randn(24, 2) * 2.0
 
 CASES = [
     ("TensorFieldNetwork",
@@ -157,6 +158,122 @@ def run():
         print(f"{len(failures)} failure(s): {', '.join(failures)}")
         sys.exit(1)
     print(f"ALL {len(CASES)} MODELS OK")
+
+
+# ---------------------------------------------------------------------------
+# 2D (n=2) forward gate
+#
+# The time-series datasets here are 2D and train_nn feeds every n-capable TFN
+# model raw n-dim point clouds (n=2), so each wrapper must build and forward at
+# n=2.  Several wrappers used to hardcode n=3 internally and crashed with a
+# mat1/mat2 shape error on 2D data; this gate keeps the n=2 path working for
+# every n-capable model, including GTTFNEncoder / EquivariantGraphMambaNetwork
+# (not covered by the SO(2) equivariance gate).
+# ---------------------------------------------------------------------------
+
+D2_CASES = [
+    ("TensorFieldNetwork",
+     lambda: models.TensorFieldNetwork(n=2, num_classes=3, hidden_channels=8,
+                                       num_layers=2, k_neighbors=6),
+     lambda m: m([X2d])),
+    ("GTTensorFieldNetwork",
+     lambda: models.GTTensorFieldNetwork(n=2, num_classes=3, hidden_channels=8,
+                                         num_layers=2, k_neighbors=6),
+     lambda m: m([X2d])),
+    ("GTTensorFieldNetworkV2",
+     lambda: models.GTTensorFieldNetworkV2(n=2, num_classes=3, hidden_channels=8,
+                                           num_layers=2, k_neighbors=6),
+     lambda m: m([X2d])),
+    ("GTTensorFieldNetworkWithAttention",
+     lambda: models.GTTensorFieldNetworkWithAttention(n=2, num_classes=3, hidden_channels=8,
+                                                      num_layers=2, k_neighbors=6),
+     lambda m: m([X2d])),
+    ("HierarchicalGTTFN",
+     lambda: models.HierarchicalGTTFN(n=2, num_classes=3, hidden_channels=8,
+                                      stage_sizes=[16, 8], stage_radii=[1.0, 1.0],
+                                      k_local=4, num_layers_per_stage=1),
+     lambda m: m([X2d])),
+    ("HierarchicalTensorFieldNetwork",
+     lambda: models.HierarchicalTensorFieldNetwork(n=2, num_classes=3, hidden_channels=8,
+                                                   stage_sizes=[16, 8], stage_radii=[1.0, 1.0],
+                                                   k_local=4, num_layers_per_stage=1),
+     lambda m: m([X2d])),
+    ("OnEquivariantTensorFieldNetwork",
+     lambda: models.OnEquivariantTensorFieldNetwork(n=2, num_classes=3, hidden_channels=8,
+                                                    num_layers=2, k_neighbors=6),
+     lambda m: m([X2d])),
+    ("AttentionTensorFieldNetwork",
+     lambda: models.AttentionTensorFieldNetwork(n=2, num_classes=3, hidden_channels=8,
+                                                num_layers=2, num_heads=2, num_rbf=8,
+                                                k_neighbors=6),
+     lambda m: m([X2d])),
+    ("CrossAttentionTensorFieldNetwork",
+     lambda: models.CrossAttentionTensorFieldNetwork(n=2, num_classes=3, hidden_channels=8,
+                                                     num_layers=1, num_heads=2,
+                                                     transformer_layers=1, num_rbf=8,
+                                                     k_neighbors=6),
+     lambda m: m([X2d])),
+    ("StochasticTensorFieldNetwork",
+     lambda: models.StochasticTensorFieldNetwork(n=2, num_classes=3, num_mixtures=2,
+                                                 hidden_channels=8, num_layers=2),
+     lambda m: m([X2d])),
+    ("RelaxedOnEquivariantTensorFieldNetwork",
+     lambda: models.RelaxedOnEquivariantTensorFieldNetwork(n=2, num_classes=3,
+                                                           hidden_channels=8, num_layers=2,
+                                                           k_neighbors=6),
+     lambda m: m([X2d])),
+    ("EndToEndTensorFieldNetwork",
+     lambda: models.EndToEndTensorFieldNetwork(n=2, num_classes=3, hidden_channels=8,
+                                               num_layers=2, k_neighbors=6),
+     lambda m: m([X2d])),
+    ("TemporalCrossAttentionTFN",
+     lambda: models.TemporalCrossAttentionTFN(n=2, num_classes=3, hidden_channels=8,
+                                              num_layers=1, num_heads=2, transformer_layers=1,
+                                              num_rbf=8, k_neighbors=6),
+     lambda m: m([X2d])),
+    ("StochasticEquivariantTFN",
+     lambda: models.StochasticEquivariantTFN(n=2, num_classes=3, num_mixtures=2,
+                                             hidden_channels=8, num_layers=2),
+     lambda m: m([X2d])),
+    ("EquivariantGraphMambaNetwork",
+     lambda: models.EquivariantGraphMambaNetwork(n=2, num_classes=3, hidden_channels=8,
+                                                 num_layers=2, num_rbf=8, k_neighbors=6),
+     lambda m: m([X2d])),
+    ("GraphMambaTensorFieldNetwork",
+     lambda: models.GraphMambaTensorFieldNetwork(n=2, num_classes=3, hidden_channels=8,
+                                                 num_layers=2, num_rbf=8, k_neighbors=6),
+     lambda m: m([X2d, X2d[:18]])),
+    ("GTTFNEncoder",
+     lambda: models.GTTFNEncoder(n=2, embedding_dim=8),
+     lambda m: m([X2d])),
+    ("SetTransformerTensorFieldNetwork",
+     lambda: models.SetTransformerTensorFieldNetwork(n=2, num_classes=3, embedding_dim=8,
+                                                     max_order=1, hidden_channels=8,
+                                                     num_layers=2, num_heads=2, num_rbf=8,
+                                                     k_neighbors=6),
+     lambda m: m([X2d], [X2d[:18]])),
+]
+
+
+def check_2d_forward():
+    failures = []
+    for name, build, call in D2_CASES:
+        try:
+            m = build()
+            m.eval()
+            out = call(m)
+            if isinstance(out, (list, tuple)):
+                out = out[0]
+            print(f"2DOK   {name:45s} n=2 fwd out={tuple(out.shape)}")
+        except Exception as exc:
+            failures.append(name)
+            print(f"2DFAIL {name:45s} {type(exc).__name__}: {str(exc)[:90]}")
+
+    print()
+    if failures:
+        print(f"{len(failures)} 2D failure(s): {', '.join(failures)}")
+        sys.exit(1)
+    print(f"ALL {len(D2_CASES)} MODELS FORWARD AT n=2")
 
 
 # ---------------------------------------------------------------------------
@@ -502,4 +619,5 @@ if __name__ == "__main__":
     check_geom_paths()
     check_uniform_cache()
     check_hier_cache()
+    check_2d_forward()
     check_backward()
