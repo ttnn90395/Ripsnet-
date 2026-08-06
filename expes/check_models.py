@@ -326,7 +326,100 @@ def check_geom_paths():
     print(f"ALL {len(GEOM_CASES)} GEOMETRY PATHS CONSISTENT")
 
 
+# ---------------------------------------------------------------------------
+# Uniform-geometry cache regression
+#
+# When every point cloud in a dataset has the same size, precompute_geometry
+# stores a stacked dict {uniform, rbf, gt_edge, nbr_idx} with NO 'list' key.
+# Models without inner._encode_batch must still be served per-sample geometry
+# derived from those stacked tensors; reaching for geom['list'] used to raise
+# KeyError.  This gate replays the exact branch logic of the training/eval
+# pipelines and checks that the uniform-cache route equals the per-sample
+# list route for every geometry-capable model.
+# ---------------------------------------------------------------------------
+
+def check_uniform_cache():
+    from gt_tfn_layer import knn_geometry
+
+    torch.manual_seed(0)
+    failures = []
+    for name, build, mode in GEOM_CASES:
+        try:
+            m = build()
+            m.eval()
+            inner = getattr(m, "_inner", m)
+            n_pc = 16
+            pcs = [torch.randn(20, 3) * 2.0 for _ in range(n_pc)]
+            geoms = [knn_geometry(pc, inner.rbf, inner.gt_basis, inner.k_neighbors)
+                     for pc in pcs]
+
+            # assemble the stacked 'uniform' cache exactly as
+            # precompute_geometry() does -- note: no 'list' key
+            cache = {
+                "uniform": True,
+                "rbf":     torch.stack([g[0] for g in geoms]),
+                "gt_edge": torch.stack([g[1] for g in geoms]),
+                "nbr_idx": torch.stack([g[2] for g in geoms]),
+            }
+
+            with torch.no_grad():
+                # per-sample list route (the non-uniform cache equivalent)
+                if mode == "model":
+                    out_list = m(pcs, precomputed_geom=geoms)
+                else:
+                    descs = [inner._encode_single(pc, precomputed_geom=g)
+                             for pc, g in zip(pcs, geoms)]
+                    out_list = inner.rho(torch.stack(descs))
+
+                # uniform-cache route, sliced per mini-batch.  For models
+                # without _encode_batch the per-sample geometry is zipped out
+                # of the stacked tensors; accessing cache['list'] would be the
+                # KeyError this gate guards against.
+                outs = []
+                bs = 7
+                for s in range(0, n_pc, bs):
+                    sl = slice(s, s + bs)
+                    if mode == "model":
+                        gl = list(zip(cache["rbf"][sl], cache["gt_edge"][sl],
+                                      cache["nbr_idx"][sl]))
+                        out = m(pcs[s:s + bs], precomputed_geom=gl)
+                    elif hasattr(inner, "_encode_batch"):
+                        out = inner._encode_batch(
+                            torch.stack(pcs[s:s + bs]),
+                            precomputed_geom=(cache["rbf"][sl], cache["gt_edge"][sl],
+                                              cache["nbr_idx"][sl]))
+                    else:
+                        gl = list(zip(cache["rbf"][sl], cache["gt_edge"][sl],
+                                      cache["nbr_idx"][sl]))
+                        descs = [inner._encode_single(pc, precomputed_geom=(r, g, n))
+                                 for pc, (r, g, n) in zip(pcs[s:s + bs], gl)]
+                        out = inner.rho(torch.stack(descs))
+                    outs.append(out)
+                out_cache = torch.cat(outs, dim=0)
+
+            if isinstance(out_list, (list, tuple)):
+                out_list = out_list[0]
+            if isinstance(out_cache, (list, tuple)):
+                out_cache = out_cache[0]
+            d = (out_list - out_cache).abs().max().item()
+            if d < 1e-5:
+                print(f"CACHEOK {name:44s} uniform={d:.2e}")
+            else:
+                failures.append(name)
+                print(f"CACHEFAIL {name:44s} uniform={d:.2e}")
+        except Exception as exc:
+            failures.append(name)
+            print(f"CACHEFAIL {name:44s} {type(exc).__name__}: {exc}")
+
+    print()
+    if failures:
+        print(f"{len(failures)} uniform-cache failure(s): {', '.join(failures)}")
+        sys.exit(1)
+    print(f"ALL {len(GEOM_CASES)} UNIFORM-CACHE PATHS CONSISTENT")
+
+
 if __name__ == "__main__":
     run()
     check_geom_paths()
+    check_uniform_cache()
     check_backward()

@@ -362,10 +362,15 @@ def forward_batch(model, batch, mname, geom=None):
     if geom is not None and mname in TFN_MODELS:
         inner = getattr(model, '_inner', model)
         _move_basis_tensors(inner, device)
-        if isinstance(geom, dict) and geom.get('uniform',False) and hasattr(inner, '_encode_batch'):
-            return inner._encode_batch(torch.stack(batch),
-                precomputed_geom=(geom['rbf'],geom['gt_edge'],geom['nbr_idx']))
-        gl = geom['list'] if isinstance(geom, dict) else geom
+        if isinstance(geom, dict) and geom.get('uniform',False):
+            if hasattr(inner, '_encode_batch'):
+                return inner._encode_batch(torch.stack(batch),
+                    precomputed_geom=(geom['rbf'],geom['gt_edge'],geom['nbr_idx']))
+            gl = list(zip(geom['rbf'], geom['gt_edge'], geom['nbr_idx']))
+        elif isinstance(geom, dict):
+            gl = geom['list']
+        else:
+            gl = geom
         descs = []
         for x,(r,g,n) in zip(batch, gl):
             r=r.squeeze(0) if r.ndim==4 else r; g=g.squeeze(0) if g.ndim==4 else g

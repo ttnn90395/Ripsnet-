@@ -362,8 +362,12 @@ def tfn_batched_forward(model, data_list, geom_cache, mname, batch_size=64):
                         batch_tensor,
                         precomputed_geom=(geom_b['rbf'], geom_b['gt_edge'], geom_b['nbr_idx']))
                 else:
-                    geom_list: list = (geom_b['list']
-                                       if isinstance(geom_b, dict) else geom_b)
+                    if isinstance(geom_b, dict) and geom_b.get('uniform', False):
+                        geom_list = list(zip(geom_b['rbf'], geom_b['gt_edge'], geom_b['nbr_idx']))
+                    elif isinstance(geom_b, dict):
+                        geom_list = geom_b['list']
+                    else:
+                        geom_list = geom_b
                     size_groups: Dict[int, List[int]] = defaultdict(list)
                     for i, x in enumerate(batch):
                         size_groups[x.shape[0]].append(i)
