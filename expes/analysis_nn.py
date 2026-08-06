@@ -257,6 +257,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
     if name == 'GraphMambaTensorFieldNetwork':
         return GraphMambaTensorFieldNetwork(
             num_classes=output_dim,
+            n=n_dim,
             max_order=extra.get('max_order', 0),
             hidden_channels=hidden_channels or 64,
             num_layers=num_layers or 6,
@@ -284,6 +285,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
     if name == 'HierarchicalTensorFieldNetwork':
         return HierarchicalTensorFieldNetwork(
             num_classes=output_dim,
+            n=n_dim,
             max_order=extra.get('max_order', 0),
             hidden_channels=hidden_channels or 64,
             stage_sizes=extra.get('stage_sizes', [256, 64]),
@@ -299,6 +301,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
     if name == 'OnEquivariantTensorFieldNetwork':
         return OnEquivariantTensorFieldNetwork(
             num_classes=output_dim,
+            n=n_dim,
             max_order=extra.get('max_order', 0),
             hidden_channels=hidden_channels or 64,
             num_layers=num_layers or 6,
@@ -311,6 +314,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
     if name == 'AttentionTensorFieldNetwork':
         return AttentionTensorFieldNetwork(
             num_classes=output_dim,
+            n=n_dim,
             max_order=extra.get('max_order', 0),
             hidden_channels=hidden_channels or 64,
             num_layers=num_layers or 6,
@@ -324,6 +328,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
     if name == 'StochasticTensorFieldNetwork':
         return StochasticTensorFieldNetwork(
             num_classes=output_dim,
+            n=n_dim,
             num_mixtures=extra.get('num_mixtures', 3),
             max_order=extra.get('max_order', 0),
             hidden_channels=hidden_channels or 64,
@@ -352,6 +357,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
     if name == 'RelaxedOnEquivariantTensorFieldNetwork':
         return RelaxedOnEquivariantTensorFieldNetwork(
             num_classes=output_dim,
+            n=n_dim,
             max_order=extra.get('max_order', 0),
             hidden_channels=hidden_channels or 32,
             num_layers=num_layers or 3,
@@ -364,6 +370,7 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
     if name == 'HybridOnEquivariantTensorFieldNetwork':
         return HybridOnEquivariantTensorFieldNetwork(
             num_classes=output_dim,
+            n=n_dim,
             max_order=extra.get('max_order', 0),
             hidden_channels=hidden_channels or 32,
             num_layers=num_layers or 3,
@@ -1201,8 +1208,11 @@ def load_and_eval(model_name, use_gs=False):
     else:
         inference_data = data_sets_torch
 
-    # Always pad to 3D for TFN models, regardless of GS flag
-    if class_name in TFN_MODELS:
+    # Pad to 3D only for models that need 3D input. TensorFieldNetwork is
+    # always built as n=3 (matches train_nn, which pads it to 3D). Native-n
+    # TFN models are built with n=ckpt_dim and must be fed raw n-dim data
+    # (train_nn convention), padding only when the checkpoint says dim >= 3.
+    if class_name in TFN_MODELS and (class_name == 'TensorFieldNetwork' or ckpt_dim >= 3):
         inference_data = [
             torch.cat([x, x.new_zeros(x.shape[0], 1)], dim=1)
             if x.shape[1] == 2 else x
