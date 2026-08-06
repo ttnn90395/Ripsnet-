@@ -1056,10 +1056,11 @@ def forward_batch(model, batch_data, mname, geom_batch=None, hier_batch=None):
         model_device = next(inner.parameters()).device
         _move_basis_tensors(inner, model_device)
 
-        # Extract hier from uniform dict if present
+        # Extract hier from uniform dict if present (non-destructive: the
+        # dict may be the caller's persistent cache)
         _hier_dict = None
         if isinstance(geom_batch, dict) and 'hier' in geom_batch:
-            _hier_dict = geom_batch.pop('hier')
+            _hier_dict = geom_batch['hier']
             if hier_batch is None:
                 hier_batch = _hier_dict
 
