@@ -216,6 +216,33 @@ class GTBasis(nn.Module):
         self.signatures: List[GTSignature] = _enum_sigs(n, max_order)
         self.dims:       List[int]         = [s.dim() for s in self.signatures]
         self.num_basis:  int               = sum(self.dims)
+        self._validate_signature_dims()
+
+    def _validate_signature_dims(self) -> None:
+        """Fail early when a tensor/spinorial signature is unsupported.
+
+        The GT recursion builds each signature's basis functions from the
+        harmonic space of degree ``lam[0]`` on S^{n-1}.  For n >= 5 the
+        Weyl dimension of a rank-(n//2) signature like (1,1) exceeds what
+        that recursion can generate, so the column count would disagree with
+        ``num_basis`` and forward later crashes with an opaque reshape
+        error.  Scalar/vector signatures (max_order=0) are unaffected.
+        """
+        if self.n < 4:
+            return
+        with torch.no_grad():
+            X = torch.randn(16, self.n)
+            X = X / X.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+            for sig in self.signatures:
+                actual = self._eval_sig_unnorm(X, sig).shape[1]
+                if actual != sig.dim():
+                    raise ValueError(
+                        f"GTBasis(n={self.n}, max_order={self.max_order}): "
+                        f"signature {sig.lam} has Weyl dimension {sig.dim()} but "
+                        f"the GT recursion yields {actual} columns. Tensor/"
+                        f"spinorial signatures at n>=5 are not supported by the "
+                        f"current recursion; use max_order=0 (scalar features) "
+                        f"or n<=4.")
 
     def __call__(self, unit_dirs: torch.Tensor) -> torch.Tensor:
         return self._eval_n3(unit_dirs) if self.n==3 else self._eval_general(unit_dirs)

@@ -156,6 +156,54 @@ def run():
 
 
 # ---------------------------------------------------------------------------
+# Backward smoke
+#
+# Train-mode forward + loss.backward() must succeed and produce finite grads.
+# Not every parameter is expected to receive a gradient in this toy setup
+# (e.g. the stochastic models' logvar_net is only driven by their NLL loss,
+# the hybrid models intentionally bypass the backbone's rho head, and
+# PermopRagged has no trainable params), so we only fail on a backward
+# exception, a non-finite loss, or zero finite grads — i.e. real autograd
+# breakage.
+# ---------------------------------------------------------------------------
+
+def check_backward():
+    torch.manual_seed(0)
+    failures = []
+    for name, build, call in CASES:
+        try:
+            m = build()
+            m.train()
+            with torch.enable_grad():
+                out = call(m)
+                if isinstance(out, (list, tuple)):
+                    out = out[0]
+                if not torch.is_floating_point(out) or not out.requires_grad:
+                    print(f"BWSKIP {name:43s} non-differentiable output")
+                    continue
+                loss = out.square().mean()
+                if not torch.isfinite(loss):
+                    failures.append(name)
+                    print(f"BWFAIL {name:43s} loss not finite")
+                    continue
+                loss.backward()
+            grads = [p.grad for p in m.parameters() if p.requires_grad]
+            finite = sum(1 for g in grads if g is not None and torch.isfinite(g).all())
+            if finite > 0:
+                print(f"BWOK   {name:43s} grads {finite}/{len(grads)}")
+            else:
+                failures.append(name)
+                print(f"BWFAIL {name:43s} no finite grads")
+        except Exception as exc:
+            failures.append(name)
+            print(f"BWFAIL {name:43s} {type(exc).__name__}: {str(exc)[:90]}")
+    if failures:
+        print(f"{len(failures)} backward failure(s): {', '.join(failures)}")
+        sys.exit(1)
+    print(f"ALL {len(CASES)} BACKWARD PASSES OK")
+
+
+# ---------------------------------------------------------------------------
 # Precomputed-geometry consistency
 #
 # The training/eval pipelines fast-path every TFN model through
@@ -281,3 +329,4 @@ def check_geom_paths():
 if __name__ == "__main__":
     run()
     check_geom_paths()
+    check_backward()
