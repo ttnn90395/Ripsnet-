@@ -218,6 +218,7 @@ def _geometry_fingerprint(model) -> str:
     Derived from the model's actual modules (not from the CLI/env hparams),
     so cache keys stay correct under arch-search sweeps, per-run TFN_HPARAMS
     edits, or any other path that builds a model with different geometry:
+      - n                    (ambient dimension; controls the GT basis)
       - rbf num_rbf / cutoff  (controls the rbf feature values)
       - k_neighbors           (controls the k-NN graph)
       - gt_basis.max_order    (controls the GT harmonic features)
@@ -228,6 +229,7 @@ def _geometry_fingerprint(model) -> str:
     rbf   = getattr(inner, 'rbf', None)
     basis = getattr(inner, 'gt_basis', None)
     vals = {
+        'n':           getattr(basis, 'n', None),
         'num_rbf':     getattr(rbf, 'num_rbf', None),
         'cutoff':      getattr(rbf, 'cutoff', None),
         'k_neighbors': getattr(inner, 'k_neighbors', None),
