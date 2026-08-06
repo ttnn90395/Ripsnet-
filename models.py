@@ -563,6 +563,8 @@ class AttnRipsPointNet(nn.Module):
                  pd_dims=(32, 64, 128), pd_rho_dims=(128, 64),
                  max_pd_pairs: int = 128, use_count: bool = False,
                  fusion_dims: Optional[List[int]] = None,
+                 use_gate: bool = False, gate_dims=(32, 16),
+                 use_pd_stats: bool = False, pd_stats_dims=(16, 32),
                  dropout: float = 0.1, activation: str = 'gelu'):
         super().__init__()
         assert pooling in ('attn', 'mhead')
@@ -572,6 +574,8 @@ class AttnRipsPointNet(nn.Module):
         self.num_heads = num_heads
         self.use_pd = use_pd
         self.use_count = use_count
+        self.use_gate = use_gate
+        self.use_pd_stats = use_pd_stats
         self.max_pd_pairs = max_pd_pairs
 
         if phi_dims is None:
@@ -595,6 +599,17 @@ class AttnRipsPointNet(nn.Module):
         else:
             self.attn_vector = nn.Parameter(torch.randn(d) * 0.01)
             rho_in = d
+        if use_gate:
+            # learned per-enhancer attention-logit bias from the (normalized)
+            # input features — lets attention weight enhancers by absolute
+            # feature magnitude (activity/contact), the readout signal that
+            # fixes the 100-500kb bins. One bias per head for mhead pooling.
+            gate_out = num_heads if pooling == 'mhead' else 1
+            self.gate_net = _build_mlp([input_dim] + list(gate_dims) + [gate_out],
+                                       activation=activation, norm='ln',
+                                       final_activation=None, dropout=dropout)
+        else:
+            self.gate_net = None
         if rho_dims is None:
             rho_dims = [256, 128]
         rho_out = rho_dims[-1]
@@ -608,18 +623,33 @@ class AttnRipsPointNet(nn.Module):
                                      activation=activation, norm='ln',
                                      final_activation=None, dropout=dropout)
             pd_out = pd_rho_dims[-1]
+            self.pd_out_dim = pd_out
         else:
             self.pd_layers = None
             self.pd_rho = None
             pd_out = 0
+            self.pd_out_dim = 0
 
-        fusion_in = rho_out + pd_out + (1 if use_count else 0)
+        if use_pd_stats:
+            # per-gene diagram_stats (H0 5 + H1 5 scalars) fused into the head
+            self.pd_stats_net = _build_mlp([10] + list(pd_stats_dims) + [pd_stats_dims[-1]],
+                                           activation=activation, norm='ln',
+                                           final_activation=None, dropout=dropout)
+            pd_stats_out = pd_stats_dims[-1]
+            self.pd_stats_out_dim = pd_stats_out
+        else:
+            self.pd_stats_net = None
+            pd_stats_out = 0
+            self.pd_stats_out_dim = 0
+
+        fusion_in = rho_out + pd_out + pd_stats_out + (1 if use_count else 0)
         self.fusion = _build_mlp([fusion_in] + list(fusion_dims) + [output_dim],
                                  activation=activation, norm='ln',
                                  final_activation=None, dropout=dropout)
 
     def forward(self, batch: List[torch.Tensor],
                 precomputed_pd: Optional[List[torch.Tensor]] = None,
+                pd_stats: Optional[torch.Tensor] = None,
                 return_attn: bool = False):
         if len(batch) == 0:
             return torch.empty(0, _last_out(self.fusion),
@@ -642,12 +672,19 @@ class AttnRipsPointNet(nn.Module):
 
         if self.pooling == 'mhead':
             scores = torch.einsum('bnd,hd->bnh', x, self.attn_vectors)
+            if self.use_gate:
+                # per-head logit bias from input features (absolute scale)
+                gate_bias = self.gate_net(padded).reshape(B, N, self.num_heads)
+                scores = scores + gate_bias
             scores = scores.masked_fill(~mask.unsqueeze(-1), -1e9)
             w = torch.softmax(scores, dim=1)
             pooled = torch.einsum('bnh,bnd->bhd', w, x).reshape(B, self.num_heads * x.shape[-1])
             attn_weights = w.mean(dim=-1)
         else:
             attn_scores = x @ self.attn_vector
+            if self.use_gate:
+                gate_bias = self.gate_net(padded).reshape(B, N)
+                attn_scores = attn_scores + gate_bias
             attn_scores = attn_scores.masked_fill(~mask, -1e9)
             attn_weights = torch.softmax(attn_scores, dim=1)
             pooled = (attn_weights.unsqueeze(-1) * x).sum(dim=1)
@@ -675,13 +712,18 @@ class AttnRipsPointNet(nn.Module):
             pd_feat = pd_feat.sum(dim=1) / pd_m.sum(dim=1, keepdim=True).clamp(min=1)
             pd_feat = self.pd_rho(pd_feat)
         else:
-            pd_feat = torch.zeros(B, 0, device=device)
+            pd_feat = torch.zeros(B, self.pd_out_dim, device=device)
+
+        if self.use_pd_stats and pd_stats is not None:
+            stats_out = self.pd_stats_net(pd_stats.to(device).float())
+        else:
+            stats_out = torch.zeros(B, self.pd_stats_out_dim, device=device)
 
         if self.use_count:
             counts = torch.log1p(mask.sum(dim=1, keepdim=True).float())
-            combined = torch.cat([pt_feat, pd_feat, counts], dim=1)
+            combined = torch.cat([pt_feat, pd_feat, stats_out, counts], dim=1)
         else:
-            combined = torch.cat([pt_feat, pd_feat], dim=1)
+            combined = torch.cat([pt_feat, pd_feat, stats_out], dim=1)
         out = self.fusion(combined)
 
         if return_attn:
@@ -1229,6 +1271,7 @@ class GraphMambaTensorFieldNetwork(nn.Module):
     def __init__(
         self,
         num_classes: int,
+        n: int = 3,
         max_order: int = 1,
         hidden_channels: int = 32,
         num_layers: int = 4,
@@ -1241,7 +1284,7 @@ class GraphMambaTensorFieldNetwork(nn.Module):
         if classifier_dims is None:
             classifier_dims = [128, 64]
         self._inner = EquivariantGraphMambaNetwork(
-            n=3, num_classes=num_classes,
+            n=n, num_classes=num_classes,
             max_order=max_order,
             hidden_channels=hidden_channels,
             num_layers=num_layers,

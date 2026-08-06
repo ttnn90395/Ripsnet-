@@ -845,6 +845,7 @@ def build_model_by_name(name, n=None, hparams=None):
     if name == 'GraphMambaTensorFieldNetwork':
         return GraphMambaTensorFieldNetwork(
             num_classes=output_dim,
+            n=_n,
             max_order=hp.get('max_order', 0),
             hidden_channels=hp.get('hidden_channels', _hc),
             num_layers=hp.get('num_layers', _nl),

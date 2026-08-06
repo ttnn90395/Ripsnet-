@@ -2097,6 +2097,7 @@ class EndToEndTensorFieldNetwork(nn.Module):
     def __init__(
         self,
         num_classes: int,
+        n: int = 3,
         num_pv_classes: int = 10,
         max_order: int = 1,
         hidden_channels: int = 32,
@@ -2112,6 +2113,7 @@ class EndToEndTensorFieldNetwork(nn.Module):
         from models import TensorFieldNetwork
         base = TensorFieldNetwork(
             num_classes=num_pv_classes,
+            n=n,
             max_order=max_order,
             hidden_channels=hidden_channels,
             num_layers=num_layers,
