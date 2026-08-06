@@ -732,7 +732,13 @@ def forward_single(model, prepared_x, mname, geom=None, stage_geom=None):
         model_device = next(inner.parameters()).device
         _move_basis_tensors(inner, model_device)
         if stage_geom is not None:
-            stage_geom = {k: v.to(model_device) for k, v in stage_geom.items()}
+            # the cache stores stage geometry as a list of dicts (one per
+            # pool stage); accept a single dict too
+            if isinstance(stage_geom, dict):
+                stage_geom = {k: v.to(model_device) for k, v in stage_geom.items()}
+            else:
+                stage_geom = [{k: v.to(model_device) for k, v in sg.items()}
+                              for sg in stage_geom]
         desc  = inner._encode_single(
             prepared_x, precomputed_geom=(rbf, gt_edge, nbr_idx),
             precomputed_stage_geom=stage_geom)

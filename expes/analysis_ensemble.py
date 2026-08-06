@@ -244,7 +244,7 @@ for tag in model_tags:
         for idx, x_tensor in enumerate(data_sets_torch):
             geom_single = (geom['rbf'][idx], geom['gt_edge'][idx], geom['nbr_idx'][idx]) \
                 if (isinstance(geom, dict) and geom.get('uniform', False)) \
-                else geom[idx]
+                else (geom['list'][idx] if isinstance(geom, dict) else geom[idx])
             out = an.forward_single(compiled, an.prepare_single_input(
                 'TensorFieldNetwork', x_tensor, use_gs=False),
                 'TensorFieldNetwork', geom=geom_single)
