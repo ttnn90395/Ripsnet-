@@ -290,11 +290,16 @@ use_gs = '_GS' in model_label
 gs_sigma = ckpt.get('gs_sigma', 0.5) if isinstance(ckpt, dict) else 0.5
 
 def prepare_for_model(mname, tensor_list):
+    # Native-n models (built with n=dim) must get raw n-dim data; only
+    # n=3-built TFN models (or dim>=3 data) get padded to 3D.
+    native_n = mname in ('GTTensorFieldNetwork', 'GTTensorFieldNetworkV2',
+                         'CrossAttentionTensorFieldNetwork')
+    needs_3d = (not native_n) or dim >= 3
     out = []
     for x in tensor_list:
         arr = x.cpu().numpy()
         if mname in TFN_MODELS:
-            if arr.shape[1] == 2:
+            if arr.shape[1] == 2 and needs_3d:
                 arr = np.concatenate([arr, np.zeros((arr.shape[0],1))], axis=1)
             out.append(torch.FloatTensor(arr).to(device))
         elif mname == 'PointNet3D':

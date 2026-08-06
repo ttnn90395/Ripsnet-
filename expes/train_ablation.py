@@ -144,7 +144,7 @@ def build_model(name):
             max_order=1, hidden_channels=32, num_layers=3, num_heads=4,
             num_rbf=64, classifier_dims=[64,32], radial_hidden=64)
     if name == 'CrossAttentionTensorFieldNetwork':
-        return CrossAttentionTensorFieldNetwork(num_classes=output_dim, n=dim,
+        return CrossAttentionTensorFieldNetwork(num_classes=output_dim,
             max_order=1, hidden_channels=8, num_layers=2, num_heads=4,
             transformer_layers=2, num_rbf=64, classifier_dims=[16], radial_hidden=64)
     if name == 'StochasticTensorFieldNetwork':
