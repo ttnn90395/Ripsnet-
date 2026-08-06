@@ -1,0 +1,15 @@
+{
+  "dataset": "shapes3d_8way",
+  "model": "PointNetTutorial",
+  "trial": 1,
+  "num_epochs": 100,
+  "batch_size": 32,
+  "clean_accuracy": 0.875,
+  "noisy_accuracy": 0.5574324324324325,
+  "best_val_accuracy": 87.5,
+  "num_classes": 8,
+  "n_train": 896,
+  "n_test": 296,
+  "n_points": 600,
+  "params": 142408
+}

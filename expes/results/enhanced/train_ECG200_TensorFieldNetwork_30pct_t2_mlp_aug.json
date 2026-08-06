@@ -1,0 +1,1 @@
+{"dataset": "ECG200", "model": "TensorFieldNetwork", "fraction_pct": 30, "trial": 2, "n_train_used": 15, "n_train_full": 50, "n_test": 100, "mlp_test_acc": 0.64, "xgb_test_acc": NaN, "classifier": "mlp", "augment": true, "multi_scale": false, "hidden_channels": null, "dropout": 0.1}

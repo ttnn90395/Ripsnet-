@@ -1,0 +1,1 @@
+{"dataset": "GunPoint", "model": "HybridOnEquivariantTensorFieldNetwork", "fraction_pct": 50, "trial": 3, "n_train_used": 12, "n_train_full": 25, "n_test": 150, "mlp_test_acc": NaN, "xgb_test_acc": 0.8533333333333334, "classifier": "xgboost", "augment": false, "multi_scale": false, "hidden_channels": null, "dropout": 0.1}

@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "/Users/statgen/Ripsnet-/shape/train_shape.py", line 95, in <module>
+    trial        = int(sys.argv[4]) if len(sys.argv) > 4 else 0
+                   ~~~^^^^^^^^^^^^^
+ValueError: invalid literal for int() with base 10: '2D:'

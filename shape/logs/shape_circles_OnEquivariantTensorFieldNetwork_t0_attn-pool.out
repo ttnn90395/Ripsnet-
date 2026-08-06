@@ -1,0 +1,8 @@
+shape/train_shape.py: circles OnEquivariantTensorFieldNetwork epochs=20 trial=0 bs=32 quick=False
+  Robustness flags: attn_pool
+Device: cpu  AMP: False
+Generating circles data...
+  Train: 900 samples, Test: 300 samples
+  Classes: 3  Points: 600
+  Model: OnEquivariantTensorFieldNetwork (1068387 params)
+Precomputing geometry...

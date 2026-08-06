@@ -1,0 +1,15 @@
+{
+  "dataset": "shapes3d_8way",
+  "model": "HierarchicalTensorFieldNetwork",
+  "trial": 1,
+  "num_epochs": 50,
+  "batch_size": 32,
+  "clean_accuracy": 0.8648648648648649,
+  "noisy_accuracy": 0.22635135135135134,
+  "best_val_accuracy": 87.5,
+  "num_classes": 8,
+  "n_train": 896,
+  "n_test": 296,
+  "n_points": 600,
+  "params": 194664
+}

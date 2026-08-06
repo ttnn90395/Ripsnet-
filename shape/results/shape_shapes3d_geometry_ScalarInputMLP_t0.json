@@ -1,0 +1,15 @@
+{
+  "dataset": "shapes3d_geometry",
+  "model": "ScalarInputMLP",
+  "trial": 0,
+  "num_epochs": 100,
+  "batch_size": 32,
+  "clean_accuracy": 0.7466666666666667,
+  "noisy_accuracy": 0.6066666666666667,
+  "best_val_accuracy": 74.66666666666667,
+  "num_classes": 4,
+  "n_train": 900,
+  "n_test": 300,
+  "n_points": 600,
+  "params": 665092
+}

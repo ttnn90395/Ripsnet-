@@ -1,0 +1,1 @@
+{"dataset": "GunPoint", "model": "DistanceMatrixRaggedModel", "fraction_pct": 70, "trial": 3, "n_train_used": 17, "n_train_full": 25, "n_test": 150, "mlp_test_acc": NaN, "xgb_test_acc": 0.7133333333333334, "classifier": "xgboost", "augment": false, "multi_scale": false, "hidden_channels": null, "dropout": 0.1}

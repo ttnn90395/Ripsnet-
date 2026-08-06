@@ -1,0 +1,15 @@
+{
+  "dataset": "shapes3d_8way",
+  "model": "ScalarInputMLP",
+  "trial": 1,
+  "num_epochs": 100,
+  "batch_size": 32,
+  "clean_accuracy": 0.44256756756756754,
+  "noisy_accuracy": 0.4155405405405405,
+  "best_val_accuracy": 44.25675675675676,
+  "num_classes": 8,
+  "n_train": 896,
+  "n_test": 296,
+  "n_points": 600,
+  "params": 669192
+}

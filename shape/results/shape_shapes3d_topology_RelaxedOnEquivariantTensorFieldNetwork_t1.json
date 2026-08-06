@@ -1,0 +1,15 @@
+{
+  "dataset": "shapes3d_topology",
+  "model": "RelaxedOnEquivariantTensorFieldNetwork",
+  "trial": 1,
+  "num_epochs": 100,
+  "batch_size": 32,
+  "clean_accuracy": 0.25,
+  "noisy_accuracy": 0.25666666666666665,
+  "best_val_accuracy": 25.0,
+  "num_classes": 4,
+  "n_train": 900,
+  "n_test": 300,
+  "n_points": 600,
+  "params": 1754086
+}

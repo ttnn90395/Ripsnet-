@@ -1,0 +1,1 @@
+{"dataset": "CBF", "model_label": "PointNetTutorial", "n_augments": 20, "trial": 0, "n_test": 500, "dim": 3, "xgb_train_acc": 1.0, "accuracy_clean": 0.558, "accuracy_augmented": 0.4652000000000001, "mean_l2_dist": 0.010447587817907333, "std_l2_dist": 0.006245852913707495}

@@ -1,0 +1,25 @@
+shape/train_shape.py: circles_noisy PointNet3D epochs=20 trial=0 bs=32 quick=False
+Device: cpu  AMP: False
+Generating circles_noisy data...
+  Train: 900 samples, Test: 300 samples
+  Classes: 3  Points: 600
+  Model: PointNet3D (141763 params)
+Precomputing geometry...
+
+Training PointNet3D for 20 epochs...
+  Epoch 1/20  loss=0.8800  train_acc=56.8%  val_acc=61.7%
+  Epoch 10/20  loss=0.4596  train_acc=74.3%  val_acc=65.7%
+  Epoch 20/20  loss=0.4065  train_acc=78.3%  val_acc=80.3%
+
+Final evaluation...
+
+============================================================
+Results: PointNet3D on circles_noisy
+============================================================
+  Clean test accuracy: 0.8133 (81.33%)
+  Noisy test accuracy: 0.8133 (81.33%)
+  Best val accuracy:   81.33%
+  Parameters: 141,763
+
+Saved to results/shape_circles_noisy_PointNet3D_t0.json
+Model saved to models/shape_circles_noisy_PointNet3D_t0.pt

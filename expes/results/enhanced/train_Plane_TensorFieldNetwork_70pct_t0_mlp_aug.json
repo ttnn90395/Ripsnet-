@@ -1,0 +1,1 @@
+{"dataset": "Plane", "model": "TensorFieldNetwork", "fraction_pct": 70, "trial": 0, "n_train_used": 36, "n_train_full": 52, "n_test": 105, "mlp_test_acc": 0.1619047619047619, "xgb_test_acc": NaN, "classifier": "mlp", "augment": true, "multi_scale": false, "hidden_channels": null, "dropout": 0.1}

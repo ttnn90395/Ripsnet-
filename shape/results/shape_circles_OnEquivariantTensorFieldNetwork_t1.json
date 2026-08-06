@@ -1,0 +1,15 @@
+{
+  "dataset": "circles",
+  "model": "OnEquivariantTensorFieldNetwork",
+  "trial": 1,
+  "num_epochs": 50,
+  "batch_size": 32,
+  "clean_accuracy": 0.47,
+  "noisy_accuracy": 0.45,
+  "best_val_accuracy": 47.0,
+  "num_classes": 3,
+  "n_train": 900,
+  "n_test": 300,
+  "n_points": 600,
+  "params": 1068387
+}

@@ -1,0 +1,1 @@
+{"dataset": "PowerCons", "model": "PointNet3D", "fraction_pct": 50, "trial": 2, "n_train_used": 45, "n_train_full": 90, "n_test": 180, "mlp_test_acc": NaN, "xgb_test_acc": NaN, "classifier": "xgboost", "augment": false, "multi_scale": false, "hidden_channels": null, "dropout": 0.1}

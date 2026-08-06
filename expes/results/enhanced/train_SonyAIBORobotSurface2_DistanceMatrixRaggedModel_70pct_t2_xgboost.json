@@ -1,0 +1,1 @@
+{"dataset": "SonyAIBORobotSurface2", "model": "DistanceMatrixRaggedModel", "fraction_pct": 70, "trial": 2, "n_train_used": 9, "n_train_full": 13, "n_test": 500, "mlp_test_acc": NaN, "xgb_test_acc": 0.374, "classifier": "xgboost", "augment": false, "multi_scale": false, "hidden_channels": null, "dropout": 0.1}

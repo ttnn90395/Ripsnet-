@@ -1,0 +1,15 @@
+{
+  "dataset": "circles_noisy",
+  "model": "HierarchicalTensorFieldNetwork",
+  "trial": 1,
+  "num_epochs": 50,
+  "batch_size": 32,
+  "clean_accuracy": 0.7033333333333334,
+  "noisy_accuracy": 0.7,
+  "best_val_accuracy": 69.66666666666667,
+  "num_classes": 3,
+  "n_train": 900,
+  "n_test": 300,
+  "n_points": 600,
+  "params": 194339
+}

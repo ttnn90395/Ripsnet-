@@ -1,0 +1,1 @@
+{"dataset": "ECG5000", "model": "TensorFieldNetwork", "fraction_pct": 20, "trial": 3, "n_train_used": 50, "n_train_full": 250, "n_test": 500, "mlp_test_acc": 0.798, "xgb_test_acc": NaN, "classifier": "mlp", "augment": true, "multi_scale": false, "hidden_channels": null, "dropout": 0.1}

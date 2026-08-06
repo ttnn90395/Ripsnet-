@@ -1,0 +1,27 @@
+shape/train_shape.py: shapes3d_geometry PointNet3D epochs=20 trial=0 bs=32 quick=False
+Device: cpu  AMP: False
+Generating shapes3d_geometry data...
+  Train: 900 samples, Test: 300 samples
+  Classes: 4  Points: 600
+  Model: PointNet3D (141956 params)
+Precomputing geometry...
+
+Training PointNet3D for 20 epochs...
+  Epoch 1/20  loss=0.7487  train_acc=68.6%  val_acc=100.0%
+  Epoch 10/20  loss=0.0001  train_acc=100.0%  val_acc=99.7%
+  Early stopping at epoch 16
+
+Final evaluation...
+
+============================================================
+Results: PointNet3D on shapes3d_geometry
+============================================================
+  Clean test accuracy: 1.0000 (100.00%)
+  Noisy test accuracy: 0.5200 (52.00%)
+  Best val accuracy:   100.00%
+  Parameters: 141,956
+  Classes: ['sphere', 'torus', 'cylinder', 'cube']
+  Same topology (genus 0, 1 component) but different geometry
+
+Saved to results/shape_shapes3d_geometry_PointNet3D_t0.json
+Model saved to models/shape_shapes3d_geometry_PointNet3D_t0.pt

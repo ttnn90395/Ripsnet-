@@ -1,0 +1,1 @@
+{"dataset": "PowerCons", "model": "OnEquivariantTensorFieldNetwork", "fraction_pct": 70, "trial": 3, "n_train_used": 62, "n_train_full": 90, "n_test": 180, "mlp_test_acc": 0.9166666666666666, "xgb_test_acc": NaN, "classifier": "mlp", "augment": true, "multi_scale": false, "hidden_channels": null, "dropout": 0.1}

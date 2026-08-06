@@ -1,0 +1,4 @@
+bottleneck_distance,cosine_distance,dim,l1_distance,l2_distance,max_lifetime,mean_lifetime,mem_mb,method,n_features,n_features_clean,n_features_perturbed,n_pd_features,n_points,noise_sigma,shape,time_gudhi_s,time_manual_s,time_s,trial,wasserstein_1,wasserstein_2
+,,3,,,0.0766182541847229,0.0043444461886967866,1.109375,alpha_ours,317,,,,300,,sphere_3d,,,0.06127895787358284,,,
+,,3,,,0.0766182541847229,0.0043444461886967866,0.0625,alpha_raw,317,,,,300,,sphere_3d,,,0.08563208393752575,,,
+,,3,,,0.2902360260486603,0.0599032657309657,53.0625,rips,84,,,,300,,sphere_3d,,,0.33833616599440575,,,

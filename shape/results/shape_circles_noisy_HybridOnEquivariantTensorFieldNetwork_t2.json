@@ -1,0 +1,15 @@
+{
+  "dataset": "circles_noisy",
+  "model": "HybridOnEquivariantTensorFieldNetwork",
+  "trial": 2,
+  "num_epochs": 20,
+  "batch_size": 32,
+  "clean_accuracy": 0.67,
+  "noisy_accuracy": 0.67,
+  "best_val_accuracy": 67.0,
+  "num_classes": 3,
+  "n_train": 900,
+  "n_test": 300,
+  "n_points": 600,
+  "params": 1177254
+}

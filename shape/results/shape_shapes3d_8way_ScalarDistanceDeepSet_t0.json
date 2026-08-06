@@ -1,0 +1,15 @@
+{
+  "dataset": "shapes3d_8way",
+  "model": "ScalarDistanceDeepSet",
+  "trial": 0,
+  "num_epochs": 100,
+  "batch_size": 32,
+  "clean_accuracy": 0.918918918918919,
+  "noisy_accuracy": 0.7668918918918919,
+  "best_val_accuracy": 91.8918918918919,
+  "num_classes": 8,
+  "n_train": 896,
+  "n_test": 296,
+  "n_points": 600,
+  "params": 76296
+}

@@ -1,0 +1,15 @@
+{
+  "dataset": "circles",
+  "model": "DistanceMatrixRaggedModel",
+  "trial": 0,
+  "num_epochs": 20,
+  "batch_size": 16,
+  "clean_accuracy": 0.34,
+  "noisy_accuracy": 0.34,
+  "best_val_accuracy": 34.0,
+  "num_classes": 3,
+  "n_train": 300,
+  "n_test": 100,
+  "n_points": 100,
+  "params": 96771
+}

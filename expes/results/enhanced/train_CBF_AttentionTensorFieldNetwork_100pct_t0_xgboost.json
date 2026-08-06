@@ -1,0 +1,1 @@
+{"dataset": "CBF", "model": "AttentionTensorFieldNetwork", "fraction_pct": 100, "trial": 0, "n_train_used": 15, "n_train_full": 15, "n_test": 500, "mlp_test_acc": NaN, "xgb_test_acc": 0.63, "classifier": "xgboost", "augment": false, "multi_scale": false, "hidden_channels": null, "dropout": 0.1}

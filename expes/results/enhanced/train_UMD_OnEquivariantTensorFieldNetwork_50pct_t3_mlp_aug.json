@@ -1,0 +1,1 @@
+{"dataset": "UMD", "model": "OnEquivariantTensorFieldNetwork", "fraction_pct": 50, "trial": 3, "n_train_used": 9, "n_train_full": 18, "n_test": 144, "mlp_test_acc": 0.3333333333333333, "xgb_test_acc": NaN, "classifier": "mlp", "augment": true, "multi_scale": false, "hidden_channels": null, "dropout": 0.1}

@@ -1,0 +1,1 @@
+{"dataset": "CBF", "model": "GTTensorFieldNetworkV2", "fraction_pct": 100, "trial": 0, "n_train_used": 15, "n_train_full": 15, "n_test": 500, "xgb_train_acc": 1.0, "xgb_test_acc": 0.486}

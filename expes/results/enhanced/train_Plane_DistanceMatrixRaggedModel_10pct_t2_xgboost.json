@@ -1,0 +1,1 @@
+{"dataset": "Plane", "model": "DistanceMatrixRaggedModel", "fraction_pct": 10, "trial": 2, "n_train_used": 5, "n_train_full": 52, "n_test": 105, "mlp_test_acc": NaN, "xgb_test_acc": 0.18518518518518517, "classifier": "xgboost", "augment": false, "multi_scale": false, "hidden_channels": null, "dropout": 0.1}

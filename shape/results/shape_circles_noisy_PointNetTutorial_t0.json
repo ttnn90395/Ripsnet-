@@ -1,0 +1,15 @@
+{
+  "dataset": "circles_noisy",
+  "model": "PointNetTutorial",
+  "trial": 0,
+  "num_epochs": 50,
+  "batch_size": 32,
+  "clean_accuracy": 0.8033333333333333,
+  "noisy_accuracy": 0.8033333333333333,
+  "best_val_accuracy": 80.33333333333333,
+  "num_classes": 3,
+  "n_train": 900,
+  "n_test": 300,
+  "n_points": 600,
+  "params": 141763
+}

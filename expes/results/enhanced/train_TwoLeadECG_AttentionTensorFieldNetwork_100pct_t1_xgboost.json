@@ -1,0 +1,1 @@
+{"dataset": "TwoLeadECG", "model": "AttentionTensorFieldNetwork", "fraction_pct": 100, "trial": 1, "n_train_used": 11, "n_train_full": 11, "n_test": 500, "mlp_test_acc": NaN, "xgb_test_acc": 0.74, "classifier": "xgboost", "augment": false, "multi_scale": false, "hidden_channels": null, "dropout": 0.1}

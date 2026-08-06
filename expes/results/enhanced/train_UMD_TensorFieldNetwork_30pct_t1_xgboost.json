@@ -1,0 +1,1 @@
+{"dataset": "UMD", "model": "TensorFieldNetwork", "fraction_pct": 30, "trial": 1, "n_train_used": 5, "n_train_full": 18, "n_test": 144, "mlp_test_acc": NaN, "xgb_test_acc": 0.3333333333333333, "classifier": "xgboost", "augment": false, "multi_scale": false, "hidden_channels": null, "dropout": 0.1}

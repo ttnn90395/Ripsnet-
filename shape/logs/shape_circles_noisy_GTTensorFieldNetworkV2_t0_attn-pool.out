@@ -1,0 +1,8 @@
+shape/train_shape.py: circles_noisy GTTensorFieldNetworkV2 epochs=20 trial=0 bs=32 quick=False
+  Robustness flags: attn_pool
+Device: cpu  AMP: False
+Generating circles_noisy data...
+  Train: 900 samples, Test: 300 samples
+  Classes: 3  Points: 600
+  Model: GTTensorFieldNetworkV2 (90244 params)
+Precomputing geometry...

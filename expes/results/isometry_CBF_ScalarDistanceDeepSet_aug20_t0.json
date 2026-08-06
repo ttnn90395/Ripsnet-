@@ -1,0 +1,1 @@
+{"dataset": "CBF", "model_label": "ScalarDistanceDeepSet", "n_augments": 20, "trial": 0, "n_test": 500, "dim": 3, "xgb_train_acc": 1.0, "accuracy_clean": 0.636, "accuracy_augmented": 0.6342000000000001, "mean_l2_dist": 1.6572690242355748e-07, "std_l2_dist": 2.597090542622027e-07}

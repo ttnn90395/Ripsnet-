@@ -1,0 +1,15 @@
+{
+  "dataset": "shapes3d_8way",
+  "model": "HybridOnEquivariantTensorFieldNetwork",
+  "trial": 1,
+  "num_epochs": 50,
+  "batch_size": 32,
+  "clean_accuracy": 0.7128378378378378,
+  "noisy_accuracy": 0.39864864864864863,
+  "best_val_accuracy": 71.28378378378379,
+  "num_classes": 8,
+  "n_train": 896,
+  "n_test": 296,
+  "n_points": 600,
+  "params": 1863920
+}

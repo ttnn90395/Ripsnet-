@@ -1,0 +1,1 @@
+{"dataset": "ECG5000", "model": "DistanceMatrixRaggedModel", "fraction_pct": 100, "trial": 1, "n_train_used": 250, "n_train_full": 250, "n_test": 500, "mlp_test_acc": NaN, "xgb_test_acc": 0.91, "classifier": "xgboost", "augment": false, "multi_scale": false, "hidden_channels": null, "dropout": 0.1}

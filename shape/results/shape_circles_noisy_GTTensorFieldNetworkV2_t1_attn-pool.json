@@ -1,0 +1,20 @@
+{
+  "dataset": "circles_noisy",
+  "model": "GTTensorFieldNetworkV2",
+  "trial": 1,
+  "num_epochs": 20,
+  "batch_size": 32,
+  "clean_accuracy": 0.9933333333333333,
+  "noisy_accuracy": 0.9933333333333333,
+  "best_val_accuracy": 99.33333333333333,
+  "num_classes": 3,
+  "n_train": 900,
+  "n_test": 300,
+  "n_points": 600,
+  "params": 90244,
+  "noise_aug": false,
+  "dtm_filter": false,
+  "attn_pool": true,
+  "multiscale": false,
+  "pd_fusion": false
+}

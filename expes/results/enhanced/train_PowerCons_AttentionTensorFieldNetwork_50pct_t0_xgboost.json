@@ -1,0 +1,1 @@
+{"dataset": "PowerCons", "model": "AttentionTensorFieldNetwork", "fraction_pct": 50, "trial": 0, "n_train_used": 45, "n_train_full": 90, "n_test": 180, "mlp_test_acc": NaN, "xgb_test_acc": 0.8611111111111112, "classifier": "xgboost", "augment": false, "multi_scale": false, "hidden_channels": null, "dropout": 0.1}

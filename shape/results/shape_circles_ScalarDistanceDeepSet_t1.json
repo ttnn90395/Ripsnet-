@@ -1,0 +1,15 @@
+{
+  "dataset": "circles",
+  "model": "ScalarDistanceDeepSet",
+  "trial": 1,
+  "num_epochs": 100,
+  "batch_size": 32,
+  "clean_accuracy": 0.58,
+  "noisy_accuracy": 0.59,
+  "best_val_accuracy": 57.99999999999999,
+  "num_classes": 3,
+  "n_train": 900,
+  "n_test": 300,
+  "n_points": 600,
+  "params": 75651
+}

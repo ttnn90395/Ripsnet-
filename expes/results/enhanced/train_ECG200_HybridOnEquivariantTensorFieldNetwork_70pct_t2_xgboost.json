@@ -1,0 +1,1 @@
+{"dataset": "ECG200", "model": "HybridOnEquivariantTensorFieldNetwork", "fraction_pct": 70, "trial": 2, "n_train_used": 35, "n_train_full": 50, "n_test": 100, "mlp_test_acc": NaN, "xgb_test_acc": 0.59, "classifier": "xgboost", "augment": false, "multi_scale": false, "hidden_channels": null, "dropout": 0.1}

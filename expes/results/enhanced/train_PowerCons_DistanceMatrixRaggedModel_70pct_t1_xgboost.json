@@ -1,0 +1,1 @@
+{"dataset": "PowerCons", "model": "DistanceMatrixRaggedModel", "fraction_pct": 70, "trial": 1, "n_train_used": 62, "n_train_full": 90, "n_test": 180, "mlp_test_acc": NaN, "xgb_test_acc": 0.7833333333333333, "classifier": "xgboost", "augment": false, "multi_scale": false, "hidden_channels": null, "dropout": 0.1}

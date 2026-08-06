@@ -1,0 +1,1 @@
+{"dataset": "CBF", "model_label": "DistanceMatrixRaggedModel", "fraction_pct": 10, "trial": 0, "n_test": 500, "n_points_full": 126, "n_points_kept": 12, "xgb_train_acc": 1.0, "xgb_test_acc": 0.482}

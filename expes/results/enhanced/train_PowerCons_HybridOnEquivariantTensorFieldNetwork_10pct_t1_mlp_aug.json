@@ -1,0 +1,1 @@
+{"dataset": "PowerCons", "model": "HybridOnEquivariantTensorFieldNetwork", "fraction_pct": 10, "trial": 1, "n_train_used": 9, "n_train_full": 90, "n_test": 180, "mlp_test_acc": 0.5222222222222223, "xgb_test_acc": NaN, "classifier": "mlp", "augment": true, "multi_scale": false, "hidden_channels": null, "dropout": 0.1}

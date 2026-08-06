@@ -1,0 +1,23 @@
+{
+  "dataset": "circles",
+  "model": "PointNet3D",
+  "trial": 0,
+  "num_epochs": 3,
+  "batch_size": 32,
+  "clean_accuracy": 1.0,
+  "noisy_accuracy": 0.42333333333333334,
+  "best_val_accuracy": 100.0,
+  "num_classes": 3,
+  "n_train": 900,
+  "n_test": 300,
+  "n_points": 600,
+  "params": 141763,
+  "noise_aug": false,
+  "dtm_filter": false,
+  "attn_pool": false,
+  "multiscale": false,
+  "pd_fusion": false,
+  "denoise": true,
+  "geom_reg": true,
+  "feat_pd": true
+}

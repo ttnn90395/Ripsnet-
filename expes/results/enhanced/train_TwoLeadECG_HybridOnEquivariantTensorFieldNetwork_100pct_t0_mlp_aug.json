@@ -1,0 +1,1 @@
+{"dataset": "TwoLeadECG", "model": "HybridOnEquivariantTensorFieldNetwork", "fraction_pct": 100, "trial": 0, "n_train_used": 11, "n_train_full": 11, "n_test": 500, "mlp_test_acc": 0.488, "xgb_test_acc": NaN, "classifier": "mlp", "augment": true, "multi_scale": false, "hidden_channels": null, "dropout": 0.1}

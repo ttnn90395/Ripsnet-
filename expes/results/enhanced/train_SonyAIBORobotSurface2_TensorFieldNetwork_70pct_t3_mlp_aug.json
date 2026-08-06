@@ -1,0 +1,1 @@
+{"dataset": "SonyAIBORobotSurface2", "model": "TensorFieldNetwork", "fraction_pct": 70, "trial": 3, "n_train_used": 9, "n_train_full": 13, "n_test": 500, "mlp_test_acc": 0.626, "xgb_test_acc": NaN, "classifier": "mlp", "augment": true, "multi_scale": false, "hidden_channels": null, "dropout": 0.1}

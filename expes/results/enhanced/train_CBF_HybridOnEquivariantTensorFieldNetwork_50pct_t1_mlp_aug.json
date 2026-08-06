@@ -1,0 +1,1 @@
+{"dataset": "CBF", "model": "HybridOnEquivariantTensorFieldNetwork", "fraction_pct": 50, "trial": 1, "n_train_used": 7, "n_train_full": 15, "n_test": 500, "mlp_test_acc": 0.336, "xgb_test_acc": NaN, "classifier": "mlp", "augment": true, "multi_scale": false, "hidden_channels": null, "dropout": 0.1}
