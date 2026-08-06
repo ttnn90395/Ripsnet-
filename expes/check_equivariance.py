@@ -91,6 +91,11 @@ CASES = [
      models.TemporalCrossAttentionTFN(n=3, num_classes=4, max_order=1, hidden_channels=8,
                                       num_layers=1, num_heads=2, transformer_layers=1,
                                       num_rbf=8, k_neighbors=6)),
+    ("GTTFNEncoder",
+     models.GTTFNEncoder(n=3, embedding_dim=8)),
+    ("EquivariantGraphMambaNetwork",
+     models.EquivariantGraphMambaNetwork(n=3, num_classes=4, max_order=1, hidden_channels=8,
+                                         num_layers=2, num_rbf=8, k_neighbors=6)),
     # HybridOnEquivariantTensorFieldNetwork is intentionally excluded: it fuses
     # raw (non-equivariant) point coordinates through HybridTFNClassifier.neq_phi,
     # so its output is rotation-dependent by design.
@@ -148,6 +153,11 @@ CASES_2D = [
      models.TemporalCrossAttentionTFN(n=2, num_classes=4, max_order=1, hidden_channels=8,
                                       num_layers=1, num_heads=2, transformer_layers=1,
                                       num_rbf=8, k_neighbors=6)),
+    ("GTTFNEncoder",
+     models.GTTFNEncoder(n=2, embedding_dim=8)),
+    ("EquivariantGraphMambaNetwork",
+     models.EquivariantGraphMambaNetwork(n=2, num_classes=4, max_order=1, hidden_channels=8,
+                                         num_layers=2, num_rbf=8, k_neighbors=6)),
 ]
 
 
