@@ -36,6 +36,7 @@ from sklearn.preprocessing import LabelEncoder
 import json
 from tqdm import tqdm
 import gc
+import inspect
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT_DIR not in sys.path:
@@ -126,6 +127,9 @@ use_robust_knn   = '--robust-knn' in sys.argv
 use_train_robust_knn = '--train-robust-knn' in sys.argv
 use_dtm_readout  = '--dtm-readout' in sys.argv
 use_norm_readout = '--norm-readout' in sys.argv
+use_consistency  = '--consistency' in sys.argv
+cons_lambda      = 1.0
+run_seed         = 42
 readout_pool     = 'sum'
 for a in sys.argv:
     if a.startswith('--pool='):
@@ -155,6 +159,10 @@ for a in sys.argv:
         robust_alpha = float(a.split('=')[1])
     if a.startswith('--dtm-gamma='):
         robust_gamma = float(a.split('=')[1])
+    if a.startswith('--cons-lambda='):
+        cons_lambda = float(a.split('=')[1])
+    if a.startswith('--seed='):
+        run_seed = int(a.split('=')[1])
 best_on = 'clean'
 for a in sys.argv:
     if a.startswith('--best-on='):
@@ -165,9 +173,10 @@ for a in sys.argv:
 print(f"shape/train_shape.py: {dataset_name} {model_name} epochs={num_epochs} trial={trial} bs={batch_size} quick={quick_mode} best_on={best_on}")
 if any([use_noise_aug, use_dtm_filter, use_attn_pool, use_multiscale, use_pd_fusion,
         use_denoise, use_geom_reg, use_feat_pd, use_robust_knn, use_dtm_readout,
-        use_train_robust_knn]):
+        use_train_robust_knn, use_consistency]):
     flags = []
     if use_noise_aug:  flags.append(f'noise_aug(r={noise_rate},s={noise_scale},frac={aug_frac})')
+    if use_consistency: flags.append(f'consistency(r={noise_rate},s={noise_scale},lam={cons_lambda})')
     if use_dtm_filter: flags.append(f'dtm_filter(keep={dtm_keep},m={dtm_m})')
     if use_robust_knn: flags.append(f'robust_knn(alpha={robust_alpha})')
     if use_train_robust_knn: flags.append(f'train_robust_knn(alpha={robust_alpha})')
@@ -181,6 +190,14 @@ if any([use_noise_aug, use_dtm_filter, use_attn_pool, use_multiscale, use_pd_fus
     if use_geom_reg:   flags.append('geom_reg')
     if use_feat_pd:    flags.append('feat_pd')
     print(f"  Robustness flags: {', '.join(flags)}")
+
+# Deterministic data + init for reproducible trials (same seed → same
+# datasets across runs, so treatment effects are not confounded by RNG).
+np.random.seed(run_seed)
+torch.manual_seed(run_seed)
+torch.cuda.manual_seed_all(run_seed)
+import random
+random.seed(run_seed)
 
 # -------------------------------------------------------------------------
 # Device
@@ -623,6 +640,54 @@ def forward_batch(model, batch_data, mname, geom=None, pd_batch=None):
 
     return logits
 
+
+def encode_descriptors(model, batch_data, geom):
+    """Pooled invariant descriptors for the TFN encoder of *model*.
+
+    Returns (B, inv_dim) tensors — the pre-classifier readout of the
+    underlying equivariant network — used as the consistency anchor between
+    clean and corrupted views.  Returns None when the encoder does not expose
+    ``_encode_batch(return_descriptors)`` (caller then falls back to logit
+    consistency).
+    """
+    inner = _find_encoder(model)
+    enc = getattr(inner, '_encode_batch', None)
+    if enc is None or 'return_descriptors' not in inspect.signature(enc).parameters:
+        return None
+    _move_basis_tensors(inner, device)
+    if isinstance(geom, dict) and geom.get('uniform', False):
+        return inner._encode_batch(
+            torch.stack(batch_data),
+            precomputed_geom=(geom['rbf'], geom['gt_edge'], geom['nbr_idx']),
+            return_descriptors=True)
+    geoms = geom['list'] if isinstance(geom, dict) else geom
+    descs = []
+    for x, (r, g, n) in zip(batch_data, geoms):
+        r = r.squeeze(0) if r.ndim == 4 else r
+        g = g.squeeze(0) if g.ndim == 4 else g
+        n = n.squeeze(0) if n.ndim == 3 else n
+        descs.append(inner._encode_single(x, precomputed_geom=(r, g, n)))
+    return torch.stack(descs)
+
+
+def corrupt_batch_tfn(batch_data, inner, k, seed):
+    """Corrupted copy of a TFN batch with on-the-fly recomputed geometry.
+
+    Returns (corr_data, corr_geom_list); geometry is a per-sample list of
+    (rbf, gt_edge, nbr_idx) tuples matching the batch order.
+    """
+    corr_data = augment_with_outliers(
+        [x.clone() for x in batch_data],
+        corruption_rate=noise_rate, scale=noise_scale, seed=seed)
+    from gt_tfn_layer import knn_geometry
+    geom_items = []
+    for pc in corr_data:
+        r, g, n = knn_geometry(pc, inner.rbf, inner.gt_basis, k,
+                               robust_alpha=robust_alpha if (use_robust_knn or use_train_robust_knn) else 0.0,
+                               robust_m=dtm_m)
+        geom_items.append((r.detach(), g.detach(), n.detach()))
+    return corr_data, geom_items
+
 # -------------------------------------------------------------------------
 # Training loop (following expes patterns)
 # -------------------------------------------------------------------------
@@ -720,6 +785,27 @@ for epoch in range(num_epochs):
         if pd_fusion is not None or feat_pd_fusion is not None:
             pd_batch = [train_pd[i] for i in idx]
 
+        # Consistency training: corrupt a full-batch copy of THIS clean batch.
+        # The corrupted view receives no CE signal — only the clean view
+        # supervises the classifier, while the encoder is pulled to make the
+        # corrupted cloud's representation match the clean one.  This targets
+        # the class-collapse seen with pure noise-aug (corrupted clouds were
+        # taught to classify as their true class and the classifier merged
+        # them instead).  For TFN encoders exposing descriptor readouts we
+        # match pooled descriptors (invariance in feature space); otherwise we
+        # fall back to logit-consistency on a freshly-corrupted cloud.
+        if use_consistency:
+            seed = epoch * 1000 + start
+            corr_geom = None
+            if model_name in TFN_MODELS and not _is_hybrid(model):
+                inner = _find_encoder(model)
+                k = getattr(inner, 'k_neighbors', 16)
+                corr_data, corr_geom = corrupt_batch_tfn(batch_data, inner, k, seed=seed)
+            else:
+                corr_data = augment_with_outliers(
+                    [x.clone() for x in batch_data],
+                    corruption_rate=noise_rate, scale=noise_scale, seed=seed)
+
         optimizer.zero_grad(set_to_none=True)
         with amp.autocast(device_type=device.type, enabled=USE_AMP):
             output = forward_batch(model, batch_data, model_name,
@@ -735,6 +821,19 @@ for epoch in range(num_epochs):
                 loss = total_loss
             else:
                 loss = criterion(output, batch_targets)
+
+            if use_consistency:
+                desc_corr = None
+                if corr_geom is not None:
+                    desc_clean = encode_descriptors(model, batch_data, batch_geom)
+                    desc_corr = encode_descriptors(model, corr_data, corr_geom)
+                if desc_corr is not None:
+                    cons_term = 1.0 - F.cosine_similarity(
+                        desc_clean.detach(), desc_corr, dim=-1).mean()
+                else:
+                    out_corr = forward_batch(model, corr_data, model_name, geom=None)
+                    cons_term = F.mse_loss(output.detach(), out_corr)
+                loss = loss + cons_lambda * cons_term
 
         if torch.isfinite(loss):
             scaler.scale(loss).backward()
@@ -831,6 +930,11 @@ with torch.no_grad():
         noisy_preds.append(out.argmax(1).cpu())
 noisy_acc = accuracy_score(y_noisy, torch.cat(noisy_preds).numpy())
 
+noisy_report = classification_report(
+    y_noisy, torch.cat(noisy_preds).numpy(), output_dict=True, zero_division=0)
+test_report = classification_report(
+    y_test, torch.cat(test_preds).numpy(), output_dict=True, zero_division=0)
+
 print(f"\n{'='*60}")
 print(f"Results: {model_name} on {dataset_name}")
 print(f"{'='*60}")
@@ -850,20 +954,25 @@ result = {
     'dataset': dataset_name,
     'model': model_name,
     'trial': trial,
+    'seed': run_seed,
     'num_epochs': num_epochs,
     'batch_size': batch_size,
     'clean_accuracy': float(clean_acc),
     'noisy_accuracy': float(noisy_acc),
     'best_val_accuracy': float(best_val_acc),
+    'noisy_report': noisy_report,
+    'test_report': test_report,
     'num_classes': num_classes,
     'n_train': len(data_train),
     'n_test': len(data_test),
     'n_points': N_POINTS,
     'params': sum(p.numel() for p in model.parameters()),
     'noise_aug': use_noise_aug,
-    'noise_rate': noise_rate if use_noise_aug else None,
-    'noise_scale': noise_scale if use_noise_aug else None,
+    'noise_rate': noise_rate if (use_noise_aug or use_consistency) else None,
+    'noise_scale': noise_scale if (use_noise_aug or use_consistency) else None,
     'aug_frac': aug_frac if use_noise_aug else None,
+    'consistency': use_consistency,
+    'cons_lambda': cons_lambda if use_consistency else None,
     'dtm_filter': use_dtm_filter,
     'dtm_keep': dtm_keep if use_dtm_filter else None,
     'dtm_m': dtm_m if use_dtm_filter else None,
@@ -890,6 +999,8 @@ if use_noise_aug:
     flag_suffix += "_noise-aug"
     if aug_frac != 1.0:
         flag_suffix += f"-frac{aug_frac}"
+if use_consistency:
+    flag_suffix += f"_consistency-lam{cons_lambda}"
 if use_dtm_filter:
     flag_suffix += "_dtm-filter"
 if use_multiscale:
@@ -912,6 +1023,7 @@ if readout_pool != 'sum':
     flag_suffix += f"_pool-{readout_pool}"
 if use_norm_readout:
     flag_suffix += "_norm-readout"
+flag_suffix += f"-seed{run_seed}"
 
 out_path = f"results/shape_{dataset_name}_{model_name}_t{trial}{flag_suffix}.json"
 with open(out_path, 'w') as f:
