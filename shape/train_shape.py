@@ -126,6 +126,7 @@ use_feat_pd      = '--feat-pd' in sys.argv
 use_robust_knn   = '--robust-knn' in sys.argv
 use_train_robust_knn = '--train-robust-knn' in sys.argv
 use_dtm_readout  = '--dtm-readout' in sys.argv
+use_train_dtm_readout = '--train-dtm-readout' in sys.argv
 use_norm_readout = '--norm-readout' in sys.argv
 use_consistency  = '--consistency' in sys.argv
 cons_lambda      = 1.0
@@ -142,6 +143,7 @@ dtm_keep         = 0.8
 dtm_m            = 10
 robust_alpha     = 1.0
 robust_gamma     = 2.0
+robust_thr       = 1.5
 for a in sys.argv:
     if a.startswith('--noise-rate='):
         noise_rate = float(a.split('=')[1])
@@ -159,6 +161,8 @@ for a in sys.argv:
         robust_alpha = float(a.split('=')[1])
     if a.startswith('--dtm-gamma='):
         robust_gamma = float(a.split('=')[1])
+    if a.startswith('--dtm-thr='):
+        robust_thr = float(a.split('=')[1])
     if a.startswith('--cons-lambda='):
         cons_lambda = float(a.split('=')[1])
     if a.startswith('--seed='):
@@ -173,7 +177,7 @@ for a in sys.argv:
 print(f"shape/train_shape.py: {dataset_name} {model_name} epochs={num_epochs} trial={trial} bs={batch_size} quick={quick_mode} best_on={best_on}")
 if any([use_noise_aug, use_dtm_filter, use_attn_pool, use_multiscale, use_pd_fusion,
         use_denoise, use_geom_reg, use_feat_pd, use_robust_knn, use_dtm_readout,
-        use_train_robust_knn, use_consistency]):
+        use_train_dtm_readout, use_consistency]):
     flags = []
     if use_noise_aug:  flags.append(f'noise_aug(r={noise_rate},s={noise_scale},frac={aug_frac})')
     if use_consistency: flags.append(f'consistency(r={noise_rate},s={noise_scale},lam={cons_lambda})')
@@ -181,6 +185,7 @@ if any([use_noise_aug, use_dtm_filter, use_attn_pool, use_multiscale, use_pd_fus
     if use_robust_knn: flags.append(f'robust_knn(alpha={robust_alpha})')
     if use_train_robust_knn: flags.append(f'train_robust_knn(alpha={robust_alpha})')
     if use_dtm_readout: flags.append(f'dtm_readout(m={dtm_m},gamma={robust_gamma})')
+    if use_train_dtm_readout: flags.append(f'train_dtm_readout(m={dtm_m},thr={robust_thr},gamma={robust_gamma})')
     if readout_pool != 'sum': flags.append(f'pool={readout_pool}')
     if use_norm_readout: flags.append('norm_readout')
     if use_attn_pool:  flags.append('attn_pool')
@@ -498,12 +503,25 @@ train_geom = precompute_geom(model, train_in)
 test_geom  = precompute_geom(model, test_in)
 noisy_geom = precompute_geom(model, noisy_in)
 
-if use_dtm_readout:
+if use_dtm_readout or use_train_dtm_readout:
     inner = _unwrap_tfn(model)
-    inner.robust_readout = False
+    if use_train_dtm_readout:
+        # Learned variant: keep the DTM soft-cap readout ON during training so
+        # the thr/gamma parameters are adapted end-to-end to the data.
+        inner.robust_readout = True
+    else:
+        # Eval-only: robust readout is OFF during training, ON at final inference.
+        inner.robust_readout = False
     inner.robust_m       = dtm_m
     inner.robust_gamma   = robust_gamma
-    print(f"  DTM-robust readout enabled for final inference (m={dtm_m}, gamma={robust_gamma}); OFF during training")
+    if hasattr(inner, 'dtm_gamma'):
+        with torch.no_grad():
+            inner.dtm_gamma.data.fill_(robust_gamma)
+            inner.dtm_thr.data.fill_(robust_thr)
+    if use_train_dtm_readout:
+        print(f"  DTM-robust readout: trained end-to-end (m={dtm_m}, thr={robust_thr}, gamma={robust_gamma}); ON during training")
+    else:
+        print(f"  DTM-robust readout enabled for final inference (m={dtm_m}, gamma={robust_gamma}); OFF during training")
 if readout_pool != 'sum':
     inner = _unwrap_tfn(model)
     inner.readout_pool = readout_pool
@@ -896,7 +914,7 @@ if best_model_state is not None:
 
 # Enable DTM-robust readout for final inference (trained unweighted on clean
 # clouds; the soft DTM mask suppresses outlier pollution at inference time).
-if use_dtm_readout:
+if use_dtm_readout or use_train_dtm_readout:
     _unwrap_tfn(model).robust_readout = True
     print("  DTM-robust readout ENABLED for final evaluation")
 
@@ -980,8 +998,10 @@ result = {
     'robust_alpha': robust_alpha if use_robust_knn else None,
     'train_robust_knn': use_train_robust_knn,
     'dtm_readout': use_dtm_readout,
-    'dtm_readout_m': dtm_m if use_dtm_readout else None,
-    'dtm_readout_gamma': robust_gamma if use_dtm_readout else None,
+    'train_dtm_readout': use_train_dtm_readout,
+    'dtm_readout_m': dtm_m if (use_dtm_readout or use_train_dtm_readout) else None,
+    'dtm_readout_gamma': robust_gamma if (use_dtm_readout or use_train_dtm_readout) else None,
+    'dtm_readout_thr': robust_thr if use_train_dtm_readout else None,
     'readout_pool': readout_pool,
     'norm_readout': use_norm_readout,
     'attn_pool': use_attn_pool,
@@ -1019,6 +1039,8 @@ if use_train_robust_knn:
     flag_suffix += "_train-robust-knn"
 if use_dtm_readout:
     flag_suffix += "_dtm-readout"
+if use_train_dtm_readout:
+    flag_suffix += f"_train-dtm-readout-thr{robust_thr}-gam{robust_gamma}"
 if readout_pool != 'sum':
     flag_suffix += f"_pool-{readout_pool}"
 if use_norm_readout:

@@ -671,6 +671,7 @@ class GTTensorFieldNetwork(nn.Module):
         robust_readout:  bool  = False,
         robust_m:        int   = 10,
         robust_gamma:    float = 4.0,
+        robust_thr:      float = 1.5,
         readout_pool:    str   = 'sum',
         norm_readout:    bool  = False,
     ):
@@ -686,6 +687,11 @@ class GTTensorFieldNetwork(nn.Module):
         self.use_attention_pool = use_attention_pool
         self.robust_readout = robust_readout
         self.robust_m       = robust_m
+        # Learned soft-cap parameters of the DTM readout (used when
+        # robust_readout is on; trainable end-to-end, so the model can adapt
+        # the outlier-suppression cutoff instead of using the hand-set init).
+        self.dtm_thr        = nn.Parameter(torch.tensor(float(robust_thr)))
+        self.dtm_gamma      = nn.Parameter(torch.tensor(float(robust_gamma)))
         self.robust_gamma   = robust_gamma
         self.readout_pool   = readout_pool
         self.norm_readout   = norm_readout
@@ -844,7 +850,8 @@ class GTTensorFieldNetwork(nn.Module):
         if self.norm_readout:
             node_inv = node_inv / node_inv.norm(dim=-1, keepdim=True).clamp_min(1e-8)
         if self.robust_readout:
-            w = dtm_readout_weights(pos, m=self.robust_m, gamma=self.robust_gamma)  # (B, N)
+            w = dtm_readout_weights(pos, m=self.robust_m,
+                                    thr=self.dtm_thr, gamma=self.dtm_gamma)  # (B, N)
             node_inv = w.unsqueeze(-1) * node_inv
         if self._attn_pool is not None:
             w = self._attn_pool(node_inv).squeeze(-1)  # (B, N)
@@ -917,7 +924,8 @@ class GTTensorFieldNetwork(nn.Module):
         if self.norm_readout:
             node_inv = node_inv / node_inv.norm(dim=-1, keepdim=True).clamp_min(1e-8)
         if self.robust_readout:
-            w = dtm_readout_weights(pos, m=self.robust_m, gamma=self.robust_gamma)  # (N,)
+            w = dtm_readout_weights(pos, m=self.robust_m,
+                                    thr=self.dtm_thr, gamma=self.dtm_gamma)  # (N,)
             node_inv = w.unsqueeze(-1) * node_inv
         if self._attn_pool is not None:
             w = self._attn_pool(node_inv).squeeze(-1)  # (N,)
