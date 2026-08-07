@@ -2,7 +2,7 @@
 #SBATCH --job-name=tfn_enh
 #SBATCH --output=slurm_logs/enhanced_%A_%a.out
 #SBATCH --error=slurm_logs/enhanced_%A_%a.err
-#SBATCH --array=0-2879
+#SBATCH --array=0-3839
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --time=4:00:00
@@ -19,8 +19,11 @@ PCT=$(echo "$LINE" | awk '{print $4}')
 TRIAL=$(echo "$LINE" | awk '{print $5}')
 CLF=$(echo "$LINE" | awk '{print $6}')
 AUG=$(echo "$LINE" | awk '{print $7}')
+MS=$(echo "$LINE" | awk '{print $8}')
+NSC=$(echo "$LINE" | awk '{print $9}')
+SF=$(echo "$LINE" | awk '{print $10}')
 
-echo "=== Job $SLURM_ARRAY_TASK_ID: $DS $MODEL ${PCT}% trial=$TRIAL clf=$CLF aug=$AUG ==="
+echo "=== Job $SLURM_ARRAY_TASK_ID: $DS $MODEL ${PCT}% trial=$TRIAL clf=$CLF aug=$AUG ms=$MS ==="
 echo "Node: $(hostname)"
 echo "Time: $(date)"
 
@@ -30,7 +33,11 @@ AUG_TAG=""
 if [ "$AUG" = "--augment" ]; then
     AUG_TAG="_aug"
 fi
-RESULT="results/enhanced/train_${DS}_${MODEL}_${PCT}pct_t${TRIAL}_${CLF}${AUG_TAG}.json"
+MS_TAG=""
+if [ "$MS" = "--multi-scale" ]; then
+    MS_TAG="_ms"
+fi
+RESULT="results/enhanced/train_${DS}_${MODEL}_${PCT}pct_t${TRIAL}_${CLF}${AUG_TAG}${MS_TAG}.json"
 if [ -f "$RESULT" ]; then
     echo "Result already exists, skipping"
     exit 0
@@ -44,6 +51,15 @@ elif [ "$CLF" = "xgboost" ]; then
 fi
 if [ "$AUG" = "--augment" ]; then
     EXTRA_ARGS="$EXTRA_ARGS --augment"
+fi
+if [ "$MS" = "--multi-scale" ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --multi-scale"
+    if [ "$NSC" != "-" ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --num-scales $NSC"
+    fi
+    if [ "$SF" != "-" ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --scale-factor $SF"
+    fi
 fi
 
 python3 train_enhanced.py "$DS" "$MODEL" "$PCT" "$TRIAL" 100 try1 $EXTRA_ARGS

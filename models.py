@@ -536,6 +536,40 @@ class RipsPointNet(nn.Module):
         return self.fusion(combined)
 
 
+class SequenceCNN(nn.Module):
+    """Length-agnostic 1D CNN over one-hot DNA: (..., 4, L) -> (..., d_seq).
+
+    Shared between enhancer (L=2000) and promoter (L=1000) sequences so a
+    single motif detector serves both; global average pooling makes the
+    feature extractor insensitive to sequence length. Used by AttnRipsPointNet
+    when `use_seq=True` (EPIRips sequence incorporation).
+    """
+
+    def __init__(self, d_seq: int = 32, conv_dims=(32, 64, 64), kernel: int = 15,
+                 dropout: float = 0.1, activation: str = 'gelu'):
+        super().__init__()
+        blocks = []
+        in_ch = 4
+        for i, out_ch in enumerate(conv_dims):
+            k = kernel if i == 0 else 9
+            blocks.append(nn.Conv1d(in_ch, out_ch, kernel_size=k, padding=k // 2, bias=False))
+            blocks.append(nn.BatchNorm1d(out_ch))
+            blocks.append(_act(activation))
+            blocks.append(nn.MaxPool1d(kernel_size=2, stride=2))
+            in_ch = out_ch
+        blocks.append(nn.Conv1d(in_ch, in_ch, kernel_size=1))
+        self.blocks = nn.Sequential(*blocks)
+        self.pool = nn.AdaptiveAvgPool1d(1)
+        self.proj = nn.Linear(in_ch, d_seq)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (..., 4, L) — one-hot; reshape to (T, 4, L), restore leading dims
+        lead = x.shape[:-2]
+        x = x.reshape(-1, x.shape[-2], x.shape[-1]).float()
+        h = self.pool(self.blocks(x)).squeeze(-1)
+        return self.proj(h).view(*lead, -1)
+
+
 class AttnRipsPointNet(nn.Module):
     """Enhancer-context model for per-enhancer attribution (EPIRips).
 
@@ -547,6 +581,13 @@ class AttnRipsPointNet(nn.Module):
 
     The attention weights from the pooling layer are the per-enhancer
     importance scores; `forward(..., return_attn=True)` returns them.
+
+    Optional sequence incorporation (`use_seq=True`):
+      a shared SequenceCNN encodes each enhancer's 2 kb one-hot DNA to a
+      d_seq-dim embedding, concatenated to the point features (phi input
+      becomes input_dim + d_seq); the promoter's 1 kb one-hot is encoded by
+      the same CNN and projected into a per-gene attention query vector that
+      replaces the shared learned query (EPInformer's promoter-query insight).
 
     Config mapping (used by benchmark_improve.py):
       attn          : pooling='attn',  num_layers=0, d=256
@@ -565,7 +606,10 @@ class AttnRipsPointNet(nn.Module):
                  fusion_dims: Optional[List[int]] = None,
                  use_gate: bool = False, gate_dims=(32, 16),
                  use_pd_stats: bool = False, pd_stats_dims=(16, 32),
-                 dropout: float = 0.1, activation: str = 'gelu'):
+                 use_seq: bool = False, d_seq: int = 32,
+                 seq_conv_dims=(32, 64, 64), seq_kernel: int = 15,
+                 dropout: float = 0.1, activation: str = 'gelu',
+                 max_pos: int = 256):
         super().__init__()
         assert pooling in ('attn', 'mhead')
         if fusion_dims is None:
@@ -576,15 +620,34 @@ class AttnRipsPointNet(nn.Module):
         self.use_count = use_count
         self.use_gate = use_gate
         self.use_pd_stats = use_pd_stats
+        self.use_seq = use_seq
+        self.d_seq = d_seq
         self.max_pd_pairs = max_pd_pairs
 
         if phi_dims is None:
             phi_dims = [64]
-        self.phi_layers = _build_mlp([input_dim] + list(phi_dims) + [d], activation=activation,
+        # point_dim grows by d_seq when enhancer DNA is concatenated in
+        self.point_dim = input_dim + (d_seq if use_seq else 0)
+        self.phi_layers = _build_mlp([self.point_dim] + list(phi_dims) + [d], activation=activation,
                                      norm='ln', dropout=dropout)
         self.d = d
+        if use_seq:
+            self.seq_enc = SequenceCNN(d_seq=d_seq, conv_dims=list(seq_conv_dims),
+                                       kernel=seq_kernel, dropout=dropout,
+                                       activation=activation)
+            if pooling == 'mhead':
+                self.query_proj = _build_mlp([d_seq, d, num_heads * d],
+                                             activation=activation, norm='ln',
+                                             dropout=dropout)
+            else:
+                self.query_proj = _build_mlp([d_seq, d, d],
+                                             activation=activation, norm='ln',
+                                             dropout=dropout)
+        else:
+            self.seq_enc = None
+            self.query_proj = None
         if num_layers > 0:
-            self.pos_emb = nn.Embedding(256, d)
+            self.pos_emb = nn.Embedding(max_pos, d)
             layer = nn.TransformerEncoderLayer(d_model=d, nhead=num_heads,
                                                dim_feedforward=ff, dropout=dropout,
                                                batch_first=True, activation=activation)
@@ -605,7 +668,7 @@ class AttnRipsPointNet(nn.Module):
             # feature magnitude (activity/contact), the readout signal that
             # fixes the 100-500kb bins. One bias per head for mhead pooling.
             gate_out = num_heads if pooling == 'mhead' else 1
-            self.gate_net = _build_mlp([input_dim] + list(gate_dims) + [gate_out],
+            self.gate_net = _build_mlp([self.point_dim] + list(gate_dims) + [gate_out],
                                        activation=activation, norm='ln',
                                        final_activation=None, dropout=dropout)
         else:
@@ -650,6 +713,8 @@ class AttnRipsPointNet(nn.Module):
     def forward(self, batch: List[torch.Tensor],
                 precomputed_pd: Optional[List[torch.Tensor]] = None,
                 pd_stats: Optional[torch.Tensor] = None,
+                enh_ohe: Optional[torch.Tensor] = None,
+                prom_ohe: Optional[torch.Tensor] = None,
                 return_attn: bool = False):
         if len(batch) == 0:
             return torch.empty(0, _last_out(self.fusion),
@@ -662,7 +727,17 @@ class AttnRipsPointNet(nn.Module):
         for i, pc in enumerate(batch):
             mask[i, :len(pc)] = True
 
-        x = self.phi_layers(padded.reshape(B * N, -1)).reshape(B, N, -1)
+        if self.use_seq:
+            assert enh_ohe is not None and prom_ohe is not None, \
+                "use_seq=True requires enh_ohe and prom_ohe"
+            # enh_ohe: (B, N, 4, L_enh) bool → (B, N, d_seq); zero out padding
+            seq_emb = self.seq_enc(enh_ohe.to(device))
+            seq_emb = seq_emb * mask.unsqueeze(-1)
+            point_in = torch.cat([padded, seq_emb], dim=-1)
+        else:
+            point_in = padded
+
+        x = self.phi_layers(point_in.reshape(B * N, -1)).reshape(B, N, -1)
         x = x * mask.unsqueeze(-1)
 
         if self.transformer is not None:
@@ -671,19 +746,30 @@ class AttnRipsPointNet(nn.Module):
             x = x * mask.unsqueeze(-1)
 
         if self.pooling == 'mhead':
-            scores = torch.einsum('bnd,hd->bnh', x, self.attn_vectors)
+            if self.use_seq and prom_ohe is not None:
+                # gene-specific query from the promoter sequence
+                prom_emb = self.seq_enc(prom_ohe.to(device))          # (B, d_seq)
+                query = self.query_proj(prom_emb).view(B, self.num_heads, -1)
+            else:
+                query = self.attn_vectors.unsqueeze(0).expand(B, -1, -1)
+            scores = torch.einsum('bnd,bhd->bnh', x, query)
             if self.use_gate:
                 # per-head logit bias from input features (absolute scale)
-                gate_bias = self.gate_net(padded).reshape(B, N, self.num_heads)
+                gate_bias = self.gate_net(point_in).reshape(B, N, self.num_heads)
                 scores = scores + gate_bias
             scores = scores.masked_fill(~mask.unsqueeze(-1), -1e9)
             w = torch.softmax(scores, dim=1)
             pooled = torch.einsum('bnh,bnd->bhd', w, x).reshape(B, self.num_heads * x.shape[-1])
             attn_weights = w.mean(dim=-1)
         else:
-            attn_scores = x @ self.attn_vector
+            if self.use_seq and prom_ohe is not None:
+                prom_emb = self.seq_enc(prom_ohe.to(device))          # (B, d_seq)
+                attn_vector = self.query_proj(prom_emb).unsqueeze(1)  # (B, 1, d)
+                attn_scores = torch.einsum('bnd,bnd->bn', x, attn_vector.expand(-1, N, -1))
+            else:
+                attn_scores = x @ self.attn_vector
             if self.use_gate:
-                gate_bias = self.gate_net(padded).reshape(B, N)
+                gate_bias = self.gate_net(point_in).reshape(B, N)
                 attn_scores = attn_scores + gate_bias
             attn_scores = attn_scores.masked_fill(~mask, -1e9)
             attn_weights = torch.softmax(attn_scores, dim=1)

@@ -23,6 +23,13 @@ Options:
     --ensemble FILE [FILE ...]   Ensemble mode: average predictions from checkpoints
 """
 import os, sys, json, argparse
+
+# torch and xgboost bundle conflicting OpenMP runtimes; loading both in one
+# process segfaults (pthread_mutex_init failed). These env vars must be set
+# before either library is imported.
+os.environ.setdefault('OMP_NUM_THREADS', '1')
+os.environ.setdefault('KMP_DUPLICATE_LIB_OK', 'TRUE')
+
 import numpy as np
 import dill as pck
 import torch
@@ -47,7 +54,7 @@ from models import (
     GraphMambaTensorFieldNetwork,
 )
 from tfn_enhancements import (
-    MLPClassifierHead, PointCloudAugmenter,
+    MLPClassifierHead, MultiScalePersistenceEncoder, PointCloudAugmenter,
 )
 
 os.makedirs('results', exist_ok=True)
@@ -68,9 +75,11 @@ parser.add_argument('--classifier', type=str, default='mlp',
 parser.add_argument('--augment', action='store_true',
                     help='Enable data augmentation during training')
 parser.add_argument('--multi-scale', action='store_true',
-                    help='Use multi-scale persistence diagrams')
+                    help='Use multi-scale point clouds (subsample at several scales, '
+                         'concatenate per-scale PVs before classification)')
 parser.add_argument('--scale-factor', type=float, default=0.5,
-                    help='Scale factor for multi-scale persistence')
+                    help='Scale factor for multi-scale: scale s keeps fraction '
+                         'scale_factor**s of the points')
 parser.add_argument('--num-scales', type=int, default=3,
                     help='Number of persistence scales')
 parser.add_argument('--hidden-channels', type=int, default=None,
@@ -249,7 +258,12 @@ def build_backbone(name, hp):
 backbone = build_backbone(model_name, _hp)
 
 # Wrap with enhancements
-if model_name in TFN_MODELS:
+if use_multiscale:
+    model = MultiScalePersistenceEncoder(
+        backbone, num_scales=args.num_scales, num_classes=n_classes,
+        classifier_dims=[256, 128], dropout=args.dropout, pv_dim=output_dim,
+    ).to(device)
+elif model_name in TFN_MODELS:
     model = MLPClassifierHead(
         backbone, num_classes=n_classes,
         classifier_dims=[256, 128, 64],
@@ -266,45 +280,68 @@ else:
     ).to(device)
 
 n_params = sum(p.numel() for p in model.parameters())
-print(f"  Model: {model_name} + MLPHead ({n_params} params)")
+tag = "MultiScale" if use_multiscale else "MLPHead"
+print(f"  Model: {model_name} + {tag} ({n_params} params)")
 
 # ─── Prepare inputs per model type ──────────────────────────────────────────
+def _make_scales(x, num_scales, scale_factor, seed=0):
+    """Return a list of `num_scales` subsampled versions of cloud x.
+
+    Scale s keeps a fraction `scale_factor**s` of the points, so scale 0 is
+    the full cloud and each subsequent scale coarsens it. Used as the
+    multi-scale input to MultiScalePersistenceEncoder.
+    """
+    n = x.shape[0]
+    rng = np.random.RandomState(seed)
+    scales = []
+    for s in range(num_scales):
+        frac = scale_factor ** s
+        keep_n = max(3, int(round(n * frac)))
+        if keep_n >= n:
+            scales.append(x)
+        else:
+            idx = np.sort(rng.choice(n, size=keep_n, replace=False))
+            scales.append(x[idx])
+    return scales
+
+
+def _prepare_single(x):
+    """Transform a single cloud to the input format this model expects."""
+    if model_name in TFN_MODELS:
+        return torch.cat([x, x.new_zeros(x.shape[0], 1)], dim=1) \
+            if x.shape[1] == 2 else x
+    if model_name in ('PointNet3D', 'PointNetTutorial'):
+        nc = 3 if model_name == 'PointNet3D' else 2
+        xa = x.cpu().numpy()
+        if xa.shape[1] < nc:
+            xa = np.concatenate([xa, np.zeros((xa.shape[0], nc - xa.shape[1]))], axis=1)
+        else:
+            xa = xa[:, :nc]
+        return torch.FloatTensor(xa).to(device)
+    if model_name in ('ScalarDistanceDeepSet', 'DistanceMatrixRaggedModel'):
+        a = x.cpu().numpy()
+        m = np.linalg.norm(a[:, None] - a[None], axis=-1)
+        return torch.FloatTensor(m).to(device)
+    if model_name == 'ScalarInputMLP':
+        a = x.cpu().numpy()
+        m = np.linalg.norm(a[:, None] - a[None], axis=-1)
+        return torch.FloatTensor([[m.mean()]]).to(device)
+    if model_name == 'MultiInputModel':
+        a = x.cpu().numpy()
+        m = np.linalg.norm(a[:, None] - a[None], axis=-1)
+        return (x, torch.FloatTensor([[m.mean()]]).to(device))
+    return x
+
+
 def prepare(data_list, augment=False):
     if augment and augmenter is not None:
         data_list = [augmenter(x) for x in data_list]
 
-    if model_name in TFN_MODELS:
-        return [torch.cat([x, x.new_zeros(x.shape[0], 1)], dim=1)
-                if x.shape[1] == 2 else x for x in data_list]
-    if model_name in ('PointNet3D', 'PointNetTutorial'):
-        nc = 3 if model_name == 'PointNet3D' else 2
-        return [torch.FloatTensor(
-            np.concatenate([x.cpu().numpy(),
-                           np.zeros((x.shape[0], nc - x.shape[1]))], axis=1)
-            if x.shape[1] < nc else x.cpu().numpy()[:, :nc]).to(device)
+    if use_multiscale:
+        # Each sample becomes a list of `num_scales` clouds (one per scale).
+        return [[_prepare_single(sc) for sc in _make_scales(x, args.num_scales, args.scale_factor)]
                 for x in data_list]
-    if model_name in ('ScalarDistanceDeepSet', 'DistanceMatrixRaggedModel'):
-        out = []
-        for x in data_list:
-            a = x.cpu().numpy()
-            m = np.linalg.norm(a[:, None] - a[None], axis=-1)
-            out.append(torch.FloatTensor(m).to(device))
-        return out
-    if model_name == 'ScalarInputMLP':
-        out = []
-        for x in data_list:
-            a = x.cpu().numpy()
-            m = np.linalg.norm(a[:, None] - a[None], axis=-1)
-            out.append(torch.FloatTensor([[m.mean()]]).to(device))
-        return out
-    if model_name == 'MultiInputModel':
-        out = []
-        for x in data_list:
-            a = x.cpu().numpy()
-            m = np.linalg.norm(a[:, None] - a[None], axis=-1)
-            out.append((x, torch.FloatTensor([[m.mean()]]).to(device)))
-        return out
-    return data_list
+    return [_prepare_single(x) for x in data_list]
 
 
 train_in = prepare(data_train_t)
@@ -366,9 +403,14 @@ def precompute_geom(model, data_list):
         return None
 
 
-# Precompute geometry using the backbone (not the MLP wrapper)
-train_geom = precompute_geom(model, train_in)
-test_geom = precompute_geom(model, test_in)
+# Precompute geometry using the backbone (not the MLP wrapper).
+# Multi-scale inputs are subsampled per scale, so precomputed geometry would
+# be stale — let the encoder compute geometry internally instead.
+if use_multiscale:
+    train_geom = test_geom = None
+else:
+    train_geom = precompute_geom(model, train_in)
+    test_geom = precompute_geom(model, test_in)
 
 
 def get_geom(g, bix):
@@ -382,8 +424,28 @@ def get_geom(g, bix):
     return [g['list'][i] for i in bix]
 
 
+def _forward_backbone(scale_batch):
+    """Forward one scale's batch through the backbone (geometry internal)."""
+    backbone_m = getattr(model, 'backbone', model)
+    if model_name == 'MultiInputModel':
+        return backbone_m([x[0] for x in scale_batch],
+                          torch.cat([x[1] for x in scale_batch]))
+    if model_name == 'ScalarInputMLP':
+        return backbone_m(torch.cat([x.reshape(1, -1) for x in scale_batch]))
+    return backbone_m(scale_batch)
+
+
 def forward_with_geom(model, batch_data, geom=None):
     """Forward pass using backbone's precomputed geometry, returns PV features."""
+    if use_multiscale:
+        # batch_data[i] is the list of per-scale clouds for sample i.
+        n = len(batch_data)
+        pvs = []
+        for s in range(args.num_scales):
+            sb = [batch_data[i][s] for i in range(n)]
+            pvs.append(_forward_backbone(sb))
+        return torch.cat(pvs, dim=-1)
+
     mname = model_name
 
     if mname == 'MultiInputModel':
@@ -424,8 +486,10 @@ def forward_with_geom(model, batch_data, geom=None):
 
 
 def forward_full(model, batch_data, geom=None):
-    """Full forward: backbone PV -> MLP classifier."""
+    """Full forward: backbone PV -> classifier head."""
     pv = forward_with_geom(model, batch_data, geom=geom)
+    if use_multiscale:
+        return model.fusion_classifier(pv)
     if hasattr(model, 'classifier'):
         return model.classifier(pv)
     return pv
@@ -434,7 +498,8 @@ def forward_full(model, batch_data, geom=None):
 # ─── Training ────────────────────────────────────────────────────────────────
 tr_acc = te_acc = float('nan')
 try:
-    if model_name in TFN_MODELS and model_name != 'CrossAttentionTensorFieldNetwork' and train_geom is None:
+    if (model_name in TFN_MODELS and model_name != 'CrossAttentionTensorFieldNetwork'
+            and train_geom is None and not use_multiscale):
         print("  GEOMETRY FAILED — skipping training")
     else:
         optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -547,12 +612,15 @@ result = {
     'classifier': args.classifier,
     'augment': use_augment,
     'multi_scale': use_multiscale,
+    'num_scales': args.num_scales if use_multiscale else None,
+    'scale_factor': args.scale_factor if use_multiscale else None,
     'hidden_channels': args.hidden_channels,
     'dropout': args.dropout,
 }
 clf_tag = f"_{args.classifier}"
 aug_tag = "_aug" if use_augment else ""
-out_path = f"results/enhanced/train_{dataset_name}_{model_name}_{fraction_pct}pct_t{trial}{clf_tag}{aug_tag}.json"
+ms_tag = "_ms" if use_multiscale else ""
+out_path = f"results/enhanced/train_{dataset_name}_{model_name}_{fraction_pct}pct_t{trial}{clf_tag}{aug_tag}{ms_tag}.json"
 with open(out_path, 'w') as f:
     json.dump(result, f)
 print(f"  Saved to {out_path}")

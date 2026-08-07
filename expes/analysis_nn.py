@@ -4,6 +4,12 @@
 # 3. Comparison between classification results on true and predicted PIs
 
 import os
+
+# torch and xgboost bundle conflicting OpenMP runtimes; loading both in one
+# process segfaults (pthread_mutex_init failed). Set before library imports.
+os.environ.setdefault('OMP_NUM_THREADS', '1')
+os.environ.setdefault('KMP_DUPLICATE_LIB_OK', 'TRUE')
+
 import matplotlib.pyplot as plt
 import dill as pck
 import numpy as np

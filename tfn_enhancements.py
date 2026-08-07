@@ -85,12 +85,13 @@ class MultiScalePersistenceEncoder(nn.Module):
 
     def __init__(self, backbone: nn.Module, num_scales: int = 3,
                  classifier_dims: List[int] = None, num_classes: int = 2,
-                 dropout: float = 0.1):
+                 dropout: float = 0.1, pv_dim: int = None):
         super().__init__()
         self.backbone = backbone
         self.num_scales = num_scales
 
-        pv_dim = self._get_pv_dim(backbone)
+        if pv_dim is None:
+            pv_dim = self._get_pv_dim(backbone)
         total_pv_dim = pv_dim * num_scales
 
         if classifier_dims is None:
@@ -115,6 +116,8 @@ class MultiScalePersistenceEncoder(nn.Module):
             if child is None or child is inner:
                 break
             inner = child
+        if hasattr(inner, 'output_dim'):
+            return inner.output_dim
         return 128
 
     def forward(self, batch):

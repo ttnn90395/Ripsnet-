@@ -67,7 +67,9 @@ for Xtde in data_train:
     if tdedim <= 3:
         st = gd.AlphaComplex(points=Xtde).create_simplex_tree(max_alpha_square=maxd)
     else:
-        st = gd.RipsComplex(points=Xtde, max_edge_length=maxd).create_simplex_tree(max_dimension=homdim+1)
+        landmarks = Xtde[::10]
+        wc = gd.EuclideanStrongWitnessComplex(landmarks=landmarks, witnesses=Xtde)
+        st = wc.create_simplex_tree(max_alpha_square=maxd, limit_dimension=max(homdim)+1)
     st.persistence()
     final_dg = []
     for hdim in homdim:
@@ -83,7 +85,9 @@ for Xtde in data_test:
     if tdedim <= 3:
         st = gd.AlphaComplex(points=Xtde).create_simplex_tree(max_alpha_square=maxd)
     else:
-        st = gd.RipsComplex(points=Xtde, max_edge_length=maxd).create_simplex_tree(max_dimension=homdim+1)
+        landmarks = Xtde[::10]
+        wc = gd.EuclideanStrongWitnessComplex(landmarks=landmarks, witnesses=Xtde)
+        st = wc.create_simplex_tree(max_alpha_square=maxd, limit_dimension=max(homdim)+1)
     st.persistence()
     final_dg = []
     for hdim in homdim:
