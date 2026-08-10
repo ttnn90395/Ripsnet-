@@ -104,7 +104,6 @@ trial = args.trial
 num_epochs = args.epochs
 identifier = args.identifier
 fraction = fraction_pct / 100.0
-use_mlp = args.classifier == 'mlp'
 use_augment = args.augment
 use_multiscale = args.multi_scale
 use_gnn = args.gnn
@@ -113,6 +112,13 @@ print(f"train_enhanced: {dataset_name} {model_name} {fraction_pct}% trial={trial
 print(f"  classifier={args.classifier}  augment={use_augment}  "
       f"multi_scale={use_multiscale}  gnn={use_gnn}  "
       f"hidden_ch={args.hidden_channels}")
+
+# Deterministic per-trial RNG: the same (config, trial) re-runs identically,
+# and the multi-scale / single-scale variants of a trial share model init and
+# training order, so only the multi-scale pipeline differs between them.
+seed = trial * 131 + 17
+np.random.seed(seed)
+torch.manual_seed(seed)
 
 # ─── Load data ───────────────────────────────────────────────────────────────
 train_sfx = f"_train_TDE311LS_5{identifier}"
@@ -496,7 +502,7 @@ def forward_full(model, batch_data, geom=None):
 
 
 # ─── Training ────────────────────────────────────────────────────────────────
-tr_acc = te_acc = float('nan')
+tr_acc = te_acc = xgb_tr_acc = xgb_te_acc = float('nan')
 try:
     if (model_name in TFN_MODELS and model_name != 'CrossAttentionTensorFieldNetwork'
             and train_geom is None and not use_multiscale):
@@ -581,7 +587,6 @@ try:
         PV_test = np.vstack(all_pv_test)
 
         n_classes_xgb = len(np.unique(y_train))
-        xgb_tr_acc = xgb_te_acc = float('nan')
         if n_classes_xgb >= 2:
             le_xgb = LabelEncoder()
             y_train_enc = le_xgb.fit_transform(y_train)
@@ -606,10 +611,15 @@ result = {
     'dataset': dataset_name, 'model': model_name,
     'fraction_pct': fraction_pct, 'trial': trial,
     'n_train_used': n_use, 'n_train_full': N_full, 'n_test': N_test,
-    'mlp_test_acc': te_acc if use_mlp else float('nan'),
-    'xgb_test_acc': xgb_te_acc if (not use_mlp and 'xgb_te_acc' in dir()) else (
-        te_acc if not use_mlp else float('nan')),
+    # Both classifiers are always trained and evaluated in every run, so both
+    # accuracies are recorded regardless of --classifier. The flag only marks
+    # the primary metric in the filename tag; discarding the other accuracy
+    # previously made mlp/xgboost runs incomparable (NaN-filled analysis).
+    'mlp_test_acc': te_acc,
+    'xgb_test_acc': xgb_te_acc,
+    'xgb_train_acc': xgb_tr_acc,
     'classifier': args.classifier,
+    'seed': seed,
     'augment': use_augment,
     'multi_scale': use_multiscale,
     'num_scales': args.num_scales if use_multiscale else None,

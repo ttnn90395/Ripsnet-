@@ -77,12 +77,6 @@ fig, ax = plt.subplots(figsize=(10, 6))
 mlp_avg, xgb_avg = [], []
 mlp_se, xgb_se = [], []
 for frac in FRACTIONS:
-    m_vals = []
-    x_vals = []
-    for ds in DATASETS:
-        m_vals.extend(mlp_accs[ds].get("all_models", {}).get(frac, []))
-        x_vals.extend(xgb_accs[ds].get("all_models", {}).get(frac, []))
-    # Compute across all models
     m_all, x_all = [], []
     for ds in DATASETS:
         for model in MODELS:
@@ -192,5 +186,60 @@ plt.tight_layout()
 plt.savefig(os.path.join(PLOT_DIR, "enhanced_mlp_heatmap.png"), dpi=150, bbox_inches="tight")
 plt.close()
 print("Saved: enhanced_mlp_heatmap.png")
+
+# ─── Plot 6: Multi-scale effect (paired within config) ──────────────────────
+# The ms runs differ from single-scale runs ONLY in multi_scale, so compare
+# mean (over trials) accuracy per (ds, model, frac, classifier, augment) pair.
+def _first_acc(d):
+    """First available accuracy from a run (mlp preferred, then xgb)."""
+    for k in ("mlp_test_acc", "xgb_test_acc"):
+        v = d.get(k)
+        if v is not None and not (isinstance(v, float) and np.isnan(v)):
+            return v
+    return float("nan")
+
+
+ms_accs = defaultdict(list)   # key -> mean test accs from multi-scale runs
+ss_accs = defaultdict(list)   # key -> mean test accs from single-scale runs
+for d in data:
+    key = (d["dataset"], d["model"], d["fraction_pct"],
+           d.get("classifier"), bool(d.get("augment", False)))
+    v = _first_acc(d)
+    if np.isnan(v):
+        continue
+    (ms_accs if d.get("multi_scale", False) else ss_accs)[key].append(v)
+
+paired = sorted(set(ms_accs) & set(ss_accs))
+xs, ys = [], []
+for k in paired:
+    xs.append(np.mean(ss_accs[k]) * 100)
+    ys.append(np.mean(ms_accs[k]) * 100)
+
+fig, ax = plt.subplots(figsize=(8, 8))
+ax.scatter(xs, ys, s=28, alpha=0.7, edgecolors="k", linewidths=0.3)
+lim = ax.get_xlim() + ax.get_ylim()
+lim = (min(lim[0], lim[2]), max(lim[1], lim[3]))
+ax.plot([lim[0], lim[1]], [lim[0], lim[1]], "k--", lw=1, alpha=0.6)
+ax.set_xlim(lim)
+ax.set_ylim(lim)
+ax.set_xlabel("Single-scale test accuracy (%)", fontsize=12)
+ax.set_ylabel("Multi-scale test accuracy (%)", fontsize=12)
+ax.set_title("Multi-scale vs single-scale (paired per ds/model/frac/clf/aug)", fontsize=12, fontweight="bold")
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig(os.path.join(PLOT_DIR, "enhanced_multiscale_effect.png"), dpi=150, bbox_inches="tight")
+plt.close()
+print("Saved: enhanced_multiscale_effect.png")
+
+if paired:
+    diff = np.array(ys) - np.array(xs)
+    print(f"Multi-scale paired configs: {len(paired)}  "
+          f"mean Δ={diff.mean():+.2f}pp  "
+          f"ms better={int((diff > 0.5).sum())}  "
+          f"worse={int((diff < -0.5).sum())}  "
+          f"tie={int((np.abs(diff) <= 0.5).sum())}")
+else:
+    print("No paired multi-scale/single-scale configs yet "
+          "(multi-scale runs not finished).")
 
 print("\nDone! All plots saved to", PLOT_DIR)

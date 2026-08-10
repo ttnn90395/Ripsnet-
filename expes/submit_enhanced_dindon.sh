@@ -19,10 +19,12 @@ echo "=== Submitting enhanced experiments ==="
 
 # Generate parameter map for enhanced experiments
 # Models to test with improvements: the best TFN variants
-MODELS="TensorFieldNetwork OnEquivariantTensorFieldNetwork AttentionTensorFieldNetwork HybridOnEquivariantTensorFieldNetwork"
-DATASETS="CBF ECG200 ECG5000 GunPoint Plane PowerCons SonyAIBORobotSurface1 SonyAIBORobotSurface2 TwoLeadECG UMD"
-FRACTIONS="10 20 30 50 70 100"
-TRIALS="0 1 2 3"
+# TEMPORARY DRY-RUN CONFIG: shrink back to the full 4-model / 10-dataset /
+# 6-fraction / 4-trial lists before the real submit (or `git checkout` this file).
+MODELS="TensorFieldNetwork"
+DATASETS="CBF"
+FRACTIONS="10"
+TRIALS="0"
 
 # Classifier modes: mlp (end-to-end) + xgboost (paper comparison)
 CLASSIFIERS="mlp xgboost"
