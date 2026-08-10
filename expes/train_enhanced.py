@@ -34,6 +34,7 @@ import numpy as np
 import dill as pck
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from sklearn.preprocessing import LabelEncoder
 from xgboost import XGBClassifier
@@ -90,6 +91,22 @@ parser.add_argument('--lr', type=float, default=5e-3,
                     help='Learning rate')
 parser.add_argument('--weight-decay', type=float, default=1e-5,
                     help='Weight decay')
+parser.add_argument('--reg-weight', type=float, default=0.0,
+                    help='Weight of the auxiliary persistence-vector regression '
+                         'loss (0 disables it). Teaches the backbone to reproduce '
+                         'the PV features while it classifies. Local CBF tests: '
+                         'helps pure MLP (no augmentation) but neutral-to-negative '
+                         'with augmentation or for XGBoost. Disabled for '
+                         'multi-scale (targets are per-scale).')
+parser.add_argument('--no-consistency', dest='consistency', action='store_false',
+                    help='Disable consistency training (on by default).')
+parser.set_defaults(consistency=True)
+parser.add_argument('--noise-rate', type=float, default=0.2,
+                    help='Fraction of points replaced by outliers (consistency)')
+parser.add_argument('--noise-scale', type=float, default=2.0,
+                    help='Outlier bounding-box multiplier (consistency)')
+parser.add_argument('--cons-lambda', type=float, default=0.1,
+                    help='Consistency loss weight')
 parser.add_argument('--ensemble', nargs='+', default=None,
                     help='Ensemble: list of checkpoint paths to average')
 parser.add_argument('--gnn', action='store_true',
@@ -107,6 +124,7 @@ fraction = fraction_pct / 100.0
 use_augment = args.augment
 use_multiscale = args.multi_scale
 use_gnn = args.gnn
+reg_weight = args.reg_weight if not use_multiscale else 0.0
 
 print(f"train_enhanced: {dataset_name} {model_name} {fraction_pct}% trial={trial}")
 print(f"  classifier={args.classifier}  augment={use_augment}  "
@@ -165,6 +183,12 @@ augmenter = PointCloudAugmenter(
 data_train_t = [torch.FloatTensor(x).to(device) for x in data_train]
 data_test_t = [torch.FloatTensor(x).to(device) for x in data_test]
 targets_t = torch.FloatTensor(np.concatenate(PVs_train, axis=1)).to(device)
+if reg_weight > 0:
+    # Standardize the PV regression targets so MSE magnitude is comparable
+    # with the cross-entropy term across datasets.
+    pv_target_mean = targets_t.mean(0, keepdim=True)
+    pv_target_std = targets_t.std(0, keepdim=True) + 1e-6
+    targets_t = (targets_t - pv_target_mean) / pv_target_std
 
 # ─── Model building ─────────────────────────────────────────────────────────
 TFN_MODELS = {
@@ -175,6 +199,9 @@ TFN_MODELS = {
     'RelaxedOnEquivariantTensorFieldNetwork', 'HybridOnEquivariantTensorFieldNetwork',
     'GraphMambaTensorFieldNetwork',
 }
+
+use_consistency = (args.consistency and model_name in TFN_MODELS
+                   and not use_multiscale)
 
 _npts = data_train[0].shape[0]
 
@@ -290,6 +317,28 @@ tag = "MultiScale" if use_multiscale else "MLPHead"
 print(f"  Model: {model_name} + {tag} ({n_params} params)")
 
 # ─── Prepare inputs per model type ──────────────────────────────────────────
+def _corrupt_clouds(batch, noise_rate, noise_scale, seed):
+    """Replace `noise_rate` of each cloud's points with box outliers.
+
+    Used by consistency training: the corrupted cloud must yield nearly the
+    same PV features as the clean one, teaching the backbone geometric
+    robustness without changing the class labels.
+    """
+    rng = np.random.RandomState(seed)
+    out = []
+    for pc in batch:
+        a = pc.detach().cpu().numpy().copy()
+        n = a.shape[0]
+        n_out = max(1, int(n * noise_rate))
+        centroid = a.mean(0)
+        extent = np.abs(a - centroid).max(0) * noise_scale
+        idx = rng.choice(n, size=min(n_out, n), replace=False)
+        a[idx] = centroid + rng.uniform(-extent, extent,
+                                        size=(len(idx), a.shape[1]))
+        out.append(torch.FloatTensor(a).to(device))
+    return out
+
+
 def _make_scales(x, num_scales, scale_factor, seed=0):
     """Return a list of `num_scales` subsampled versions of cloud x.
 
@@ -540,6 +589,22 @@ try:
                     out = forward_full(model, bd, geom=bg)
 
                 loss = criterion(out, bt)
+                if reg_weight > 0:
+                    # Auxiliary objective: backbone must reproduce the (standardized)
+                    # persistence-vector features. Computed on the ORIGINAL clouds so
+                    # augmented geometry does not corrupt the regression targets.
+                    pv = forward_with_geom(model, bd, geom=None)
+                    loss = loss + reg_weight * F.mse_loss(pv, targets_t[bix])
+                if use_consistency:
+                    active = (bd_aug if (use_augment and augmenter is not None
+                                         and model_name in TFN_MODELS) else bd)
+                    corr = _corrupt_clouds(active, args.noise_rate,
+                                           args.noise_scale, seed=ep * 1000 + s)
+                    pv_clean = forward_with_geom(model, active, geom=None)
+                    pv_corr = forward_with_geom(model, corr, geom=None)
+                    cons_term = 1.0 - F.cosine_similarity(
+                        pv_clean.detach(), pv_corr, dim=-1).mean()
+                    loss = loss + args.cons_lambda * cons_term
                 if torch.isfinite(loss):
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -626,6 +691,11 @@ result = {
     'scale_factor': args.scale_factor if use_multiscale else None,
     'hidden_channels': args.hidden_channels,
     'dropout': args.dropout,
+    'reg_weight': reg_weight,
+    'consistency': use_consistency,
+    'noise_rate': args.noise_rate if use_consistency else None,
+    'noise_scale': args.noise_scale if use_consistency else None,
+    'cons_lambda': args.cons_lambda if use_consistency else None,
 }
 clf_tag = f"_{args.classifier}"
 aug_tag = "_aug" if use_augment else ""
