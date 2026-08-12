@@ -22,7 +22,7 @@ Options:
     --lr FLOAT                   Learning rate (default: 5e-3)
     --ensemble FILE [FILE ...]   Ensemble mode: average predictions from checkpoints
 """
-import os, sys, json, argparse
+import os, sys, json, argparse, math
 
 # torch and xgboost bundle conflicting OpenMP runtimes; loading both in one
 # process segfaults (pthread_mutex_init failed). These env vars must be set
@@ -85,6 +85,19 @@ parser.add_argument('--num-scales', type=int, default=3,
                     help='Number of persistence scales')
 parser.add_argument('--hidden-channels', type=int, default=None,
                     help='Override hidden channels')
+parser.add_argument('--max-order', type=int, default=None,
+                    help='Override TFN max_order')
+parser.add_argument('--num-layers', type=int, default=None,
+                    help='Override TFN num_layers')
+parser.add_argument('--readout-pool', type=str, default=None,
+                    choices=['sum', 'mean', 'max', 'catmax'],
+                    help='TFN point pooling for the PV readout (default sum)')
+parser.add_argument('--classifier-dims', nargs='+', type=int, default=None,
+                    help='Override TFN rho hidden dims (e.g. 128 64)')
+parser.add_argument('--k-neighbors', type=int, default=None,
+                    help='Override TFN k_neighbors')
+parser.add_argument('--cutoff', type=float, default=None,
+                    help='Override TFN RBF cutoff')
 parser.add_argument('--dropout', type=float, default=0.1,
                     help='Dropout rate for MLP head')
 parser.add_argument('--lr', type=float, default=5e-3,
@@ -111,6 +124,32 @@ parser.add_argument('--ensemble', nargs='+', default=None,
                     help='Ensemble: list of checkpoint paths to average')
 parser.add_argument('--gnn', action='store_true',
                     help='Use GNN classifier on persistence diagram points')
+parser.add_argument('--tta-views', type=int, default=0,
+                    help='Test-time augmentation: average softmax probs over '
+                         'this many augmented copies of each test cloud '
+                         '(0 disables). Improves MLP-head test accuracy in the '
+                         'small-data regime.')
+parser.add_argument('--cosine', action='store_true',
+                    help='Use a cosine-annealing LR schedule with linear warmup')
+parser.add_argument('--warmup', type=int, default=5,
+                    help='Number of warmup epochs for the cosine schedule')
+parser.add_argument('--label-smooth', type=float, default=0.0,
+                    help='Label smoothing factor for cross-entropy (0 disables)')
+parser.add_argument('--save-artifacts', action='store_true',
+                    help='Save per-run test probabilities (npz) and model '
+                         'checkpoint so predictions can be ensembled across '
+                         'seeds/models afterwards.')
+parser.add_argument('--head-epochs', type=int, default=0,
+                    help='Stage-2 epochs: freeze the backbone and fit a fresh '
+                         'small MLP head on its frozen PV features. Fixes the '
+                         'end-to-end head collapse on tiny training sets '
+                         '(0 disables stage 2).')
+parser.add_argument('--head-dims', nargs='+', type=int, default=None,
+                    help='Hidden dims for the stage-2 head (default [128, 64])')
+parser.add_argument('--head-dropout', type=float, default=0.3,
+                    help='Dropout for the stage-2 head')
+parser.add_argument('--head-lr', type=float, default=3e-3,
+                    help='Learning rate for the stage-2 head')
 
 args = parser.parse_args()
 
@@ -174,10 +213,12 @@ n_classes = len(le.classes_)
 print(f"  classes={n_classes}")
 
 # ─── Augmenter ───────────────────────────────────────────────────────────────
+# Also created when TTA is enabled: the eval-time augmenter needs to exist even
+# if training-time augmentation is off.
 augmenter = PointCloudAugmenter(
     jitter_std=0.01, rotate=True, scale_range=(0.9, 1.1),
     dropout_prob=0.1, permute=True
-) if use_augment else None
+) if (use_augment or args.tta_views > 0) else None
 
 # ─── Torch tensors ───────────────────────────────────────────────────────────
 data_train_t = [torch.FloatTensor(x).to(device) for x in data_train]
@@ -214,7 +255,7 @@ DS_HP = {
     'PowerCons': {'max_order': 1, 'hidden_channels': 16},
     'ProximalPhalanxTW': {'max_order': 1, 'hidden_channels': 8},
     'ECG5000': {'max_order': 1, 'hidden_channels': 16},
-    'CBF': {'max_order': 1, 'hidden_channels': 8},
+    'CBF': {'max_order': 1, 'hidden_channels': 16},
     'ItalyPowerDemand': {'max_order': 1, 'hidden_channels': 8},
     'TwoLeadECG': {'max_order': 1, 'hidden_channels': 8},
 }
@@ -223,6 +264,18 @@ if dataset_name in DS_HP:
 
 if args.hidden_channels is not None:
     _hp['hidden_channels'] = args.hidden_channels
+if args.max_order is not None:
+    _hp['max_order'] = args.max_order
+if args.num_layers is not None:
+    _hp['num_layers'] = args.num_layers
+if args.readout_pool is not None:
+    _hp['readout_pool'] = args.readout_pool
+if args.classifier_dims is not None:
+    _hp['classifier_dims'] = list(args.classifier_dims)
+if args.k_neighbors is not None:
+    _hp['k_neighbors'] = args.k_neighbors
+if args.cutoff is not None:
+    _hp['cutoff'] = args.cutoff
 
 
 def build_backbone(name, hp):
@@ -552,13 +605,23 @@ def forward_full(model, batch_data, geom=None):
 
 # ─── Training ────────────────────────────────────────────────────────────────
 tr_acc = te_acc = xgb_tr_acc = xgb_te_acc = float('nan')
+trained_ok = False
 try:
     if (model_name in TFN_MODELS and model_name != 'CrossAttentionTensorFieldNetwork'
             and train_geom is None and not use_multiscale):
         print("  GEOMETRY FAILED — skipping training")
     else:
         optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-        criterion = nn.CrossEntropyLoss()
+        criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smooth)
+        if args.cosine:
+            def _lr_at(ep):
+                if ep < args.warmup:
+                    return args.lr * (ep + 1) / max(1, args.warmup)
+                t = (ep - args.warmup) / max(1, num_epochs - args.warmup)
+                return args.lr * 0.5 * (1 + math.cos(math.pi * t))
+            scheduler = optim.lr_scheduler.LambdaLR(optimizer, _lr_at)
+        else:
+            scheduler = None
         bs = min(32, len(train_in))
         n_t = len(train_in)
 
@@ -617,6 +680,8 @@ try:
                 train_acc = 100.0 * correct / total if total > 0 else 0
                 print(f"  ep {ep + 1}/{num_epochs}  loss={loss_sum / n_t:.4f}  "
                       f"train_acc={train_acc:.1f}%")
+            if scheduler is not None:
+                scheduler.step()
 
         # ─── Evaluate ──────────────────────────────────────────────────────────
         model.eval()
@@ -626,11 +691,75 @@ try:
                 e = min(s + bs, len(test_in))
                 bd = test_in[s:e]
                 bg = get_geom(test_geom, list(range(s, e)))
-                out = forward_full(model, bd, geom=bg)
+                if args.tta_views > 0 and not use_multiscale:
+                    # Test-time augmentation: average softmax over augmented
+                    # copies. Augmented geometry cannot reuse precomputed rbf/gt
+                    # tensors, so forward with internal geometry (like training).
+                    probs = []
+                    for _ in range(args.tta_views):
+                        bd_tta = prepare([data_test_t[i] for i in range(s, e)], augment=True)
+                        out_tta = forward_full(model, bd_tta, geom=None)
+                        probs.append(F.softmax(out_tta, dim=-1))
+                    out = torch.stack(probs).mean(0)
+                else:
+                    out = forward_full(model, bd, geom=bg)
                 all_logits.append(out.cpu().numpy())
         logits_test = np.vstack(all_logits)
         pred_test = logits_test.argmax(axis=-1)
         te_acc = np.mean(pred_test == y_test)
+        te_acc_stage1 = te_acc
+
+        # ─── Stage 2: frozen-backbone head fit ────────────────────────────────
+        # The end-to-end MLP head frequently collapses on tiny training sets
+        # (predicts the majority class) even though the backbone PV features
+        # carry signal (XGBoost gets a high score from the same features).
+        # Stage 2 freezes the backbone and fits a fresh, well-regularized head
+        # on the frozen PVs — the same recipe that makes XGBoost work.
+        if args.head_epochs > 0:
+            with torch.no_grad():
+                all_pv_tr, all_pv_te = [], []
+                for s in range(0, len(train_in), bs):
+                    e = min(s + bs, len(train_in))
+                    bd = train_in[s:e]
+                    bg = get_geom(train_geom, list(range(s, e)))
+                    all_pv_tr.append(forward_with_geom(model, bd, geom=bg))
+                for s in range(0, len(test_in), bs):
+                    e = min(s + bs, len(test_in))
+                    bd = test_in[s:e]
+                    bg = get_geom(test_geom, list(range(s, e)))
+                    all_pv_te.append(forward_with_geom(model, bd, geom=bg))
+                PV_frozen_tr = torch.cat(all_pv_tr, dim=0)
+                PV_frozen_te = torch.cat(all_pv_te, dim=0)
+
+            dims = list(args.head_dims) if args.head_dims else [128, 64]
+            layers = []
+            in_d = PV_frozen_tr.shape[1]
+            for d in dims:
+                layers += [nn.Linear(in_d, d), nn.LayerNorm(d), nn.GELU(),
+                           nn.Dropout(args.head_dropout)]
+                in_d = d
+            layers.append(nn.Linear(in_d, n_classes))
+            head2 = nn.Sequential(*layers).to(device)
+            head_opt = optim.Adam(head2.parameters(), lr=args.head_lr,
+                                  weight_decay=args.weight_decay)
+            head_crit = nn.CrossEntropyLoss()
+            ytr_t = torch.LongTensor(y_train).to(device)
+            for hep in range(args.head_epochs):
+                head2.train()
+                perm = np.random.permutation(n_t)
+                for s in range(0, n_t, bs):
+                    bix = perm[s:s + bs]
+                    head_opt.zero_grad(set_to_none=True)
+                    out = head2(PV_frozen_tr[bix])
+                    loss = head_crit(out, ytr_t[bix])
+                    loss.backward()
+                    head_opt.step()
+            head2.eval()
+            with torch.no_grad():
+                logits_test = head2(PV_frozen_te).cpu().numpy()
+                te_acc = float(np.mean(logits_test.argmax(-1) == y_test))
+            print(f"  Stage2 frozen-head test={100 * te_acc:.2f}% "
+                  f"(stage1={100 * te_acc_stage1:.2f}%)")
 
         # Also run XGBoost on PV features for comparison
         all_pv_train, all_pv_test = [], []
@@ -652,19 +781,30 @@ try:
         PV_test = np.vstack(all_pv_test)
 
         n_classes_xgb = len(np.unique(y_train))
+        xgb_probs_test = None
         if n_classes_xgb >= 2:
             le_xgb = LabelEncoder()
             y_train_enc = le_xgb.fit_transform(y_train)
             mask = np.isin(y_test, le_xgb.classes_)
             if mask.sum() > 0:
                 y_test_enc = le_xgb.transform(y_test[mask])
-                clf = XGBClassifier(eval_metric='logloss', verbosity=0)
+                clf = XGBClassifier(eval_metric='logloss', verbosity=0,
+                                    random_state=seed)
                 clf.fit(PV_train, y_train_enc)
                 xgb_tr_acc = clf.score(PV_train, y_train_enc)
                 xgb_te_acc = clf.score(PV_test[mask], y_test_enc)
+                # Full-space test probabilities (rows not in train classes get a
+                # zero row) so predictions can be seed-ensembled across runs.
+                p_test = clf.predict_proba(PV_test)
+                xgb_probs_test = np.zeros((len(y_test), n_classes))
+                # le_xgb.classes_ are the encoded int labels, which equal the
+                # column positions in the full label space (both derive from the
+                # same LabelEncoder over concatenated train+test labels).
+                xgb_probs_test[:, le_xgb.classes_] = p_test
 
         print(f"  MLP  test={100 * te_acc:.2f}%")
         print(f"  XGB  train={100 * xgb_tr_acc:.2f}%  test={100 * xgb_te_acc:.2f}%")
+        trained_ok = True
 
 except Exception as e:
     import traceback
@@ -696,6 +836,16 @@ result = {
     'noise_rate': args.noise_rate if use_consistency else None,
     'noise_scale': args.noise_scale if use_consistency else None,
     'cons_lambda': args.cons_lambda if use_consistency else None,
+    'tta_views': args.tta_views,
+    'cosine': args.cosine,
+    'warmup': args.warmup if args.cosine else None,
+    'label_smooth': args.label_smooth,
+    'save_artifacts': args.save_artifacts,
+    'head_epochs': args.head_epochs,
+    'head_dims': list(args.head_dims) if args.head_dims else None,
+    'head_dropout': args.head_dropout,
+    'mlp_stage1_acc': te_acc_stage1 if args.head_epochs > 0 else te_acc,
+    'pipeline_version': 2,
 }
 clf_tag = f"_{args.classifier}"
 aug_tag = "_aug" if use_augment else ""
@@ -704,3 +854,26 @@ out_path = f"results/enhanced/train_{dataset_name}_{model_name}_{fraction_pct}pc
 with open(out_path, 'w') as f:
     json.dump(result, f)
 print(f"  Saved to {out_path}")
+
+# ─── Save ensembling artifacts (after result dict exists) ───────────────────
+# Only save for mlp-tagged runs: the xgboost-tagged runs train identically
+# (same seed), so saving for both would double-count in the ensemble script.
+if args.save_artifacts and trained_ok and args.classifier == 'mlp':
+    # Softmax probabilities + labels (for seed/model ensembling) and the trained
+    # checkpoint. Probabilities are used (not logits) so runs with different TTA
+    # settings aggregate consistently.
+    os.makedirs('results/enhanced/logits', exist_ok=True)
+    os.makedirs('results/enhanced/ckpt', exist_ok=True)
+    tag = f"{dataset_name}_{model_name}_{fraction_pct}pct_t{trial}{clf_tag}{aug_tag}{ms_tag}"
+    probs_test = np.exp(logits_test - logits_test.max(-1, keepdims=True))
+    probs_test /= probs_test.sum(-1, keepdims=True)
+    np.savez(f"results/enhanced/logits/{tag}.npz",
+             probs=probs_test, labels=y_test,
+             class_names=np.array(le.classes_, dtype=object),
+             xgb_probs=xgb_probs_test if xgb_probs_test is not None else np.array([]),
+             config=np.array([json.dumps(result)]))
+    torch.save({'model_state_dict': model.state_dict(),
+                'model_name': model_name,
+                'config': result},
+               f"results/enhanced/ckpt/{tag}.pt")
+    print(f"  Saved artifacts: logits/{tag}.npz, ckpt/{tag}.pt")

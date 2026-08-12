@@ -695,8 +695,9 @@ class GTTensorFieldNetwork(nn.Module):
         self.robust_gamma   = robust_gamma
         self.readout_pool   = readout_pool
         self.norm_readout   = norm_readout
-        if readout_pool not in ('sum', 'mean', 'max'):
-            raise ValueError(f"readout_pool must be 'sum', 'mean' or 'max', got {readout_pool}")
+        if readout_pool not in ('sum', 'mean', 'max', 'catmax'):
+            raise ValueError(f"readout_pool must be 'sum', 'mean', 'max' or "
+                             f"'catmax', got {readout_pool}")
         if classifier_dims is None:
             classifier_dims = [128, 64]
 
@@ -743,11 +744,15 @@ class GTTensorFieldNetwork(nn.Module):
 
         # Invariant readout: scalars + norms of all other types
         inv_dim = hidden_channels * len(all_sigs)
+        if readout_pool == 'catmax':
+            inv_dim = 2 * inv_dim
 
         self.rho = nn.Sequential(
-            nn.Linear(inv_dim, 64), nn.SiLU(), nn.LayerNorm(64),
-            nn.Dropout(0.1),
-            nn.Linear(64, num_classes),
+            nn.Linear(inv_dim, classifier_dims[0]), nn.SiLU(),
+            nn.LayerNorm(classifier_dims[0]), nn.Dropout(0.1),
+            *[nn.Linear(classifier_dims[i], classifier_dims[i + 1]) for i in
+              range(len(classifier_dims) - 1)],
+            nn.Linear(classifier_dims[-1], num_classes),
         )
 
         self._scalar_sig = scalar_sig
@@ -857,6 +862,10 @@ class GTTensorFieldNetwork(nn.Module):
             w = self._attn_pool(node_inv).squeeze(-1)  # (B, N)
             w = torch.softmax(w, dim=1)
             descs = (w.unsqueeze(-1) * node_inv).sum(dim=1)  # (B, inv_dim)
+        elif self.readout_pool == 'catmax':
+            smax = node_inv.max(dim=1).values
+            ssum = node_inv.sum(dim=1)
+            descs = torch.cat([ssum, smax], dim=-1)   # (B, 2*inv_dim)
         elif self.readout_pool == 'max':
             descs = node_inv.max(dim=1).values          # (B, inv_dim)
         elif self.readout_pool == 'mean':
@@ -931,6 +940,10 @@ class GTTensorFieldNetwork(nn.Module):
             w = self._attn_pool(node_inv).squeeze(-1)  # (N,)
             w = torch.softmax(w, dim=0)
             return (w.unsqueeze(-1) * node_inv).sum(dim=0)  # (inv_dim,)
+        if self.readout_pool == 'catmax':
+            smax = node_inv.max(dim=0).values
+            ssum = node_inv.sum(dim=0)
+            return torch.cat([ssum, smax], dim=-1)     # (2*inv_dim,)
         if self.readout_pool == 'max':
             return node_inv.max(dim=0).values        # (inv_dim,)
         if self.readout_pool == 'mean':

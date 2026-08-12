@@ -243,6 +243,7 @@ class GTTensorFieldNetworkV2(_GTTensorFieldNetworkBase):
         node_attr_dim:   int       = 0,
         classifier_dims: Optional[List[int]] = None,
         radial_hidden:   int       = 128,
+        readout_pool:    str       = 'sum',
     ):
         if classifier_dims is None:
             classifier_dims = [256, 128]
@@ -261,6 +262,7 @@ class GTTensorFieldNetworkV2(_GTTensorFieldNetworkBase):
             node_attr_dim=node_attr_dim,
             classifier_dims=classifier_dims,
             radial_hidden=radial_hidden,
+            readout_pool=readout_pool,
         )
 
     def forward(self, batch, node_attrs=None):
@@ -285,6 +287,7 @@ class TensorFieldNetwork(nn.Module):
         cutoff:          float     = 2.0,
         k_neighbors:     int       = 16,
         classifier_dims: Optional[List[int]] = None,
+        readout_pool:    str       = 'sum',
     ):
         super().__init__()
         if classifier_dims is None:
@@ -298,6 +301,7 @@ class TensorFieldNetwork(nn.Module):
             cutoff=cutoff,
             k_neighbors=k_neighbors,
             classifier_dims=classifier_dims,
+            readout_pool=readout_pool,
         )
 
     def forward(self, batch: List[torch.Tensor]) -> torch.Tensor:
@@ -546,13 +550,16 @@ class SequenceCNN(nn.Module):
     """
 
     def __init__(self, d_seq: int = 32, conv_dims=(32, 64, 64), kernel: int = 15,
-                 dropout: float = 0.1, activation: str = 'gelu'):
+                 dropout: float = 0.1, activation: str = 'gelu', stride: int = 1,
+                 chunk: Optional[int] = None):
         super().__init__()
         blocks = []
         in_ch = 4
         for i, out_ch in enumerate(conv_dims):
             k = kernel if i == 0 else 9
-            blocks.append(nn.Conv1d(in_ch, out_ch, kernel_size=k, padding=k // 2, bias=False))
+            s = stride if i == 0 else 1
+            blocks.append(nn.Conv1d(in_ch, out_ch, kernel_size=k, stride=s,
+                                    padding=k // 2, bias=False))
             blocks.append(nn.BatchNorm1d(out_ch))
             blocks.append(_act(activation))
             blocks.append(nn.MaxPool1d(kernel_size=2, stride=2))
@@ -561,13 +568,27 @@ class SequenceCNN(nn.Module):
         self.blocks = nn.Sequential(*blocks)
         self.pool = nn.AdaptiveAvgPool1d(1)
         self.proj = nn.Linear(in_ch, d_seq)
+        self.chunk = chunk
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (..., 4, L) — one-hot; reshape to (T, 4, L), restore leading dims
+        # x: (..., 4, L) — one-hot; reshape to (T, 4, L), restore leading dims.
+        # Float-convert per chunk so a large batch never materializes the whole
+        # (T, 4, L) float tensor (huge for T ~ thousands of 4096 bp windows).
         lead = x.shape[:-2]
-        x = x.reshape(-1, x.shape[-2], x.shape[-1]).float()
-        h = self.pool(self.blocks(x)).squeeze(-1)
+        x = x.reshape(-1, x.shape[-2], x.shape[-1])
+        if self.chunk is not None and x.shape[0] > self.chunk:
+            outs = [self._encode(x[i:i + self.chunk].float(), use_ckpt=True)
+                    for i in range(0, x.shape[0], self.chunk)]
+            h = torch.cat(outs, dim=0)
+        else:
+            h = self._encode(x.float(), use_ckpt=False)
         return self.proj(h).view(*lead, -1)
+
+    def _encode(self, x: torch.Tensor, use_ckpt: bool = False) -> torch.Tensor:
+        if use_ckpt:
+            return self.pool(torch.utils.checkpoint.checkpoint(
+                self.blocks, x, use_reentrant=False)).squeeze(-1)
+        return self.pool(self.blocks(x)).squeeze(-1)
 
 
 class AttnRipsPointNet(nn.Module):
@@ -603,11 +624,18 @@ class AttnRipsPointNet(nn.Module):
                  use_pd: bool = False,
                  pd_dims=(32, 64, 128), pd_rho_dims=(128, 64),
                  max_pd_pairs: int = 128, use_count: bool = False,
+                 use_perpoint: bool = False,
+                 perpoint_dims: Optional[List[int]] = None,
+                 perpoint_ctx: bool = False,
+                 perpoint_gate: bool = False,
+                 perpoint_ctx_pool: str = 'mean',
+                 perpoint_count: bool = False,
                  fusion_dims: Optional[List[int]] = None,
                  use_gate: bool = False, gate_dims=(32, 16),
                  use_pd_stats: bool = False, pd_stats_dims=(16, 32),
                  use_seq: bool = False, d_seq: int = 32,
                  seq_conv_dims=(32, 64, 64), seq_kernel: int = 15,
+                 seq_stride: int = 1, seq_chunk: Optional[int] = None,
                  dropout: float = 0.1, activation: str = 'gelu',
                  max_pos: int = 256):
         super().__init__()
@@ -616,6 +644,7 @@ class AttnRipsPointNet(nn.Module):
             fusion_dims = [128]
         self.pooling = pooling
         self.num_heads = num_heads
+        self.use_perpoint = use_perpoint
         self.use_pd = use_pd
         self.use_count = use_count
         self.use_gate = use_gate
@@ -634,7 +663,8 @@ class AttnRipsPointNet(nn.Module):
         if use_seq:
             self.seq_enc = SequenceCNN(d_seq=d_seq, conv_dims=list(seq_conv_dims),
                                        kernel=seq_kernel, dropout=dropout,
-                                       activation=activation)
+                                       activation=activation, stride=seq_stride,
+                                       chunk=seq_chunk)
             if pooling == 'mhead':
                 self.query_proj = _build_mlp([d_seq, d, num_heads * d],
                                              activation=activation, norm='ln',
@@ -678,6 +708,38 @@ class AttnRipsPointNet(nn.Module):
         rho_out = rho_dims[-1]
         self.rho_layers = _build_mlp([rho_in] + list(rho_dims), activation=activation,
                                      norm='ln', dropout=dropout)
+
+        if use_perpoint:
+            # Unnormalized per-element score head: each enhancer gets its own
+            # sigmoid(logit) instead of a within-gene softmax weight.  The
+            # softmax pooling path is kept for the gene-level fused head, but
+            # the returned per-element readout is this absolute-scale head,
+            # which lets scores be comparable ACROSS genes (softmax cannot).
+            # If perpoint_ctx, the gene's attention-pooled summary vector is
+            # concatenated to each element's features so the per-element score
+            # is conditioned on the gene's overall regulatory state.
+            pp_in = (3 * d if (perpoint_ctx and perpoint_ctx_pool == 'cat')
+                     else 2 * d if perpoint_ctx else d) + (1 if perpoint_count else 0)
+            if perpoint_dims:
+                self.perpoint_head = _build_mlp([pp_in] + list(perpoint_dims) + [1],
+                                                activation=activation, norm='ln',
+                                                final_activation=None, dropout=dropout)
+            else:
+                self.perpoint_head = nn.Linear(pp_in, 1)
+            self.perpoint_bn = nn.LayerNorm(pp_in)
+        else:
+            self.perpoint_head = None
+            self.perpoint_bn = None
+        self.perpoint_ctx = perpoint_ctx
+        self.perpoint_gate = perpoint_gate
+        self.perpoint_ctx_pool = perpoint_ctx_pool or 'mean'
+        self.perpoint_count = perpoint_count
+        if perpoint_gate:
+            # per-gene scalar gate on the context: sigmoid(MLP(pooled, logN)).
+            # Lets the per-point head ignore the gene summary in megaclouds,
+            # where the pooled mean is dominated by negatives (chr19 case).
+            self.ctx_gate = _build_mlp([d + 1, 16, 1], activation=activation,
+                                       norm='none', final_activation=None, dropout=0.0)
 
         if use_pd:
             self.pd_layers = _build_mlp([2] + list(pd_dims), activation=activation,
@@ -728,8 +790,11 @@ class AttnRipsPointNet(nn.Module):
             mask[i, :len(pc)] = True
 
         if self.use_seq:
-            assert enh_ohe is not None and prom_ohe is not None, \
-                "use_seq=True requires enh_ohe and prom_ohe"
+            assert enh_ohe is not None, \
+                "use_seq=True requires enh_ohe"
+            if self.pooling == 'mhead':
+                assert prom_ohe is not None, \
+                    "mhead + use_seq requires prom_ohe (gene query)"
             # enh_ohe: (B, N, 4, L_enh) bool → (B, N, d_seq); zero out padding
             seq_emb = self.seq_enc(enh_ohe.to(device))
             seq_emb = seq_emb * mask.unsqueeze(-1)
@@ -744,6 +809,10 @@ class AttnRipsPointNet(nn.Module):
             x = x + self.pos_emb(torch.arange(N, device=device)).unsqueeze(0)
             x = self.transformer(x, src_key_padding_mask=~mask)
             x = x * mask.unsqueeze(-1)
+
+        if self.use_perpoint:
+            pp_logit = None
+            pp_ctx_vec = None
 
         if self.pooling == 'mhead':
             if self.use_seq and prom_ohe is not None:
@@ -775,6 +844,49 @@ class AttnRipsPointNet(nn.Module):
             attn_weights = torch.softmax(attn_scores, dim=1)
             pooled = (attn_weights.unsqueeze(-1) * x).sum(dim=1)
         pt_feat = self.rho_layers(pooled)
+
+        if self.use_perpoint:
+            # per-element head after pooling so it can see the gene summary
+            if self.perpoint_ctx:
+                if self.perpoint_ctx_pool == 'max':
+                    # robust gene summary: elementwise max over elements.
+                    # The attn/mean pool is diluted in megaclouds (~130 mostly-
+                    # negative elements, e.g. chr19); max is not.
+                    m = mask.unsqueeze(-1)
+                    ctx_vec = (x * m + (~m) * -1e9).max(dim=1).values
+                    empty = ~mask.any(dim=1)
+                    if empty.any():
+                        ctx_vec = torch.where(empty.unsqueeze(-1),
+                                              torch.zeros_like(ctx_vec), ctx_vec)
+                elif self.perpoint_ctx_pool == 'cat':
+                    # round 21: concatenate the attn-pooled summary (dense
+                    # gene state, best on small clouds) and the elementwise max
+                    # (robust to megaclouds) so the per-point head can use both.
+                    m = mask.unsqueeze(-1)
+                    max_vec = (x * m + (~m) * -1e9).max(dim=1).values
+                    empty = ~mask.any(dim=1)
+                    if empty.any():
+                        max_vec = torch.where(empty.unsqueeze(-1),
+                                              torch.zeros_like(max_vec), max_vec)
+                    ctx_vec = torch.cat([pooled, max_vec], dim=-1)
+                else:
+                    ctx_vec = pooled
+                ctx = ctx_vec.unsqueeze(1).expand(-1, N, -1)
+                if self.perpoint_gate:
+                    counts = mask.sum(dim=1, keepdim=True).clamp(min=1).log()
+                    gate = torch.sigmoid(self.ctx_gate(torch.cat([pooled, counts], dim=-1)))
+                    ctx = (gate * ctx_vec).unsqueeze(1).expand(-1, N, -1)
+                pp_inp = torch.cat([x, ctx], dim=-1)
+            else:
+                pp_inp = x
+            if self.perpoint_count:
+                # per-gene cloud size (log1p) as an explicit input to the
+                # per-point head: lets it recalibrate scores in megaclouds
+                # (large N) without a learned gate (round-19 failure).
+                cnt = torch.log1p(mask.sum(dim=1, keepdim=True).float()).unsqueeze(-1)
+                pp_inp = torch.cat([pp_inp, cnt.expand(-1, N, -1)], dim=-1)
+            pp_logit = self.perpoint_head(self.perpoint_bn(pp_inp)).squeeze(-1)  # (B, N)
+            pp_logit = pp_logit.masked_fill(~mask, -1e9)
 
         if self.use_pd and precomputed_pd is not None and len(precomputed_pd) > 0:
             pd_batch, pd_mask = [], []
@@ -813,6 +925,9 @@ class AttnRipsPointNet(nn.Module):
         out = self.fusion(combined)
 
         if return_attn:
+            if self.use_perpoint:
+                # per-element readout = absolute-scale sigmoid head (not softmax)
+                attn_weights = torch.sigmoid(pp_logit) * mask.float()
             return out, attn_weights
         return out
 
