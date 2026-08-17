@@ -40,6 +40,7 @@ tfns = [
     "OnEquivariantTensorFieldNetwork", "AttentionTensorFieldNetwork",
     "StochasticTensorFieldNetwork", "CrossAttentionTensorFieldNetwork",
     "RelaxedOnEquivariantTensorFieldNetwork", "HybridOnEquivariantTensorFieldNetwork",
+    "HybridGTTFN",
 ]
 tfns_gs = [m + "_GS" for m in tfns]
 dmr = "DistanceMatrixRaggedModel"

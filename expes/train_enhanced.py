@@ -468,7 +468,8 @@ def _unwrap_tfn(m):
         if hasattr(m, 'k_neighbors') and hasattr(m, 'rbf') and hasattr(m, 'gt_basis'):
             return m
         child = (getattr(m, '_inner', None) or getattr(m, 'base', None)
-                 or getattr(m, 'tfn_backbone', None) or getattr(m, 'backbone', None))
+                 or getattr(m, 'tfn_backbone', None) or getattr(m, 'backbone', None)
+                 or getattr(m, '_tfn', None))
         if child is None or child is m:
             break
         m = child
