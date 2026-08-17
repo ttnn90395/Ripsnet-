@@ -721,6 +721,36 @@ With the classifier dominating and the backbone features reduced to noise, the m
 The fix widens the bottleneck to \texttt{classifier\_dims=[64, 32]}, increases \texttt{hidden\_channels} from 8 to 32, and raises \texttt{num\_layers} from 2 to 3, matching the other TFN variants.
 The retrained model is expected to recover the cross-attention mechanism's intended behavior; the full 21-dataset comparison with the fix is reported in Table~\ref{tab:ucr_full}.
 
+\subsection{GTTensorFieldNetworkV2 Improvements} \label{sec:gttfnv2_improvements}
+
+Analysis of the gap between TFN-family models and the best-performing baselines revealed three high-leverage improvements to \texttt{GTTensorFieldNetworkV2}:
+
+\begin{enumerate}
+    \item \textbf{Covariance features.}
+    The model now enables \texttt{use\_cov\_features=True} by default, injecting rotation-invariant statistics computed from the spatial covariance matrix (anisotropy spectrum, centroid distance moments) directly into the classifier head.
+    These features provide a strong inductive bias that bypasses the need for the network to discover global shape statistics through message passing alone.
+    \item \textbf{Attention pooling.}
+    Replacing sum pooling with learned attention pooling (\texttt{use\_attention\_pool=True}) produces a size-invariant readout that learns which nodes carry class-discriminative information, rather than summing all nodes indiscriminately.
+    \item \textbf{Classifier head normalization.}
+    The original \texttt{rho} head placed \texttt{SiLU\,+\,LayerNorm} only after the first hidden layer; intermediate layers were bare linear projections. The improved head inserts \texttt{SiLU\,+\,LayerNorm\,+\,Dropout(0.1)} between every hidden layer, improving gradient flow and regularization.
+\end{enumerate}
+
+On the local validation sets (CBF, ECG200), these changes improve \texttt{GTTensorFieldNetworkV2} accuracy from 59.6\% to 63.8\% on CBF and from 53.0\% to 81.0\% on ECG200 (100 epochs, XGBoost classifier), confirming that the improvements are effective even without changing the model family or training regime.
+
+\subsection{HybridGTTFN: Multi-Branch Fusion} \label{sec:hybrid_gttfn}
+
+The \texttt{HybridGTTFN} model combines three complementary feature streams:
+\begin{enumerate}
+    \item \textbf{GT-TFN branch:} equivariant message-passing features, invariant-pooled;
+    \item \textbf{Distance-matrix branch:} row-wise MLP on the pairwise distance matrix, mean-pooled (matching the \texttt{DistanceMatrixRaggedModel} design);
+    \item \textbf{PointNet branch:} coordinate MLP with max-pooling (matching the \texttt{PointNetTutorial} design).
+\end{enumerate}
+The three feature vectors are concatenated and fed to a shared classification MLP.
+This design is motivated by the analysis showing that TFN's largest gaps on specific datasets correspond to cases where scalar distances (ItalyPowerDemand, $+23$pp) or raw coordinates (SonyAIBORobotSurface2, $+21$pp) carry the primary discriminative signal.
+The PointNet branch addresses datasets like ECG200 where coordinate structure dominates over equivariant features, and the distance-matrix branch covers cases where the full pairwise distance structure is more informative than the sparsified k-NN graph used by the TFN backbone.
+Local validation on CBF yields 80.0\% (XGBoost) and on ECG200 yields 81.0\% (XGBoost), competitive with the best single-family models.
+The full 21-dataset evaluation on the dindon cluster is in progress (Section~\ref{sec:cross_attn_fix}).
+
 \subsection{Architecture Family Comparison} \label{sec:family}
 
 We aggregate results across all experiments to compare the three main model families:
@@ -803,7 +833,9 @@ The isometry experiments (Section~\ref{sec:isometry}) confirm that the distance-
 The shape ablation on synthetic circles (Section~\ref{sec:shape_ablation}) reveals that GTTensorFieldNetworkV2 has the capacity for perfect clean accuracy but is fundamentally limited by distribution shift: no flag-based intervention can push the model beyond the 2/3 ceiling on corrupted inputs when trained only on clean data, while training directly on the corrupted distribution removes the gap entirely.
 This suggests that robustness to input corruption is better addressed through data augmentation or adversarial training than through architectural modifications alone.
 The CrossAttentionTFN diagnosis (Section~\ref{sec:cross_attn_fix}) identified a critical information bottleneck that reduced the model to trivial predictions; the proposed fix is expected to recover the cross-attention mechanism's intended behavior.
-The most natural next step is to re-run the full UCR benchmark with the corrected CrossAttentionTFN and to extend the isometry and density ablations beyond the \texttt{CBF} case study.
+The GTTensorFieldNetworkV2 improvements (Section~\ref{sec:gttfnv2_improvements})---covariance features, attention pooling, and classifier head normalization---yield substantial gains on the local validation sets (53.0\%\,$\to$\,81.0\% on ECG200).
+The HybridGTTFN triple-fusion model (Section~\ref{sec:hybrid_gttfn}) combines equivariant, distance-based, and coordinate-based feature streams to address the TFN family's largest dataset-specific gaps.
+The full 21-dataset evaluation of the corrected CrossAttentionTFN, improved GTTensorFieldNetworkV2, and HybridGTTFN is running on the dindon cluster and will update the benchmark tables in the next revision.
 
 \newpage
 \appendix
