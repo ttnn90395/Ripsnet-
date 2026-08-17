@@ -5,7 +5,7 @@ Trains and evaluates 12 neural network architectures on 6 point cloud
 classification tasks (2D circles and 3D synthetic shapes).
 
 Models:
-    PointNet3D, RipsPointNet, ScalarInputMLP, ScalarDistanceDeepSet,
+    PersNet, RipsPointNet, ScalarInputMLP, ScalarDistanceDeepSet,
     TensorFieldNetwork, GTTensorFieldNetworkV2, HierarchicalTensorFieldNetwork,
     StochasticTensorFieldNetwork, OnEquivariantTensorFieldNetwork,
     AttentionTensorFieldNetwork, RelaxedOnEquivariantTensorFieldNetwork,
@@ -45,7 +45,7 @@ if ROOT_DIR not in sys.path:
 from models import (
     TensorFieldNetwork, GTTensorFieldNetwork, GTTensorFieldNetworkV2,
     HierarchicalGTTFN, HierarchicalTensorFieldNetwork,
-    OnEquivariantTensorFieldNetwork, PointNet3D, RipsPointNet,
+    OnEquivariantTensorFieldNetwork, PersNet, RipsPointNet,
     ScalarDistanceDeepSet, PointNetTutorial, ScalarInputMLP, MultiInputModel,
     DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,
     AttentionTensorFieldNetwork, StochasticTensorFieldNetwork,
@@ -104,7 +104,7 @@ _ensure_output_dir('models')
 # CLI arguments
 # -------------------------------------------------------------------------
 dataset_name = sys.argv[1] if len(sys.argv) > 1 else 'circles'
-model_name   = sys.argv[2] if len(sys.argv) > 2 else 'PointNet3D'
+model_name   = sys.argv[2] if len(sys.argv) > 2 else 'PersNet'
 num_epochs   = int(sys.argv[3]) if len(sys.argv) > 3 else 50
 trial        = int(sys.argv[4]) if len(sys.argv) > 4 else 0
 quick_mode   = '--quick' in sys.argv
@@ -128,6 +128,7 @@ use_train_robust_knn = '--train-robust-knn' in sys.argv
 use_dtm_readout  = '--dtm-readout' in sys.argv
 use_train_dtm_readout = '--train-dtm-readout' in sys.argv
 use_norm_readout = '--norm-readout' in sys.argv
+use_cov_feat     = '--cov-feat' in sys.argv
 use_consistency  = '--consistency' in sys.argv
 cons_lambda      = 1.0
 run_seed         = 42
@@ -144,6 +145,7 @@ dtm_m            = 10
 robust_alpha     = 1.0
 robust_gamma     = 2.0
 robust_thr       = 1.5
+_mo_override = _hc_override = _nl_override = _kn_override = _nr_override = None
 for a in sys.argv:
     if a.startswith('--noise-rate='):
         noise_rate = float(a.split('=')[1])
@@ -167,6 +169,16 @@ for a in sys.argv:
         cons_lambda = float(a.split('=')[1])
     if a.startswith('--seed='):
         run_seed = int(a.split('=')[1])
+    if a.startswith('--max-order='):
+        _mo_override = int(a.split('=')[1])
+    if a.startswith('--hidden-channels='):
+        _hc_override = int(a.split('=')[1])
+    if a.startswith('--num-layers='):
+        _nl_override = int(a.split('=')[1])
+    if a.startswith('--k-neighbors='):
+        _kn_override = int(a.split('=')[1])
+    if a.startswith('--num-rbf='):
+        _nr_override = int(a.split('=')[1])
 best_on = 'clean'
 for a in sys.argv:
     if a.startswith('--best-on='):
@@ -177,7 +189,7 @@ for a in sys.argv:
 print(f"shape/train_shape.py: {dataset_name} {model_name} epochs={num_epochs} trial={trial} bs={batch_size} quick={quick_mode} best_on={best_on}")
 if any([use_noise_aug, use_dtm_filter, use_attn_pool, use_multiscale, use_pd_fusion,
         use_denoise, use_geom_reg, use_feat_pd, use_robust_knn, use_dtm_readout,
-        use_train_dtm_readout, use_consistency]):
+        use_train_dtm_readout, use_consistency, use_cov_feat]):
     flags = []
     if use_noise_aug:  flags.append(f'noise_aug(r={noise_rate},s={noise_scale},frac={aug_frac})')
     if use_consistency: flags.append(f'consistency(r={noise_rate},s={noise_scale},lam={cons_lambda})')
@@ -188,6 +200,7 @@ if any([use_noise_aug, use_dtm_filter, use_attn_pool, use_multiscale, use_pd_fus
     if use_train_dtm_readout: flags.append(f'train_dtm_readout(m={dtm_m},thr={robust_thr},gamma={robust_gamma})')
     if readout_pool != 'sum': flags.append(f'pool={readout_pool}')
     if use_norm_readout: flags.append('norm_readout')
+    if use_cov_feat:  flags.append('cov_feat')
     if use_attn_pool:  flags.append('attn_pool')
     if use_multiscale: flags.append('multiscale')
     if use_pd_fusion:  flags.append('pd_fusion')
@@ -283,11 +296,16 @@ def build_model(name):
     """Build model following expes/train_ablation.py patterns."""
     _hp = {'max_order': 0, 'hidden_channels': 16, 'num_layers': 2,
            'classifier_dims': [32], 'num_rbf': 64, 'k_neighbors': 16}
+    if _mo_override is not None: _hp['max_order'] = _mo_override
+    if _hc_override is not None: _hp['hidden_channels'] = _hc_override
+    if _nl_override is not None: _hp['num_layers'] = _nl_override
+    if _kn_override is not None: _hp['k_neighbors'] = _kn_override
+    if _nr_override is not None: _hp['num_rbf'] = _nr_override
 
     if name == 'PointNetTutorial':
         return PointNetTutorial(output_dim=num_classes)
-    if name == 'PointNet3D':
-        return PointNet3D(output_dim=num_classes, input_dim=_dim)
+    if name == 'PersNet':
+        return PersNet(output_dim=num_classes, input_dim=_dim)
     if name == 'RipsPointNet':
         return RipsPointNet(output_dim=num_classes, input_dim=_dim)
     if name == 'DistanceMatrixRaggedModel':
@@ -306,7 +324,8 @@ def build_model(name):
         return GTTensorFieldNetwork(n=_dim, num_classes=num_classes, radial_hidden=128, **_hp)
     if name == 'GTTensorFieldNetworkV2':
         return GTTensorFieldNetworkV2(n=_dim, num_classes=num_classes, radial_hidden=128,
-                                      use_attention_pool=use_attn_pool, **_hp)
+                                      use_attention_pool=use_attn_pool,
+                                      use_cov_features=use_cov_feat, **_hp)
     if name == 'HierarchicalGTTFN':
         return HierarchicalGTTFN(n=_dim, num_classes=num_classes,
             max_order=_hp['max_order'], hidden_channels=_hp['hidden_channels'],
@@ -353,7 +372,7 @@ def prepare_data(data_list, name):
     """Prepare data in the format expected by each model."""
     if name in TFN_MODELS:
         return data_list
-    if name == 'PointNet3D':
+    if name == 'PersNet':
         return data_list
     if name == 'PointNetTutorial':
         return data_list
@@ -1004,6 +1023,12 @@ result = {
     'dtm_readout_thr': robust_thr if use_train_dtm_readout else None,
     'readout_pool': readout_pool,
     'norm_readout': use_norm_readout,
+    'cov_feat': use_cov_feat,
+    'max_order': _mo_override,
+    'hidden_channels': _hc_override,
+    'num_layers': _nl_override,
+    'k_neighbors': _kn_override,
+    'num_rbf': _nr_override,
     'attn_pool': use_attn_pool,
     'multiscale': use_multiscale,
     'pd_fusion': use_pd_fusion,
@@ -1013,6 +1038,8 @@ result = {
 }
 
 flag_suffix = ""
+if quick_mode:
+    flag_suffix += "_quick"
 if use_attn_pool:
     flag_suffix += "_attn-pool"
 if use_noise_aug:
@@ -1045,6 +1072,17 @@ if readout_pool != 'sum':
     flag_suffix += f"_pool-{readout_pool}"
 if use_norm_readout:
     flag_suffix += "_norm-readout"
+if use_cov_feat:
+    flag_suffix += "_cov-feat"
+if _mo_override is not None or _hc_override is not None or _nl_override is not None \
+        or _kn_override is not None or _nr_override is not None:
+    hp = []
+    if _mo_override is not None: hp.append(f"mo{_mo_override}")
+    if _hc_override is not None: hp.append(f"hc{_hc_override}")
+    if _nl_override is not None: hp.append(f"nl{_nl_override}")
+    if _kn_override is not None: hp.append(f"kn{_kn_override}")
+    if _nr_override is not None: hp.append(f"rbf{_nr_override}")
+    flag_suffix += "_hp-" + "-".join(hp)
 flag_suffix += f"-seed{run_seed}"
 
 out_path = f"results/shape_{dataset_name}_{model_name}_t{trial}{flag_suffix}.json"

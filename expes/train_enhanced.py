@@ -45,7 +45,7 @@ if ROOT_DIR not in sys.path:
 
 from models import (
     _move_basis_tensors,
-    PointNetTutorial, PointNet3D, DistanceMatrixRaggedModel, ScalarDistanceDeepSet,
+    PointNetTutorial, PersNet, DistanceMatrixRaggedModel, ScalarDistanceDeepSet,
     ScalarInputMLP, MultiInputModel,
     TensorFieldNetwork, GTTensorFieldNetwork, GTTensorFieldNetworkV2,
     HierarchicalGTTFN, HierarchicalTensorFieldNetwork, RaggedPersistenceModel,
@@ -281,8 +281,8 @@ if args.cutoff is not None:
 def build_backbone(name, hp):
     if name == 'PointNetTutorial':
         return PointNetTutorial(output_dim=output_dim)
-    if name == 'PointNet3D':
-        return PointNet3D(output_dim=output_dim)
+    if name == 'PersNet':
+        return PersNet(output_dim=output_dim)
     if name == 'DistanceMatrixRaggedModel':
         return DistanceMatrixRaggedModel(output_dim=output_dim, num_points=_npts)
     if name == 'RaggedPersistenceModel':
@@ -418,8 +418,8 @@ def _prepare_single(x):
     if model_name in TFN_MODELS:
         return torch.cat([x, x.new_zeros(x.shape[0], 1)], dim=1) \
             if x.shape[1] == 2 else x
-    if model_name in ('PointNet3D', 'PointNetTutorial'):
-        nc = 3 if model_name == 'PointNet3D' else 2
+    if model_name in ('PersNet', 'PointNetTutorial'):
+        nc = 3 if model_name == 'PersNet' else 2
         xa = x.cpu().numpy()
         if xa.shape[1] < nc:
             xa = np.concatenate([xa, np.zeros((xa.shape[0], nc - xa.shape[1]))], axis=1)

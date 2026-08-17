@@ -10,7 +10,7 @@ This project benchmarks **12 neural network architectures** across **6 datasets*
 
 | Category | Model | Params | Description |
 |----------|-------|--------|-------------|
-| **Baseline** | PointNet3D | ~0.5M | PointNet with T-nets on raw 3D coordinates |
+| **Baseline** | PersNet | ~0.5M | Plain PointNet/Deep-Sets baseline on raw 3D coordinates (no persistence structure) |
 | **Baseline** | RipsPointNet | ~0.8M | PointNet + persistence diagram fusion (H1 topology) |
 | **Baseline** | ScalarInputMLP | ~50K | MLP on flattened point coordinates |
 | **Baseline** | ScalarDistanceDeepSet | ~50K | DeepSet on pairwise distance features |
@@ -114,7 +114,7 @@ python shape/train_shape.py <dataset> <model> [num_epochs] <trial> [batch_size]
 ```
 
 - `dataset`: circles, circles_noisy, shapes3d_topology, shapes3d_geometry, shapes3d_complex, shapes3d_8way
-- `model`: Any model name from the table above (e.g., TensorFieldNetwork, PointNet3D)
+- `model`: Any model name from the table above (e.g., TensorFieldNetwork, PersNet)
 - `num_epochs`: Training epochs (default: 50)
 - `trial`: Random seed trial index (0, 1, or 2)
 - `batch_size`: Batch size (default: 32)

@@ -11,7 +11,7 @@ echo "Shape classification: ${DATASET} (epochs=${EPOCHS}, trial=${TRIAL})"
 echo "============================================"
 
 for model in \
-    PointNet3D \
+    PersNet \
     RipsPointNet \
     ScalarDistanceDeepSet \
     ScalarInputMLP \

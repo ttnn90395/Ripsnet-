@@ -31,46 +31,46 @@ DATASETS_3D="shapes3d_topology shapes3d_geometry shapes3d_complex shapes3d_8way"
 ALL_DATASETS="$DATASETS_2D $DATASETS_3D"
 TRIALS="0 1 2"
 
-echo "=== 1. PointNet3D + denoise (statistical) ==="
+echo "=== 1. PersNet + denoise (statistical) ==="
 for ds in $ALL_DATASETS; do
     for t in $TRIALS; do
         if [ "$ds" = "circles" ] || [ "$ds" = "circles_noisy" ]; then
-            submit_job "$ds" "PointNet3D" "$t" 16G 01:00:00 "--denoise"
+            submit_job "$ds" "PersNet" "$t" 16G 01:00:00 "--denoise"
         else
-            submit_job "$ds" "PointNet3D" "$t" 32G 03:00:00 "--denoise"
+            submit_job "$ds" "PersNet" "$t" 32G 03:00:00 "--denoise"
         fi
     done
 done
 
-echo "=== 2. PointNet3D + denoise-meanshift ==="
+echo "=== 2. PersNet + denoise-meanshift ==="
 for ds in $ALL_DATASETS; do
     for t in $TRIALS; do
         if [ "$ds" = "circles" ] || [ "$ds" = "circles_noisy" ]; then
-            submit_job "$ds" "PointNet3D" "$t" 16G 01:00:00 "--denoise --denoise-method=meanshift"
+            submit_job "$ds" "PersNet" "$t" 16G 01:00:00 "--denoise --denoise-method=meanshift"
         else
-            submit_job "$ds" "PointNet3D" "$t" 32G 03:00:00 "--denoise --denoise-method=meanshift"
+            submit_job "$ds" "PersNet" "$t" 32G 03:00:00 "--denoise --denoise-method=meanshift"
         fi
     done
 done
 
-echo "=== 3. PointNet3D + geom-reg ==="
+echo "=== 3. PersNet + geom-reg ==="
 for ds in $ALL_DATASETS; do
     for t in $TRIALS; do
         if [ "$ds" = "circles" ] || [ "$ds" = "circles_noisy" ]; then
-            submit_job "$ds" "PointNet3D" "$t" 16G 01:00:00 "--geom-reg"
+            submit_job "$ds" "PersNet" "$t" 16G 01:00:00 "--geom-reg"
         else
-            submit_job "$ds" "PointNet3D" "$t" 32G 03:00:00 "--geom-reg"
+            submit_job "$ds" "PersNet" "$t" 32G 03:00:00 "--geom-reg"
         fi
     done
 done
 
-echo "=== 4. PointNet3D + feat-pd ==="
+echo "=== 4. PersNet + feat-pd ==="
 for ds in $ALL_DATASETS; do
     for t in $TRIALS; do
         if [ "$ds" = "circles" ] || [ "$ds" = "circles_noisy" ]; then
-            submit_job "$ds" "PointNet3D" "$t" 16G 01:00:00 "--feat-pd"
+            submit_job "$ds" "PersNet" "$t" 16G 01:00:00 "--feat-pd"
         else
-            submit_job "$ds" "PointNet3D" "$t" 32G 03:00:00 "--feat-pd"
+            submit_job "$ds" "PersNet" "$t" 32G 03:00:00 "--feat-pd"
         fi
     done
 done
@@ -97,13 +97,13 @@ for ds in $ALL_DATASETS; do
     done
 done
 
-echo "=== 7. PointNet3D + combined (denoise + geom-reg + feat-pd) ==="
+echo "=== 7. PersNet + combined (denoise + geom-reg + feat-pd) ==="
 for ds in $ALL_DATASETS; do
     for t in $TRIALS; do
         if [ "$ds" = "circles" ] || [ "$ds" = "circles_noisy" ]; then
-            submit_job "$ds" "PointNet3D" "$t" 16G 01:00:00 "--denoise --geom-reg --feat-pd"
+            submit_job "$ds" "PersNet" "$t" 16G 01:00:00 "--denoise --geom-reg --feat-pd"
         else
-            submit_job "$ds" "PointNet3D" "$t" 32G 03:00:00 "--denoise --geom-reg --feat-pd"
+            submit_job "$ds" "PersNet" "$t" 32G 03:00:00 "--denoise --geom-reg --feat-pd"
         fi
     done
 done

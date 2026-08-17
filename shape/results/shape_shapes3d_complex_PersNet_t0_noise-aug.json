@@ -1,0 +1,20 @@
+{
+  "dataset": "shapes3d_complex",
+  "model": "PersNet",
+  "trial": 0,
+  "num_epochs": 20,
+  "batch_size": 32,
+  "clean_accuracy": 0.16666666666666666,
+  "noisy_accuracy": 0.16666666666666666,
+  "best_val_accuracy": 16.666666666666664,
+  "num_classes": 6,
+  "n_train": 900,
+  "n_test": 300,
+  "n_points": 600,
+  "params": 142214,
+  "noise_aug": true,
+  "dtm_filter": false,
+  "attn_pool": false,
+  "multiscale": false,
+  "pd_fusion": false
+}

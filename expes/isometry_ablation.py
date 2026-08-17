@@ -28,7 +28,7 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 from models import (
     TensorFieldNetwork, GTTensorFieldNetwork, GTTensorFieldNetworkV2,
-    OnEquivariantTensorFieldNetwork, PointNet3D,
+    OnEquivariantTensorFieldNetwork, PersNet,
     ScalarDistanceDeepSet, PointNetTutorial, ScalarInputMLP, MultiInputModel,
     DistanceMatrixRaggedModel,
     AttentionTensorFieldNetwork, StochasticTensorFieldNetwork,
@@ -126,7 +126,7 @@ def prepare_for_model(mname, tensor_list):
             if arr.shape[1] == 2 and needs_3d:
                 arr = np.concatenate([arr, np.zeros((arr.shape[0],1))], axis=1)
             out.append(torch.FloatTensor(arr).to(device))
-        elif mname == 'PointNet3D':
+        elif mname == 'PersNet':
             if arr.shape[1] < 3:
                 arr = np.concatenate([arr, np.zeros((arr.shape[0], 3-arr.shape[1]))], axis=1)
             out.append(torch.FloatTensor(arr[:,:3]).to(device))
@@ -177,24 +177,63 @@ if ckpt_norm is None: ckpt_norm = 'bn' if _has_bn else 'none'
 
 # ─── Build model ────────────────────────────────────────────────────────────
 def build_model(name, out_dim):
+    extra = {}
+    for k in ['hidden_channels','num_layers','num_rbf','classifier_dims',
+              'k_neighbors','max_order','num_heads','radial_hidden','cutoff',
+              'transformer_layers']:
+        v = None
+        if isinstance(ckpt, dict):
+            v = ckpt.get(k, ckpt.get(f'hp_{k}', None))
+        if v: extra[k] = v
+    def _infer_arch(state):
+        keys = set(state.keys()); info = {}
+        prefix = ''
+        for c in ('_inner.base._inner.','_inner.',''):
+            if any(k.startswith(c) for k in keys): prefix = c; break
+        rk = f'{prefix}rbf.centers'
+        if rk in state: info['num_rbf'] = state[rk].shape[0]
+        gk = next((k for k in keys if 'gate.gates.' in k and k.endswith('.weight')), None)
+        if gk: info['hidden_channels'] = state[gk].shape[0]
+        mp = f'{prefix}mp_layers.'
+        lids = []
+        for k in keys:
+            if k.startswith(mp):
+                r = k[len(mp):].split('.')[0]
+                if r.isdecimal(): lids.append(int(r))
+        if lids: info['num_layers'] = max(lids)+1
+        rho = f'{prefix}rho.'
+        lks = sorted([k for k in keys if k.startswith(rho) and k.endswith('.weight')
+                      and state[k].ndim == 2],
+                     key=lambda k: int(k[len(rho):].split('.')[0]))
+        if lks: info['classifier_dims'] = [state[k].shape[0] for k in lks[:-1]]
+        return info
+    arch = _infer_arch(model_state)
+    extra = {**arch, **extra}
+    hp = lambda k, d: extra.get(k, d)
     if name == 'TensorFieldNetwork':
-        return TensorFieldNetwork(num_classes=out_dim, max_order=0,
-            hidden_channels=8, num_layers=2, num_rbf=64, cutoff=1.0,
-            k_neighbors=8, classifier_dims=[16])
+        return TensorFieldNetwork(num_classes=out_dim, max_order=hp('max_order',0),
+            hidden_channels=hp('hidden_channels',8), num_layers=hp('num_layers',2),
+            num_rbf=hp('num_rbf',64), cutoff=1.0, k_neighbors=hp('k_neighbors',8),
+            classifier_dims=hp('classifier_dims',[16]))
     if name == 'GTTensorFieldNetwork':
-        return GTTensorFieldNetwork(n=dim, num_classes=out_dim, max_order=0,
-            hidden_channels=8, num_layers=2, num_rbf=64, cutoff=1.0,
-            k_neighbors=8, classifier_dims=[16], radial_hidden=128)
+        return GTTensorFieldNetwork(n=dim, num_classes=out_dim,
+            max_order=hp('max_order',0), hidden_channels=hp('hidden_channels',8),
+            num_layers=hp('num_layers',2), num_rbf=64, cutoff=1.0,
+            k_neighbors=hp('k_neighbors',8), classifier_dims=hp('classifier_dims',[16]),
+            radial_hidden=128)
     if name == 'GTTensorFieldNetworkV2':
-        return GTTensorFieldNetworkV2(n=dim, num_classes=out_dim, max_order=0,
-            hidden_channels=8, num_layers=2, num_rbf=64, cutoff=1.0,
-            k_neighbors=8, classifier_dims=[16], radial_hidden=128)
+        return GTTensorFieldNetworkV2(n=dim, num_classes=out_dim,
+            max_order=hp('max_order',0), hidden_channels=hp('hidden_channels',8),
+            num_layers=hp('num_layers',2), num_rbf=64, cutoff=1.0,
+            k_neighbors=hp('k_neighbors',8), classifier_dims=hp('classifier_dims',[16]),
+            radial_hidden=128)
     if name == 'OnEquivariantTensorFieldNetwork':
         return OnEquivariantTensorFieldNetwork(num_classes=out_dim,
-            max_order=1, hidden_channels=32, num_layers=3, num_rbf=64,
-            cutoff=1.0, k_neighbors=16, classifier_dims=[64,32])
-    if name == 'PointNet3D':
-        return PointNet3D(output_dim=out_dim, activation=ckpt_activation, norm=ckpt_norm)
+            max_order=hp('max_order',1), hidden_channels=hp('hidden_channels',32),
+            num_layers=hp('num_layers',3), num_rbf=64, cutoff=1.0,
+            k_neighbors=hp('k_neighbors',16), classifier_dims=hp('classifier_dims',[64,32]))
+    if name == 'PersNet':
+        return PersNet(output_dim=out_dim, activation=ckpt_activation, norm=ckpt_norm)
     if name == 'PointNetTutorial':
         return PointNetTutorial(output_dim=out_dim, activation=ckpt_activation, norm=ckpt_norm)
     if name == 'DistanceMatrixRaggedModel':
@@ -210,18 +249,24 @@ def build_model(name, out_dim):
             activation=ckpt_activation, norm=ckpt_norm)
     if name == 'AttentionTensorFieldNetwork':
         return AttentionTensorFieldNetwork(num_classes=out_dim,
-            max_order=1, hidden_channels=32, num_layers=3, num_heads=4,
-            num_rbf=64, cutoff=1.0, k_neighbors=16,
-            classifier_dims=[64,32], radial_hidden=64)
+            max_order=hp('max_order',1), hidden_channels=hp('hidden_channels',32),
+            num_layers=hp('num_layers',3), num_heads=hp('num_heads',4),
+            num_rbf=64, cutoff=1.0, k_neighbors=hp('k_neighbors',16),
+            classifier_dims=hp('classifier_dims',[64,32]), radial_hidden=64)
     if name == 'CrossAttentionTensorFieldNetwork':
+        _ca_hc = max(hp('hidden_channels',32), 32)
         return CrossAttentionTensorFieldNetwork(num_classes=out_dim, n=dim,
-            max_order=1, hidden_channels=8, num_layers=2, num_heads=4,
-            transformer_layers=2, num_rbf=64, cutoff=1.0, k_neighbors=8,
-            classifier_dims=[16], radial_hidden=64, dropout=0.1)
+            max_order=hp('max_order',0), hidden_channels=_ca_hc,
+            num_layers=hp('num_layers',3), num_heads=hp('num_heads',4),
+            transformer_layers=hp('transformer_layers',2), num_rbf=hp('num_rbf',64),
+            cutoff=1.0, k_neighbors=hp('k_neighbors',16),
+            classifier_dims=hp('classifier_dims',[64,32]),
+            radial_hidden=hp('radial_hidden',64), dropout=0.1)
     if name == 'StochasticTensorFieldNetwork':
         return StochasticTensorFieldNetwork(num_classes=out_dim,
-            num_mixtures=3, max_order=0, hidden_channels=8, num_layers=2,
-            num_rbf=64, cutoff=1.0, k_neighbors=8, encoder_dims=[64,32])
+            num_mixtures=hp('num_mixtures',3), max_order=0, hidden_channels=8,
+            num_layers=2, num_rbf=64, cutoff=1.0, k_neighbors=8,
+            encoder_dims=[64,32])
     if name == 'RelaxedOnEquivariantTensorFieldNetwork':
         return RelaxedOnEquivariantTensorFieldNetwork(num_classes=out_dim,
             max_order=1, hidden_channels=32, num_layers=3, num_rbf=64,

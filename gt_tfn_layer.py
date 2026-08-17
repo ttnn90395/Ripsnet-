@@ -674,6 +674,7 @@ class GTTensorFieldNetwork(nn.Module):
         robust_thr:      float = 1.5,
         readout_pool:    str   = 'sum',
         norm_readout:    bool  = False,
+        use_cov_features: bool = False,
     ):
         super().__init__()
         self.n              = n
@@ -720,6 +721,12 @@ class GTTensorFieldNetwork(nn.Module):
 
         init_scalar_c = 1 + node_attr_dim
         self.node_attr_dim = node_attr_dim
+        self.use_cov_features = use_cov_features
+        if use_cov_features:
+            # Per-cloud rotation-invariant shape statistics broadcast to every
+            # point: sorted normalized covariance eigenvalues (n) + centroid
+            # distance mean / std / p90 + centroid norm (4).
+            init_scalar_c += n + 4
         if node_attr_dim > 0:
             self.attr_proj = nn.Linear(node_attr_dim, node_attr_dim, bias=False)
 
@@ -788,6 +795,47 @@ class GTTensorFieldNetwork(nn.Module):
         return vector_feature(pos, self._vec_change)
 
     # ------------------------------------------------------------------
+    def _global_invariants(self, pos: torch.Tensor) -> torch.Tensor:
+        """
+        Per-cloud rotation-invariant statistics, robust under Gaussian point
+        noise (stable empirical moments).  Returns (n+4,) or (B, n+4):
+          - sorted normalized eigenvalues of the spatial covariance matrix,
+            normalized by their sum (anisotropy spectrum),
+          - mean / std / 90th-percentile of the centroid distance,
+          - centroid norm.
+        """
+        if pos.ndim == 3:
+            B, N, n = pos.shape
+            c = pos.mean(dim=1, keepdim=True)                          # (B,1,n)
+            dx = pos - c                                               # (B,N,n)
+            C = torch.einsum('bni,bnj->bij', dx, dx) / max(N - 1, 1)   # (B,n,n)
+            w = torch.linalg.eigvalsh(C).flip(-1)                      # (B,n) desc
+            w = w / w.sum(-1, keepdim=True).clamp_min(1e-12)
+            d = dx.norm(dim=-1)                                        # (B,N)
+            cn = c.norm(dim=-1).squeeze(1)                             # (B,)
+            return torch.cat([
+                w,
+                d.mean(-1).unsqueeze(-1),
+                d.std(-1).unsqueeze(-1),
+                torch.quantile(d, 0.9, dim=-1).unsqueeze(-1),
+                cn.unsqueeze(-1),
+            ], dim=-1)
+        N, n = pos.shape
+        c = pos.mean(dim=0, keepdim=True)                              # (1,n)
+        dx = pos - c                                                   # (N,n)
+        C = dx.T @ dx / max(N - 1, 1)                                  # (n,n)
+        w = torch.linalg.eigvalsh(C).flip(-1)
+        w = w / w.sum().clamp_min(1e-12)
+        d = dx.norm(dim=-1)                                            # (N,)
+        return torch.cat([
+            w,
+            d.mean().unsqueeze(0),
+            d.std().unsqueeze(0),
+            torch.quantile(d, 0.9).unsqueeze(0),
+            c.norm().unsqueeze(0),
+        ])
+
+    # ------------------------------------------------------------------
     def _encode_batch(
         self,
         pos:       torch.Tensor,
@@ -810,6 +858,10 @@ class GTTensorFieldNetwork(nn.Module):
 
         # Initial features
         f0_parts = [pos.norm(dim=-1, keepdim=True)]                      # (B, N, 1)
+        if self.use_cov_features:
+            inv = self._global_invariants(pos)                           # (B, n+4)
+            inv_b = inv.unsqueeze(1).expand(B, N, -1)
+            f0_parts.append(inv_b)
         if node_attr is not None and self.node_attr_dim > 0:
             f0_parts.append(self.attr_proj(node_attr))
         f0 = torch.cat(f0_parts, dim=-1).unsqueeze(-1)                   # (B, N, C, 1)
@@ -887,6 +939,9 @@ class GTTensorFieldNetwork(nn.Module):
 
         # Initial features
         f0_parts = [pos.norm(dim=-1, keepdim=True)]
+        if self.use_cov_features:
+            inv = self._global_invariants(pos)                           # (n+4,)
+            f0_parts.append(inv.unsqueeze(0).expand(N, -1))
         if node_attr is not None and self.node_attr_dim > 0:
             f0_parts.append(self.attr_proj(node_attr))
         f0 = torch.cat(f0_parts, dim=-1).unsqueeze(-1)  # (N, C, 1)

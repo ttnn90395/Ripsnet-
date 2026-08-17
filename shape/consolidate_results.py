@@ -37,7 +37,7 @@ DATASETS = [
 ]
 
 MODELS = [
-    "PointNet3D",
+    "PersNet",
     "RipsPointNet",
     "ScalarInputMLP",
     "ScalarDistanceDeepSet",
@@ -52,7 +52,7 @@ MODELS = [
 ]
 
 MODEL_SHORT = {
-    "PointNet3D": "PointNet3D",
+    "PersNet": "PersNet",
     "RipsPointNet": "RipsPointNet",
     "ScalarInputMLP": "ScalarMLP",
     "ScalarDistanceDeepSet": "ScalarDeepSet",
@@ -123,6 +123,8 @@ def build_table(results):
             flags.append("pool-%s" % r.get("readout_pool"))
         if r.get("norm_readout"):
             flags.append("norm-readout")
+        if r.get("cov_feat"):
+            flags.append("cov-feat")
         if r.get("aug_frac"):
             flags.append("frac%s" % r.get("aug_frac"))
         if r.get("multiscale"):
@@ -135,6 +137,16 @@ def build_table(results):
             flags.append("geom-reg")
         if r.get("feat_pd"):
             flags.append("feat-pd")
+        if r.get("consistency"):
+            flags.append("consistency-lam%s" % r.get("cons_lambda"))
+        if r.get("train_dtm_readout"):
+            flags.append("train-dtm-readout")
+        for hp_name, hp_flag in (("max_order", "mo"), ("hidden_channels", "hc"),
+                                 ("num_layers", "nl"), ("k_neighbors", "kn"),
+                                 ("num_rbf", "rbf")):
+            hpv = r.get(hp_name)
+            if hpv is not None:
+                flags.append("%s%s" % (hp_flag, hpv))
         variant = "_".join(flags) if flags else "baseline"
         
         # Handle different accuracy key names

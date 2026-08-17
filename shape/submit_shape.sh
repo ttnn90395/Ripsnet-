@@ -11,7 +11,7 @@ EPOCHS=${1:-100}
 TRIALS=${2:-3}
 
 MODELS=(
-    PointNet3D
+    PersNet
     RipsPointNet
     ScalarDistanceDeepSet
     ScalarInputMLP

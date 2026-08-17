@@ -1,11 +1,11 @@
 """
 tfn_model.py  (v2 — all improvements integrated)
 =================================================
-Point cloud models: PointNet3D (baseline) and the full GT-TFN family.
+Point cloud models: PersNet (baseline) and the full GT-TFN family.
 
 Public API
 ----------
-  PointNet3D               Deep-Sets baseline, 3D only (unchanged)
+  PersNet               Deep-Sets baseline, 3D only (unchanged, no Rips structure)
   TensorFieldNetwork       Original SO(3) TFN interface — now backed by GTTFNv2
   GTTensorFieldNetwork     n-dim SO(n) model (from gt_tfn_layer)
   GTTensorFieldNetworkV2   Recommended: all improvements, clean config
@@ -44,10 +44,10 @@ from models import (
 
 
 # ============================================================================
-# PointNet3D  (unchanged baseline)
+# PersNet  (unchanged baseline)
 # ============================================================================
 
-class PointNet3D(nn.Module):
+class PersNet(nn.Module):
     """
     Deep-Sets / PointNet baseline.
     Permutation-invariant but NOT rotation-equivariant.
@@ -200,7 +200,7 @@ class GTTensorFieldNetworkV2(GTTensorFieldNetwork):
 # ============================================================================
 
 __all__ = [
-    "PointNet3D",
+    "PersNet",
     "TensorFieldNetwork",
     "GTTensorFieldNetwork",
     "GTTensorFieldNetworkV2",
@@ -216,9 +216,9 @@ __all__ = [
 if __name__ == "__main__":
     torch.manual_seed(0)
 
-    # ── PointNet3D ────────────────────────────────────────────────────────
-    print("=== PointNet3D ===")
-    pnet  = PointNet3D(output_dim=10)
+    # ── PersNet ────────────────────────────────────────────────────────
+    print("=== PersNet ===")
+    pnet  = PersNet(output_dim=10)
     batch3 = [torch.randn(n, 3) for n in [32, 64, 48]]
     print(f"  {pnet(batch3).shape}")
 
@@ -270,7 +270,7 @@ if __name__ == "__main__":
     # ── Parameter comparison table ────────────────────────────────────────
     print("\n=== Parameter counts ===")
     models = [
-        ("PointNet3D",            pnet),
+        ("PersNet",            pnet),
         ("TensorFieldNetwork",    tfn),
         ("GTTFNv2 (n=3)",         base),
         ("GTTFNv2 (n=4)",         m4),

@@ -5,9 +5,8 @@ Import structure (no circular imports):
   gt_tfn_layer.py    → GTTFNLayer, GTTFN_RBFExpansion, GTTensorFieldNetwork,
                         ChannelMixer, EquivariantGate, ResidualProjection
   gt_improvements.py → HierarchicalGTTFN, OnEquivariantWrapper
-  THIS file          → GTTensorFieldNetworkV2, TensorFieldNetwork, PointNet3D,
+  THIS file          → GTTensorFieldNetworkV2, TensorFieldNetwork, PersNet,
                         RipsPointNet, AttnRipsPointNet, and all notebook/ragged models.
-
   tfn_model.py imports FROM this file (one-way): no circular deps.
 
 Activation upgrade
@@ -244,6 +243,7 @@ class GTTensorFieldNetworkV2(_GTTensorFieldNetworkBase):
         classifier_dims: Optional[List[int]] = None,
         radial_hidden:   int       = 128,
         readout_pool:    str       = 'sum',
+        use_cov_features: bool     = False,
     ):
         if classifier_dims is None:
             classifier_dims = [256, 128]
@@ -263,6 +263,7 @@ class GTTensorFieldNetworkV2(_GTTensorFieldNetworkBase):
             classifier_dims=classifier_dims,
             radial_hidden=radial_hidden,
             readout_pool=readout_pool,
+            use_cov_features=use_cov_features,
         )
 
     def forward(self, batch, node_attrs=None):
@@ -316,12 +317,14 @@ class TensorFieldNetwork(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# PointNet3D  — 3-D Deep-Sets baseline
+# PersNet  — 3-D Deep-Sets baseline (no persistence structure; reference model)
 # ---------------------------------------------------------------------------
 
-class PointNet3D(nn.Module):
+class PersNet(nn.Module):
     """
-    Permutation-invariant Deep-Sets baseline (NOT rotation-equivariant).
+    Permutation-invariant Deep-Sets / PointNet baseline (NOT rotation-equivariant).
+    Consumes raw coordinates only — no Rips or persistence structure — and is the
+    reference model that isolates the effect of the geometric/topological machinery.
     Uses GELU + BatchNorm in both phi and rho MLPs by default.
     forward(batch: List[Tensor(N_i, 3)]) → Tensor(B, output_dim)
     """
@@ -630,6 +633,8 @@ class AttnRipsPointNet(nn.Module):
                  perpoint_gate: bool = False,
                  perpoint_ctx_pool: str = 'mean',
                  perpoint_count: bool = False,
+                 perpoint_dist: bool = False,
+                 perpoint_abc: bool = False,
                  fusion_dims: Optional[List[int]] = None,
                  use_gate: bool = False, gate_dims=(32, 16),
                  use_pd_stats: bool = False, pd_stats_dims=(16, 32),
@@ -718,8 +723,10 @@ class AttnRipsPointNet(nn.Module):
             # If perpoint_ctx, the gene's attention-pooled summary vector is
             # concatenated to each element's features so the per-element score
             # is conditioned on the gene's overall regulatory state.
+            pp_extra = (1 if perpoint_count else 0) + (1 if perpoint_dist else 0) \
+                       + (3 if perpoint_abc else 0)
             pp_in = (3 * d if (perpoint_ctx and perpoint_ctx_pool == 'cat')
-                     else 2 * d if perpoint_ctx else d) + (1 if perpoint_count else 0)
+                     else 2 * d if perpoint_ctx else d) + pp_extra
             if perpoint_dims:
                 self.perpoint_head = _build_mlp([pp_in] + list(perpoint_dims) + [1],
                                                 activation=activation, norm='ln',
@@ -734,6 +741,8 @@ class AttnRipsPointNet(nn.Module):
         self.perpoint_gate = perpoint_gate
         self.perpoint_ctx_pool = perpoint_ctx_pool or 'mean'
         self.perpoint_count = perpoint_count
+        self.perpoint_dist = perpoint_dist
+        self.perpoint_abc = perpoint_abc
         if perpoint_gate:
             # per-gene scalar gate on the context: sigmoid(MLP(pooled, logN)).
             # Lets the per-point head ignore the gene summary in megaclouds,
@@ -885,6 +894,20 @@ class AttnRipsPointNet(nn.Module):
                 # (large N) without a learned gate (round-19 failure).
                 cnt = torch.log1p(mask.sum(dim=1, keepdim=True).float()).unsqueeze(-1)
                 pp_inp = torch.cat([pp_inp, cnt.expand(-1, N, -1)], dim=-1)
+            if self.perpoint_dist:
+                # explicit per-element distance channel (column 1 of the caller's
+                # feature matrix, already log-transformed + fold-standardized):
+                # lets the per-point head weigh its decision by genomic distance,
+                # which the shared phi embedding buries.  Targets the >=200 kb bin.
+                pp_inp = torch.cat([pp_inp, point_in[..., 1:2]], dim=-1)
+            if self.perpoint_abc:
+                # direct access to the strongest far-range discriminators
+                # (distance, ABC score, 3D contact — cols 1, 8, 3 in the caller's
+                # standardized log-feature matrix).  A linear head can then rank
+                # far positives (high ABC/contact at distance) without digging
+                # them out of the 128-d phi embedding.
+                pp_inp = torch.cat([pp_inp, point_in[..., 1:2],
+                                    point_in[..., 8:9], point_in[..., 3:4]], dim=-1)
             pp_logit = self.perpoint_head(self.perpoint_bn(pp_inp)).squeeze(-1)  # (B, N)
             pp_logit = pp_logit.masked_fill(~mask, -1e9)
 
@@ -1516,7 +1539,7 @@ __all__ = [
     'OnEquivariantWrapper',
     'OnEquivariantTensorFieldNetwork',
     'GTTFNEncoder',
-    'PointNet3D',
+    'PersNet',
     'RipsPointNet',
     # New TFN-derived models
     'GTTensorFieldNetworkWithAttention',

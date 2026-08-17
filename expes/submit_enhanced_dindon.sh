@@ -19,9 +19,9 @@ $SSH_CMD "cd $REMOTE_DIR && git pull || true"
 
 echo "=== Generating parameter map (local) ==="
 # Models to test with improvements: best TFN variants + strongest baselines.
-# PointNet3D and DistanceMatrixRaggedModel are top per-dataset performers and
+# PersNet and DistanceMatrixRaggedModel are top per-dataset performers and
 # gain most from seed ensembling (high trial variance), so keep them covered.
-MODELS="TensorFieldNetwork OnEquivariantTensorFieldNetwork AttentionTensorFieldNetwork HybridOnEquivariantTensorFieldNetwork PointNet3D DistanceMatrixRaggedModel"
+MODELS="TensorFieldNetwork OnEquivariantTensorFieldNetwork AttentionTensorFieldNetwork HybridOnEquivariantTensorFieldNetwork PersNet DistanceMatrixRaggedModel GTTensorFieldNetworkV2 CrossAttentionTensorFieldNetwork"
 DATASETS="CBF ECG200 ECG5000 GunPoint Plane PowerCons SonyAIBORobotSurface1 SonyAIBORobotSurface2 TwoLeadECG UMD"
 FRACTIONS="10 20 30 50 70 100"
 TRIALS="0 1 2 3"
@@ -147,7 +147,18 @@ perl -pi -e "s/NJOBS_PLACEHOLDER/$((N_JOBS-1))/g" "$SLURM_LOCAL"
 $SCP_CMD "$SLURM_LOCAL" $REMOTE:$REMOTE_DIR/expes/submit_enhanced_array.sh
 rm -f "$SLURM_LOCAL"
 
-echo "=== Submitting ==="
-$SSH_CMD "cd $REMOTE_DIR/expes && sbatch submit_enhanced_array.sh"
+echo "=== Submitting (splitting for MaxArraySize=1000) ==="
+MAX_ARRAY=1000
+BATCH_START=0
+while [ $BATCH_START -lt $N_JOBS ]; do
+    BATCH_END=$((BATCH_START + MAX_ARRAY - 1))
+    if [ $BATCH_END -ge $N_JOBS ]; then
+        BATCH_END=$((N_JOBS - 1))
+    fi
+    BATCH_SIZE=$((BATCH_END - BATCH_START + 1))
+    echo "Submitting batch $BATCH_START-$BATCH_END ($BATCH_SIZE jobs)"
+    $SSH_CMD "cd $REMOTE_DIR/expes && sed 's/#SBATCH --array=0-$((N_JOBS-1))/#SBATCH --array=$BATCH_START-$BATCH_END/' submit_enhanced_array.sh | sbatch"
+    BATCH_START=$((BATCH_END + 1))
+done
 
 echo "=== Done! ==="

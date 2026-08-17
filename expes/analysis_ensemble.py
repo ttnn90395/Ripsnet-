@@ -30,7 +30,7 @@ from models import (
 MODEL_NAMES = [
     'TensorFieldNetwork', 'GTTensorFieldNetwork', 'GTTensorFieldNetworkV2',
     'HierarchicalGTTFN', 'HierarchicalTensorFieldNetwork',
-    'OnEquivariantTensorFieldNetwork', 'PointNet3D',
+    'OnEquivariantTensorFieldNetwork', 'PersNet',
     'ScalarDistanceDeepSet', 'PointNetTutorial', 'ScalarInputMLP', 'MultiInputModel',
     'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
 ]

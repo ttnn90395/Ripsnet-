@@ -1,0 +1,27 @@
+shape/train_shape.py: shapes3d_8way PersNet epochs=20 trial=1 bs=32 quick=False
+Device: cpu  AMP: False
+Generating shapes3d_8way data...
+  Train: 896 samples, Test: 296 samples
+  Classes: 8  Points: 600
+  Model: PersNet (142472 params)
+Precomputing geometry...
+
+Training PersNet for 20 epochs...
+  Epoch 1/20  loss=1.4792  train_acc=38.8%  val_acc=74.7%
+  Epoch 10/20  loss=0.0003  train_acc=100.0%  val_acc=100.0%
+  Early stopping at epoch 18
+
+Final evaluation...
+
+============================================================
+Results: PersNet on shapes3d_8way
+============================================================
+  Clean test accuracy: 1.0000 (100.00%)
+  Noisy test accuracy: 0.5304 (53.04%)
+  Best val accuracy:   100.00%
+  Parameters: 142,472
+  Classes: ['sphere', 'torus', 'double_torus', 'two_spheres', 'cylinder', 'cube', 'knot', 'tetrahedron']
+  All 8 shapes
+
+Saved to results/shape_shapes3d_8way_PersNet_t1.json
+Model saved to models/shape_shapes3d_8way_PersNet_t1.pt

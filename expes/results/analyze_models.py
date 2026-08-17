@@ -44,7 +44,7 @@ tfns = [
 tfns_gs = [m + "_GS" for m in tfns]
 dmr = "DistanceMatrixRaggedModel"
 dmr_gs = dmr + "_GS"
-pointnets = ["PointNet3D", "PointNetTutorial"]
+pointnets = ["PersNet", "PointNetTutorial"]
 pointnets_gs = [m + "_GS" for m in pointnets]
 
 df = pd.read_csv("ucr_results.csv", index_col=0)

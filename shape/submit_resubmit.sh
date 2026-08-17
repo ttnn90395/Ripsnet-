@@ -38,7 +38,7 @@ for ds in $DATASETS_2D; do
 done
 
 # Single missing 2D trials: force CPU
-for entry in "circles:PointNet3D:1" "circles_noisy:PointNet3D:1" "circles_noisy:AttentionTensorFieldNetwork:0"; do
+for entry in "circles:PersNet:1" "circles_noisy:PersNet:1" "circles_noisy:AttentionTensorFieldNetwork:0"; do
     IFS=':' read -r ds model t <<< "$entry"
     jname="shape_${ds}_${model}_t${t}"
     if [ -f "results/${jname}.json" ]; then

@@ -24,7 +24,7 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 from models import (
     TensorFieldNetwork, GTTensorFieldNetwork, GTTensorFieldNetworkV2,
-    OnEquivariantTensorFieldNetwork, PointNet3D,
+    OnEquivariantTensorFieldNetwork, PersNet,
     ScalarDistanceDeepSet, PointNetTutorial, ScalarInputMLP, MultiInputModel,
     DistanceMatrixRaggedModel,
     AttentionTensorFieldNetwork, StochasticTensorFieldNetwork,
@@ -102,6 +102,15 @@ if ckpt_path is None:
         _model = OnEquivariantTensorFieldNetwork(num_classes=output_dim, max_order=1, hidden_channels=32, num_layers=3, num_rbf=64, classifier_dims=[64,32]).to(device)
     elif model_label == 'AttentionTensorFieldNetwork':
         _model = AttentionTensorFieldNetwork(num_classes=output_dim, max_order=1, hidden_channels=32, num_layers=3, num_heads=4, num_rbf=64, classifier_dims=[64,32], radial_hidden=64).to(device)
+    elif model_label == 'CrossAttentionTensorFieldNetwork':
+        _model = CrossAttentionTensorFieldNetwork(num_classes=output_dim, n=dim,
+            max_order=0, hidden_channels=32, num_layers=3, num_heads=4,
+            transformer_layers=2, num_rbf=64, cutoff=1.0, k_neighbors=16,
+            classifier_dims=[64,32], radial_hidden=64, dropout=0.1).to(device)
+    elif model_label == 'GTTensorFieldNetworkV2':
+        _model = GTTensorFieldNetworkV2(n=dim, num_classes=output_dim,
+            max_order=0, hidden_channels=32, num_layers=3, num_rbf=64, cutoff=1.0,
+            k_neighbors=16, classifier_dims=[64,32], radial_hidden=128).to(device)
     else:
         _model = OnEquivariantTensorFieldNetwork(num_classes=output_dim, max_order=1, hidden_channels=32, num_layers=3, num_rbf=64, classifier_dims=[64,32]).to(device)
     _targets = torch.FloatTensor(np.concatenate(PVs_train, axis=1)).to(device)
@@ -155,79 +164,20 @@ if ckpt_norm is None: ckpt_norm = 'bn' if _has_bn else 'none'
 
 def build_analysis_model(name, out_dim, extra=None):
     extra = extra or {}
-    hp = lambda k, d: extra.get(k, d)
-    n_dim = dim
-    if name == 'TensorFieldNetwork':
-        return TensorFieldNetwork(num_classes=out_dim, max_order=hp('max_order',0),
-            hidden_channels=hp('hidden_channels',8), num_layers=hp('num_layers',2),
-            num_rbf=hp('num_rbf',64), cutoff=1.0, k_neighbors=hp('k_neighbors',8),
-            classifier_dims=hp('classifier_dims',[16]))
-    if name == 'GTTensorFieldNetwork':
-        return GTTensorFieldNetwork(n=n_dim, num_classes=out_dim,
-            max_order=hp('max_order',0), hidden_channels=hp('hidden_channels',8),
-            num_layers=hp('num_layers',2), num_rbf=64, cutoff=1.0,
-            k_neighbors=hp('k_neighbors',8), classifier_dims=[16], radial_hidden=128)
-    if name == 'GTTensorFieldNetworkV2':
-        return GTTensorFieldNetworkV2(n=n_dim, num_classes=out_dim,
-            max_order=hp('max_order',0), hidden_channels=hp('hidden_channels',8),
-            num_layers=hp('num_layers',2), num_rbf=64, cutoff=1.0,
-            k_neighbors=hp('k_neighbors',8), classifier_dims=[16], radial_hidden=128)
-    if name == 'OnEquivariantTensorFieldNetwork':
-        return OnEquivariantTensorFieldNetwork(num_classes=out_dim,
-            max_order=hp('max_order',1), hidden_channels=hp('hidden_channels',32),
-            num_layers=hp('num_layers',3), num_rbf=64, cutoff=1.0,
-            k_neighbors=hp('k_neighbors',16), classifier_dims=[64,32])
-    if name == 'PointNet3D':
-        return PointNet3D(output_dim=out_dim, activation=ckpt_activation, norm=ckpt_norm)
-    if name == 'PointNetTutorial':
-        return PointNetTutorial(output_dim=out_dim, activation=ckpt_activation, norm=ckpt_norm)
-    if name == 'DistanceMatrixRaggedModel':
-        npts = ckpt_npts or dim
-        return DistanceMatrixRaggedModel(output_dim=out_dim, num_points=npts,
-            activation=ckpt_activation, norm=ckpt_norm)
-    if name == 'ScalarDistanceDeepSet':
-        return ScalarDistanceDeepSet(output_dim=out_dim, activation=ckpt_activation, norm=ckpt_norm)
-    if name == 'ScalarInputMLP':
-        return ScalarInputMLP(output_dim=out_dim, activation=ckpt_activation, norm=ckpt_norm)
-    if name == 'MultiInputModel':
-        return MultiInputModel(target_output_dim=out_dim, scalar_input_dim=1,
-            activation=ckpt_activation, norm=ckpt_norm)
-    if name == 'AttentionTensorFieldNetwork':
-        return AttentionTensorFieldNetwork(num_classes=out_dim,
-            max_order=hp('max_order',1), hidden_channels=32, num_layers=3,
-            num_heads=4, num_rbf=64, cutoff=1.0, k_neighbors=16,
-            classifier_dims=[64,32], radial_hidden=64)
-    if name == 'CrossAttentionTensorFieldNetwork':
-        return CrossAttentionTensorFieldNetwork(num_classes=out_dim, n=n_dim,
-            max_order=1, hidden_channels=8, num_layers=2, num_heads=4,
-            transformer_layers=2, num_rbf=64, cutoff=1.0, k_neighbors=8,
-            classifier_dims=[16], radial_hidden=64, dropout=0.1)
-    if name == 'StochasticTensorFieldNetwork':
-        return StochasticTensorFieldNetwork(num_classes=out_dim,
-            num_mixtures=hp('num_mixtures',3), max_order=0, hidden_channels=8,
-            num_layers=2, num_rbf=64, cutoff=1.0, k_neighbors=8,
-            encoder_dims=[64,32])
-    if name == 'RelaxedOnEquivariantTensorFieldNetwork':
-        return RelaxedOnEquivariantTensorFieldNetwork(num_classes=out_dim,
-            max_order=1, hidden_channels=32, num_layers=3, num_rbf=64,
-            cutoff=1.0, k_neighbors=16, classifier_dims=[64,32])
-    if name == 'HybridOnEquivariantTensorFieldNetwork':
-        return HybridOnEquivariantTensorFieldNetwork(num_classes=out_dim,
-            max_order=1, hidden_channels=32, num_layers=3, num_rbf=64,
-            cutoff=1.0, k_neighbors=16, classifier_dims=[64,32], non_eq_dim=128)
-    if name == 'GraphMambaTensorFieldNetwork':
-        return GraphMambaTensorFieldNetwork(num_classes=out_dim,
-            max_order=hp('max_order',1), hidden_channels=hp('hidden_channels',32),
-            num_layers=hp('num_layers',4), num_rbf=hp('num_rbf',64),
-            cutoff=hp('cutoff',1.0), k_neighbors=hp('k_neighbors',16),
-            classifier_dims=hp('classifier_dims',[64,32]))
-    # Check for saved arch metadata
-    for k in ['hidden_channels','num_layers','num_rbf','classifier_dims','k_neighbors']:
+    # Pull architecture hyperparams saved in the checkpoint so every model is
+    # rebuilt with the exact arch it was trained with (train_nn.py stores these
+    # in the ckpt dict). Without this, hardcoded defaults silently mismatch the
+    # trained state dict and load_state_dict fails (e.g. CrossAttention trained
+    # with hidden_channels>=32 vs. the old hardcoded hidden_channels=8).
+    for k in ['hidden_channels','num_layers','num_rbf','classifier_dims',
+              'k_neighbors','max_order','num_heads','radial_hidden','cutoff',
+              'transformer_layers']:
         v = None
         if isinstance(ckpt, dict):
             v = ckpt.get(k, ckpt.get(f'hp_{k}', None))
         if v: extra[k] = v
-    # Try inference
+    # Infer remaining arch fields straight from the state dict (train_nn.py does
+    # not persist all of them, e.g. hidden_channels/num_layers).
     def _infer_arch(state):
         keys = set(state.keys()); info = {}
         prefix = ''
@@ -252,13 +202,78 @@ def build_analysis_model(name, out_dim, extra=None):
         return info
     arch = _infer_arch(model_state)
     extra = {**arch, **extra}
+    hp = lambda k, d: extra.get(k, d)
+    n_dim = dim
+    if name == 'TensorFieldNetwork':
+        return TensorFieldNetwork(num_classes=out_dim, max_order=hp('max_order',0),
+            hidden_channels=hp('hidden_channels',8), num_layers=hp('num_layers',2),
+            num_rbf=hp('num_rbf',64), cutoff=1.0, k_neighbors=hp('k_neighbors',8),
+            classifier_dims=hp('classifier_dims',[16]))
+    if name == 'GTTensorFieldNetwork':
+        return GTTensorFieldNetwork(n=n_dim, num_classes=out_dim,
+            max_order=hp('max_order',0), hidden_channels=hp('hidden_channels',8),
+            num_layers=hp('num_layers',2), num_rbf=64, cutoff=1.0,
+            k_neighbors=hp('k_neighbors',8), classifier_dims=[16], radial_hidden=128)
+    if name == 'GTTensorFieldNetworkV2':
+        return GTTensorFieldNetworkV2(n=n_dim, num_classes=out_dim,
+            max_order=hp('max_order',0), hidden_channels=hp('hidden_channels',8),
+            num_layers=hp('num_layers',2), num_rbf=64, cutoff=1.0,
+            k_neighbors=hp('k_neighbors',8), classifier_dims=hp('classifier_dims',[16]),
+            radial_hidden=hp('radial_hidden',128))
+    if name == 'OnEquivariantTensorFieldNetwork':
+        return OnEquivariantTensorFieldNetwork(num_classes=out_dim,
+            max_order=hp('max_order',1), hidden_channels=hp('hidden_channels',32),
+            num_layers=hp('num_layers',3), num_rbf=64, cutoff=1.0,
+            k_neighbors=hp('k_neighbors',16), classifier_dims=[64,32])
+    if name == 'PersNet':
+        return PersNet(output_dim=out_dim, activation=ckpt_activation, norm=ckpt_norm)
+    if name == 'PointNetTutorial':
+        return PointNetTutorial(output_dim=out_dim, activation=ckpt_activation, norm=ckpt_norm)
+    if name == 'DistanceMatrixRaggedModel':
+        npts = ckpt_npts or dim
+        return DistanceMatrixRaggedModel(output_dim=out_dim, num_points=npts,
+            activation=ckpt_activation, norm=ckpt_norm)
+    if name == 'ScalarDistanceDeepSet':
+        return ScalarDistanceDeepSet(output_dim=out_dim, activation=ckpt_activation, norm=ckpt_norm)
+    if name == 'ScalarInputMLP':
+        return ScalarInputMLP(output_dim=out_dim, activation=ckpt_activation, norm=ckpt_norm)
+    if name == 'MultiInputModel':
+        return MultiInputModel(target_output_dim=out_dim, scalar_input_dim=1,
+            activation=ckpt_activation, norm=ckpt_norm)
     if name == 'AttentionTensorFieldNetwork':
         return AttentionTensorFieldNetwork(num_classes=out_dim,
-            max_order=extra.get('max_order',1), hidden_channels=extra.get('hidden_channels',32),
-            num_layers=extra.get('num_layers',3), num_heads=extra.get('num_heads',4),
-            num_rbf=extra.get('num_rbf',64), cutoff=1.0, k_neighbors=extra.get('k_neighbors',16),
-            classifier_dims=extra.get('classifier_dims',[64,32]),
-            radial_hidden=extra.get('radial_hidden',64))
+            max_order=hp('max_order',1), hidden_channels=32, num_layers=3,
+            num_heads=4, num_rbf=64, cutoff=1.0, k_neighbors=16,
+            classifier_dims=[64,32], radial_hidden=64)
+    if name == 'CrossAttentionTensorFieldNetwork':
+        # Enforce hidden_channels>=32 to match train_nn.py (transformer d_model).
+        _ca_hc = max(hp('hidden_channels',32), 32)
+        return CrossAttentionTensorFieldNetwork(num_classes=out_dim, n=n_dim,
+            max_order=hp('max_order',0), hidden_channels=_ca_hc,
+            num_layers=hp('num_layers',3), num_heads=hp('num_heads',4),
+            transformer_layers=hp('transformer_layers',2), num_rbf=hp('num_rbf',64),
+            cutoff=1.0, k_neighbors=hp('k_neighbors',16),
+            classifier_dims=hp('classifier_dims',[64,32]),
+            radial_hidden=hp('radial_hidden',64), dropout=0.1)
+    if name == 'StochasticTensorFieldNetwork':
+        return StochasticTensorFieldNetwork(num_classes=out_dim,
+            num_mixtures=hp('num_mixtures',3), max_order=0, hidden_channels=8,
+            num_layers=2, num_rbf=64, cutoff=1.0, k_neighbors=8,
+            encoder_dims=[64,32])
+    if name == 'RelaxedOnEquivariantTensorFieldNetwork':
+        return RelaxedOnEquivariantTensorFieldNetwork(num_classes=out_dim,
+            max_order=1, hidden_channels=32, num_layers=3, num_rbf=64,
+            cutoff=1.0, k_neighbors=16, classifier_dims=[64,32])
+    if name == 'HybridOnEquivariantTensorFieldNetwork':
+        return HybridOnEquivariantTensorFieldNetwork(num_classes=out_dim,
+            max_order=1, hidden_channels=32, num_layers=3, num_rbf=64,
+            cutoff=1.0, k_neighbors=16, classifier_dims=[64,32], non_eq_dim=128)
+    if name == 'GraphMambaTensorFieldNetwork':
+        return GraphMambaTensorFieldNetwork(num_classes=out_dim,
+            max_order=hp('max_order',1), hidden_channels=hp('hidden_channels',32),
+            num_layers=hp('num_layers',4), num_rbf=hp('num_rbf',64),
+            cutoff=hp('cutoff',1.0), k_neighbors=hp('k_neighbors',16),
+            classifier_dims=hp('classifier_dims',[64,32]))
     raise ValueError(f"Unknown model: {name}")
 
 # Load model
@@ -303,7 +318,7 @@ def prepare_for_model(mname, tensor_list):
             if arr.shape[1] == 2 and needs_3d:
                 arr = np.concatenate([arr, np.zeros((arr.shape[0],1))], axis=1)
             out.append(torch.FloatTensor(arr).to(device))
-        elif mname == 'PointNet3D':
+        elif mname == 'PersNet':
             if arr.shape[1] < 3:
                 arr = np.concatenate([arr, np.zeros((arr.shape[0], 3-arr.shape[1]))], axis=1)
             out.append(torch.FloatTensor(arr[:,:3]).to(device))

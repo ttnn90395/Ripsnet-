@@ -19,7 +19,7 @@ if ROOT_DIR not in sys.path:
 from models import (
     TensorFieldNetwork, GTTensorFieldNetwork, GTTensorFieldNetworkV2,
     HierarchicalGTTFN, HierarchicalTensorFieldNetwork,
-    OnEquivariantTensorFieldNetwork, PointNet3D,
+    OnEquivariantTensorFieldNetwork, PersNet,
     ScalarDistanceDeepSet, PointNetTutorial, ScalarInputMLP, MultiInputModel,
     DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,
     AttentionTensorFieldNetwork, StochasticTensorFieldNetwork,
@@ -34,7 +34,7 @@ from models import (
 MODEL_NAMES = [
     'TensorFieldNetwork', 'GTTensorFieldNetwork', 'GTTensorFieldNetworkV2',
     'HierarchicalGTTFN', 'HierarchicalTensorFieldNetwork',
-    'OnEquivariantTensorFieldNetwork', 'PointNet3D',
+    'OnEquivariantTensorFieldNetwork', 'PersNet',
     'ScalarDistanceDeepSet', 'PointNetTutorial', 'ScalarInputMLP', 'MultiInputModel',
     'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
     'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
@@ -756,8 +756,8 @@ def prepare_data_for_model(mname, data_list, use_gs=False,
     if mname in ('TensorFieldNetwork', 'EndToEndTensorFieldNetwork'):
         return _pad_to_3d(data_list)
 
-    if mname in ['PointNetTutorial', 'PointNet3D']:
-        ncols = 3 if mname == 'PointNet3D' else 2
+    if mname in ['PointNetTutorial', 'PersNet']:
+        ncols = 3 if mname == 'PersNet' else 2
         out = []
         for x in data_list:
             arr = x.cpu().numpy() if isinstance(x, torch.Tensor) else np.array(x)
@@ -971,8 +971,8 @@ def build_model_by_name(name, n=None, hparams=None):
             k_neighbors=hp.get('k_neighbors', min(16, _npts // 10 + 1)),
             classifier_dims=hp.get('classifier_dims', [64, 32]),
         )
-    if name == 'PointNet3D':
-        return PointNet3D(output_dim=output_dim)
+    if name == 'PersNet':
+        return PersNet(output_dim=output_dim)
     if name == 'ScalarDistanceDeepSet':
         return ScalarDistanceDeepSet(output_dim=output_dim)
     if name == 'PointNetTutorial':
@@ -1017,7 +1017,7 @@ def forward_single(model, x, mname, geom=None):
     if mname in [
         'TensorFieldNetwork', 'GTTensorFieldNetwork', 'GTTensorFieldNetworkV2',
         'HierarchicalGTTFN', 'HierarchicalTensorFieldNetwork',
-        'OnEquivariantTensorFieldNetwork', 'PointNet3D', 'PointNetTutorial',
+        'OnEquivariantTensorFieldNetwork', 'PersNet', 'PointNetTutorial',
         'DistanceMatrixRaggedModel', 'ScalarDistanceDeepSet',
         'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel',
         'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',

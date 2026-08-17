@@ -1,0 +1,25 @@
+shape/train_shape.py: circles PersNet epochs=20 trial=0 bs=32 quick=False
+Device: cpu  AMP: False
+Generating circles data...
+  Train: 900 samples, Test: 300 samples
+  Classes: 3  Points: 600
+  Model: PersNet (141763 params)
+Precomputing geometry...
+
+Training PersNet for 20 epochs...
+  Epoch 1/20  loss=0.7234  train_acc=60.8%  val_acc=64.3%
+  Epoch 10/20  loss=0.4137  train_acc=80.9%  val_acc=79.0%
+  Epoch 20/20  loss=0.2975  train_acc=85.1%  val_acc=81.3%
+
+Final evaluation...
+
+============================================================
+Results: PersNet on circles
+============================================================
+  Clean test accuracy: 0.8667 (86.67%)
+  Noisy test accuracy: 0.7700 (77.00%)
+  Best val accuracy:   86.67%
+  Parameters: 141,763
+
+Saved to results/shape_circles_PersNet_t0.json
+Model saved to models/shape_circles_PersNet_t0.pt

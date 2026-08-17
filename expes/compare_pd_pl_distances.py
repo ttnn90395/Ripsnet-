@@ -54,7 +54,7 @@ os.makedirs('results', exist_ok=True)
 from models import (
     TensorFieldNetwork, GTTensorFieldNetwork, GTTensorFieldNetworkV2,
     HierarchicalGTTFN, HierarchicalTensorFieldNetwork,
-    OnEquivariantTensorFieldNetwork, PointNet3D,
+    OnEquivariantTensorFieldNetwork, PersNet,
     ScalarDistanceDeepSet, PointNetTutorial, ScalarInputMLP, MultiInputModel,
     DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,
     AttentionTensorFieldNetwork, StochasticTensorFieldNetwork,
@@ -67,7 +67,7 @@ from models import (
 MODEL_NAMES = [
     'TensorFieldNetwork', 'GTTensorFieldNetwork', 'GTTensorFieldNetworkV2',
     'HierarchicalGTTFN', 'HierarchicalTensorFieldNetwork',
-    'OnEquivariantTensorFieldNetwork', 'PointNet3D',
+    'OnEquivariantTensorFieldNetwork', 'PersNet',
     'ScalarDistanceDeepSet', 'PointNetTutorial', 'ScalarInputMLP', 'MultiInputModel',
     'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
     'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
@@ -463,7 +463,7 @@ def prepare_non_tfn_input(x_tensor, name):
     """Convert a raw point cloud into the input format each non-TFN model
     expects (mirrors analysis_nn.prepare_single_input)."""
     arr = x_tensor.cpu().numpy()
-    if name == 'PointNet3D':
+    if name == 'PersNet':
         if arr.shape[1] < 3:
             pad = np.zeros((arr.shape[0], 3 - arr.shape[1]), dtype=arr.dtype)
             arr = np.concatenate([arr, pad], axis=1)
@@ -713,8 +713,8 @@ for model_label, ckpt_path in checkpoints:
                     classifier_dims=classifier_dims or [64, 32],
                     non_eq_dim=extra.get('non_eq_dim', 128),
                     fusion_dims=extra.get('fusion_dims', None))
-            if name == 'PointNet3D':
-                return PointNet3D(output_dim=output_dim,
+            if name == 'PersNet':
+                return PersNet(output_dim=output_dim,
                                   activation=activation, norm=norm)
             if name == 'ScalarDistanceDeepSet':
                 return ScalarDistanceDeepSet(output_dim=output_dim,

@@ -62,7 +62,7 @@ for idx, ds in enumerate(DATASETS):
     ax.bar(x + w / 2, xgb_means, w, label="XGBoost", color="coral", alpha=0.8)
     ax.set_title(DS_LABELS.get(ds, ds), fontsize=11, fontweight="bold")
     ax.set_xticks(x)
-    ax.set_xticklabels([m.replace("TensorFieldNetwork", "TFN").replace("OnEquivariant", "OnEq.").replace("Hybrid", "Hyb.").replace("Attention", "Attn.").replace("DistanceMatrixRaggedModel", "DistMat").replace("PointNet3D", "PN3D") for m in MODELS], rotation=45, ha="right", fontsize=6)
+    ax.set_xticklabels([m.replace("TensorFieldNetwork", "TFN").replace("OnEquivariant", "OnEq.").replace("Hybrid", "Hyb.").replace("Attention", "Attn.").replace("DistanceMatrixRaggedModel", "DistMat").replace("PersNet", "PN3D") for m in MODELS], rotation=45, ha="right", fontsize=6)
     ax.set_ylim(0, 105)
     if idx == 0:
         ax.legend(fontsize=8)
@@ -114,7 +114,7 @@ model_names_short = {
     "DistanceMatrixRaggedModel": "DistMatrixRagged",
     "HybridOnEquivariantTensorFieldNetwork": "HybridOnEqTFN",
     "OnEquivariantTensorFieldNetwork": "OnEqTFN",
-    "PointNet3D": "PointNet3D",
+    "PersNet": "PersNet",
     "TensorFieldNetwork": "TensorFieldNetwork",
 }
 

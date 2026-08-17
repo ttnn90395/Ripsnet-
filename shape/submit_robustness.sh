@@ -64,13 +64,13 @@ for ds in $ALL_DATASETS; do
     done
 done
 
-echo "=== 4. PointNet3D + noise augmentation ==="
+echo "=== 4. PersNet + noise augmentation ==="
 for ds in $ALL_DATASETS; do
     for t in $TRIALS; do
         if [ "$ds" = "circles" ] || [ "$ds" = "circles_noisy" ]; then
-            submit_job "$ds" "PointNet3D" "$t" 16G 01:00:00 "--noise-aug"
+            submit_job "$ds" "PersNet" "$t" 16G 01:00:00 "--noise-aug"
         else
-            submit_job "$ds" "PointNet3D" "$t" 32G 03:00:00 "--noise-aug"
+            submit_job "$ds" "PersNet" "$t" 32G 03:00:00 "--noise-aug"
         fi
     done
 done

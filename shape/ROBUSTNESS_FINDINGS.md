@@ -15,7 +15,7 @@
 | Setting | clean | noisy |
 |---|---:|---:|
 | baseline (3 trials, 100 ep) | 1.000 | 0.667 |
-| PointNet3D baseline (non-TFN reference) | 0.863 | 0.749 |
+| PersNet baseline (non-TFN reference) | 0.863 | 0.749 |
 | robust-knn (eval geometry) | 1.000 | 0.570 |
 | DTM pre-filter, keep 0.7–0.9 (eval) | 0.60–0.92 | 0.667 |
 | DTM-softcap readout, eval-only (`--dtm-readout`) | 0.703 | 0.667 |
@@ -25,9 +25,22 @@
 | max-pool readout (`--pool max`) | 0.993 | 0.333 |
 | norm-readout (`--norm-readout`) | 1.000 | 0.667 |
 | trained directly on `circles_noisy` (matched dist.) | 0.999 | 0.999 |
+| multiscale (`--multiscale`, 2 trials) | 1.000 | 0.667 |
+| denoise (`--denoise`, 2 trials) | 1.000 | 0.667 |
+| geom-reg (`--geom-reg`, 2 trials) | 1.000 | 0.667 |
+| train-dtm-readout (`--train-dtm-readout`, 2 trials) | 1.000 | 0.667 |
+| cov-feat (`--cov-feat`, 2 trials) | 1.000 | 0.667 |
+| feat-pd (`--feat-pd`, 2 trials) | 1.000 | 0.553 |
+| consistency (`--consistency`, 2 trials) | 1.000 | 0.440 |
+
+All newly-tested flag variants preserve clean accuracy (1.000) but none
+escape the 0.667 noisy plateau on circles; `feat-pd` (0.553) and
+`consistency` (0.440) are *worse* than baseline noisy. On `circles_noisy`
+(matched corruption distribution) the same variants reach 0.993–1.000
+noisy, consistent with the distribution-shift conclusion.
 
 3-class chance is 0.333, so 0.667 is *above* chance but notably below
-PointNet3D (0.749). Earlier reports of a "collapse to chance" were incorrect.
+PersNet (0.749). Earlier reports of a "collapse to chance" were incorrect.
 
 ## Why DTM-based fixes fail at high corruption
 
@@ -103,7 +116,7 @@ distributionally different from the augmentation) improves (noisy 0.667–0.673)
   directly on the corrupted distribution, i.e. the architecture can represent
   corrupted clouds — it just does not transfer across this shift.
 - On **3D shapes** GTTFNv2 already transfers well under Gaussian jitter
-  (topology 0.926, 8way 0.873 vs PointNet3D 0.887 / 0.659), so the weak spot
+  (topology 0.926, 8way 0.873 vs PersNet 0.887 / 0.659), so the weak spot
   is dataset-specific (2D multi-circle clouds with uniform flood corruption).
 
 ## Code changes (all additive, default-off)

@@ -2,7 +2,7 @@
 import os, json, glob
 
 datasets = ['circles', 'circles_noisy', 'shapes3d_topology', 'shapes3d_geometry', 'shapes3d_complex', 'shapes3d_8way']
-models = ['PointNet3D', 'RipsPointNet', 'ScalarDistanceDeepSet',
+models = ['PersNet', 'RipsPointNet', 'ScalarDistanceDeepSet',
           'TensorFieldNetwork', 'HierarchicalTensorFieldNetwork', 'StochasticTensorFieldNetwork',
           'OnEquivariantTensorFieldNetwork', 'AttentionTensorFieldNetwork',
           'RelaxedOnEquivariantTensorFieldNetwork', 'HybridOnEquivariantTensorFieldNetwork']

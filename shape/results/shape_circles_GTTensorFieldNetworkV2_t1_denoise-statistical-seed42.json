@@ -1,0 +1,113 @@
+{
+  "dataset": "circles",
+  "model": "GTTensorFieldNetworkV2",
+  "trial": 1,
+  "seed": 42,
+  "num_epochs": 20,
+  "batch_size": 32,
+  "clean_accuracy": 1.0,
+  "noisy_accuracy": 0.6666666666666666,
+  "best_val_accuracy": 100.0,
+  "noisy_report": {
+    "0": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 100.0
+    },
+    "1": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 100.0
+    },
+    "2": {
+      "precision": 0.5,
+      "recall": 1.0,
+      "f1-score": 0.6666666666666666,
+      "support": 100.0
+    },
+    "accuracy": 0.6666666666666666,
+    "macro avg": {
+      "precision": 0.5,
+      "recall": 0.6666666666666666,
+      "f1-score": 0.5555555555555555,
+      "support": 300.0
+    },
+    "weighted avg": {
+      "precision": 0.5,
+      "recall": 0.6666666666666666,
+      "f1-score": 0.5555555555555555,
+      "support": 300.0
+    }
+  },
+  "test_report": {
+    "0": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 100.0
+    },
+    "1": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 100.0
+    },
+    "2": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 100.0
+    },
+    "accuracy": 1.0,
+    "macro avg": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 300.0
+    },
+    "weighted avg": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 300.0
+    }
+  },
+  "num_classes": 3,
+  "n_train": 900,
+  "n_test": 300,
+  "n_points": 600,
+  "params": 88389,
+  "noise_aug": false,
+  "noise_rate": null,
+  "noise_scale": null,
+  "aug_frac": null,
+  "consistency": false,
+  "cons_lambda": null,
+  "dtm_filter": false,
+  "dtm_keep": null,
+  "dtm_m": null,
+  "robust_knn": false,
+  "robust_alpha": null,
+  "train_robust_knn": false,
+  "dtm_readout": false,
+  "train_dtm_readout": false,
+  "dtm_readout_m": null,
+  "dtm_readout_gamma": null,
+  "dtm_readout_thr": null,
+  "readout_pool": "sum",
+  "norm_readout": false,
+  "cov_feat": false,
+  "max_order": null,
+  "hidden_channels": null,
+  "num_layers": null,
+  "k_neighbors": null,
+  "num_rbf": null,
+  "attn_pool": false,
+  "multiscale": false,
+  "pd_fusion": false,
+  "denoise": true,
+  "geom_reg": false,
+  "feat_pd": false
+}

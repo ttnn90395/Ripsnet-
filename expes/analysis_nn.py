@@ -37,7 +37,7 @@ os.makedirs('results', exist_ok=True)
 from models import (
     TensorFieldNetwork, GTTensorFieldNetwork, GTTensorFieldNetworkV2,
     HierarchicalGTTFN, HierarchicalTensorFieldNetwork,
-    OnEquivariantTensorFieldNetwork, PointNet3D,
+    OnEquivariantTensorFieldNetwork, PersNet,
     ScalarDistanceDeepSet, PointNetTutorial, ScalarInputMLP, MultiInputModel,
     DenseRagged, PermopRagged, RaggedPersistenceModel, DistanceMatrixRaggedModel,
     AttentionTensorFieldNetwork, StochasticTensorFieldNetwork,
@@ -51,7 +51,7 @@ from models import (
 MODEL_NAMES = [
     'TensorFieldNetwork', 'GTTensorFieldNetwork', 'GTTensorFieldNetworkV2',
     'HierarchicalGTTFN', 'HierarchicalTensorFieldNetwork',
-    'OnEquivariantTensorFieldNetwork', 'PointNet3D',
+    'OnEquivariantTensorFieldNetwork', 'PersNet',
     'ScalarDistanceDeepSet', 'PointNetTutorial', 'ScalarInputMLP', 'MultiInputModel',
     'RaggedPersistenceModel', 'DistanceMatrixRaggedModel',
     'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
@@ -387,8 +387,8 @@ def build_analysis_model(name, output_dim, n=None, extra=None,
             non_eq_dim=extra.get('non_eq_dim', 128),
             fusion_dims=extra.get('fusion_dims', None),
         )
-    if name == 'PointNet3D':
-        return PointNet3D(output_dim=output_dim,
+    if name == 'PersNet':
+        return PersNet(output_dim=output_dim,
                           activation=activation, norm=norm)
     if name == 'ScalarDistanceDeepSet':
         return ScalarDistanceDeepSet(output_dim=output_dim,
@@ -696,7 +696,7 @@ def prepare_single_input(mname, x_tensor, use_gs=False, sigma=GS_SIGMA):
             arr = np.concatenate([arr, np.zeros((arr.shape[0], 1), dtype=arr.dtype)], axis=1)
         return torch.FloatTensor(arr).to(device)
 
-    if mname == 'PointNet3D':
+    if mname == 'PersNet':
         if arr.shape[1] < 3:
             pad = np.zeros((arr.shape[0], 3 - arr.shape[1]), dtype=arr.dtype)
             arr = np.concatenate([arr, pad], axis=1)
@@ -760,7 +760,7 @@ def forward_single(model, prepared_x, mname, geom=None, stage_geom=None):
     if mname in [
         'TensorFieldNetwork', 'GTTensorFieldNetwork', 'GTTensorFieldNetworkV2',
         'HierarchicalGTTFN', 'HierarchicalTensorFieldNetwork',
-        'OnEquivariantTensorFieldNetwork', 'PointNet3D', 'PointNetTutorial',
+        'OnEquivariantTensorFieldNetwork', 'PersNet', 'PointNetTutorial',
         'DistanceMatrixRaggedModel', 'ScalarDistanceDeepSet',
         'DenseRagged', 'PermopRagged', 'RaggedPersistenceModel',
         'AttentionTensorFieldNetwork', 'StochasticTensorFieldNetwork',
