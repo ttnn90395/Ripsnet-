@@ -1,0 +1,149 @@
+{
+  "dataset": "shapes3d_complex",
+  "model": "GTTensorFieldNetworkV2",
+  "trial": 0,
+  "seed": 42,
+  "num_epochs": 20,
+  "batch_size": 44,
+  "clean_accuracy": 0.9166666666666666,
+  "noisy_accuracy": 0.9583333333333334,
+  "best_val_accuracy": 91.66666666666666,
+  "noisy_report": {
+    "0": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 16.0
+    },
+    "1": {
+      "precision": 0.9285714285714286,
+      "recall": 0.8125,
+      "f1-score": 0.8666666666666667,
+      "support": 16.0
+    },
+    "2": {
+      "precision": 0.8421052631578947,
+      "recall": 1.0,
+      "f1-score": 0.9142857142857143,
+      "support": 16.0
+    },
+    "3": {
+      "precision": 1.0,
+      "recall": 0.9375,
+      "f1-score": 0.967741935483871,
+      "support": 16.0
+    },
+    "4": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 16.0
+    },
+    "5": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 16.0
+    },
+    "accuracy": 0.9583333333333334,
+    "macro avg": {
+      "precision": 0.961779448621554,
+      "recall": 0.9583333333333334,
+      "f1-score": 0.958115719406042,
+      "support": 96.0
+    },
+    "weighted avg": {
+      "precision": 0.961779448621554,
+      "recall": 0.9583333333333334,
+      "f1-score": 0.958115719406042,
+      "support": 96.0
+    }
+  },
+  "test_report": {
+    "0": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 16.0
+    },
+    "1": {
+      "precision": 1.0,
+      "recall": 0.8125,
+      "f1-score": 0.896551724137931,
+      "support": 16.0
+    },
+    "2": {
+      "precision": 0.9411764705882353,
+      "recall": 1.0,
+      "f1-score": 0.9696969696969697,
+      "support": 16.0
+    },
+    "3": {
+      "precision": 0.8461538461538461,
+      "recall": 0.6875,
+      "f1-score": 0.7586206896551724,
+      "support": 16.0
+    },
+    "4": {
+      "precision": 0.7619047619047619,
+      "recall": 1.0,
+      "f1-score": 0.8648648648648649,
+      "support": 16.0
+    },
+    "5": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 16.0
+    },
+    "accuracy": 0.9166666666666666,
+    "macro avg": {
+      "precision": 0.9248725131078072,
+      "recall": 0.9166666666666666,
+      "f1-score": 0.9149557080591563,
+      "support": 96.0
+    },
+    "weighted avg": {
+      "precision": 0.9248725131078072,
+      "recall": 0.9166666666666666,
+      "f1-score": 0.9149557080591563,
+      "support": 96.0
+    }
+  },
+  "num_classes": 6,
+  "n_train": 300,
+  "n_test": 96,
+  "n_points": 100,
+  "params": 88488,
+  "noise_aug": true,
+  "noise_rate": 0.2,
+  "noise_scale": 2.0,
+  "aug_frac": 1.0,
+  "consistency": false,
+  "cons_lambda": null,
+  "dtm_filter": false,
+  "dtm_keep": null,
+  "dtm_m": null,
+  "robust_knn": false,
+  "robust_alpha": null,
+  "train_robust_knn": false,
+  "dtm_readout": false,
+  "train_dtm_readout": false,
+  "dtm_readout_m": null,
+  "dtm_readout_gamma": null,
+  "dtm_readout_thr": null,
+  "readout_pool": "sum",
+  "norm_readout": false,
+  "cov_feat": false,
+  "max_order": null,
+  "hidden_channels": null,
+  "num_layers": null,
+  "k_neighbors": null,
+  "num_rbf": null,
+  "attn_pool": false,
+  "multiscale": false,
+  "pd_fusion": false,
+  "denoise": false,
+  "geom_reg": false,
+  "feat_pd": false
+}

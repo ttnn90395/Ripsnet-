@@ -754,13 +754,15 @@ class GTTensorFieldNetwork(nn.Module):
         if readout_pool == 'catmax':
             inv_dim = 2 * inv_dim
 
-        self.rho = nn.Sequential(
-            nn.Linear(inv_dim, classifier_dims[0]), nn.SiLU(),
-            nn.LayerNorm(classifier_dims[0]), nn.Dropout(0.1),
-            *[nn.Linear(classifier_dims[i], classifier_dims[i + 1]) for i in
-              range(len(classifier_dims) - 1)],
-            nn.Linear(classifier_dims[-1], num_classes),
-        )
+        # Build classifier head with SiLU + LayerNorm between all hidden layers
+        head_layers = []
+        prev_dim = inv_dim
+        for h_dim in classifier_dims:
+            head_layers += [nn.Linear(prev_dim, h_dim), nn.SiLU(),
+                           nn.LayerNorm(h_dim), nn.Dropout(0.1)]
+            prev_dim = h_dim
+        head_layers += [nn.Linear(prev_dim, num_classes)]
+        self.rho = nn.Sequential(*head_layers)
 
         self._scalar_sig = scalar_sig
 

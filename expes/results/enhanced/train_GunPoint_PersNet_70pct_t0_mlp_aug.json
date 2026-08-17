@@ -1,0 +1,1 @@
+{"dataset": "GunPoint", "model": "PersNet", "fraction_pct": 70, "trial": 0, "n_train_used": 17, "n_train_full": 25, "n_test": 150, "mlp_test_acc": NaN, "xgb_test_acc": NaN, "classifier": "mlp", "augment": true, "multi_scale": false, "hidden_channels": null, "dropout": 0.1}

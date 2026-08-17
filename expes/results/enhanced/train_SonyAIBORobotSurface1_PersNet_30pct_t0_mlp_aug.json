@@ -1,0 +1,1 @@
+{"dataset": "SonyAIBORobotSurface1", "model": "PersNet", "fraction_pct": 30, "trial": 0, "n_train_used": 3, "n_train_full": 10, "n_test": 500, "mlp_test_acc": NaN, "xgb_test_acc": NaN, "classifier": "mlp", "augment": true, "multi_scale": false, "hidden_channels": null, "dropout": 0.1}

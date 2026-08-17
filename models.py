@@ -238,12 +238,12 @@ class GTTensorFieldNetworkV2(_GTTensorFieldNetworkBase):
         use_gate:        bool      = True,
         use_residual:    bool      = True,
         use_channel_mix: bool      = True,
-        use_attention_pool: bool   = False,
+        use_attention_pool: bool   = True,
         node_attr_dim:   int       = 0,
         classifier_dims: Optional[List[int]] = None,
         radial_hidden:   int       = 128,
         readout_pool:    str       = 'sum',
-        use_cov_features: bool     = False,
+        use_cov_features: bool     = True,
     ):
         if classifier_dims is None:
             classifier_dims = [256, 128]

@@ -9,7 +9,7 @@ For each (dataset, model_group):
   5. Report L2 distances and accuracy drop per model family
 
 Groups:
-  - PointNet: PointNetTutorial, PointNet3D
+  - PointNet: PointNetTutorial, PersNet
   - TFN: OnEquivariantTensorFieldNetwork, AttentionTensorFieldNetwork, TensorFieldNetwork, GTTensorFieldNetwork
   - DMR: DistanceMatrixRaggedModel, ScalarDistanceDeepSet
 
@@ -28,7 +28,7 @@ os.makedirs('ablation_plots', exist_ok=True)
 
 FAMILY_MAP = {
     'PointNetTutorial': 'PointNet', 'PointNetTutorial_GS': 'PointNet',
-    'PointNet3D': 'PointNet', 'PointNet3D_GS': 'PointNet',
+    'PersNet': 'PointNet', 'PersNet_GS': 'PointNet',
     'OnEquivariantTensorFieldNetwork': 'TFN', 'OnEquivariantTensorFieldNetwork_GS': 'TFN',
     'AttentionTensorFieldNetwork': 'TFN', 'AttentionTensorFieldNetwork_GS': 'TFN',
     'TensorFieldNetwork': 'TFN', 'TensorFieldNetwork_GS': 'TFN',

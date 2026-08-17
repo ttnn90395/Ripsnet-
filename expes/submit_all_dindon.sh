@@ -23,7 +23,7 @@ MODELS=(
   OnEquivariantTensorFieldNetwork AttentionTensorFieldNetwork
   StochasticTensorFieldNetwork CrossAttentionTensorFieldNetwork
   RelaxedOnEquivariantTensorFieldNetwork HybridOnEquivariantTensorFieldNetwork
-  PointNetTutorial PointNet3D DistanceMatrixRaggedModel
+  PointNetTutorial PersNet DistanceMatrixRaggedModel
   ScalarDistanceDeepSet ScalarInputMLP MultiInputModel
   RaggedPersistenceModel
 )

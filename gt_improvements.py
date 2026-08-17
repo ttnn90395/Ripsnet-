@@ -1035,8 +1035,8 @@ class TemporalCrossAttentionTFN(nn.Module):
 class HybridGTTFN(nn.Module):
     """
     Multi-branch model that fuses SO(n)-equivariant GT-TFN features with
-    distance-matrix row features.  Inspired by MultiInputModel's success
-    in combining complementary feature views.
+    distance-matrix row features and PointNet-style coordinate features.
+    Inspired by MultiInputModel's success in combining complementary views.
 
     Branches
     --------
@@ -1044,8 +1044,9 @@ class HybridGTTFN(nn.Module):
        sum-pooled invariant node descriptors.
     2. Distance-matrix MLP: row-wise MLP on the (N,N) distance matrix,
        mean-pooled over rows (matches DistanceMatrixRaggedModel design).
+    3. PointNet branch: coordinate MLP with max-pooling.
 
-    The two branches produce fixed-dim feature vectors that are concatenated
+    The three branches produce fixed-dim feature vectors that are concatenated
     and fed to a shared classification MLP.
 
     Parameters
@@ -1060,6 +1061,7 @@ class HybridGTTFN(nn.Module):
     k_neighbors     : k-NN neighbourhood for GT-TFN (default 16)
     phi_dim         : distance-matrix row MLP width (default 128)
     tfn_dim         : intermediate dim for GT-TFN branch (default 128)
+    pnet_dim        : intermediate dim for PointNet branch (default 64)
     classifier_dims : final MLP dims (default [256, 128])
     radial_hidden   : radial MLP width (default 64)
     """
@@ -1076,6 +1078,7 @@ class HybridGTTFN(nn.Module):
         k_neighbors: int = 16,
         phi_dim: int = 128,
         tfn_dim: int = 128,
+        pnet_dim: int = 64,
         classifier_dims: Optional[List[int]] = None,
         radial_hidden: int = 64,
     ):
@@ -1102,8 +1105,13 @@ class HybridGTTFN(nn.Module):
             [phi_dim] + list(classifier_dims[:1]) + [phi_dim],
             activation='gelu', norm='ln')
 
+        # ── Branch 3: PointNet (coordinate MLP with max-pool) ──
+        self._pnet_dim = pnet_dim
+        self._pnet_phi = _build_mlp(
+            [n, 64, 128, pnet_dim], activation='gelu', norm='ln')
+
         # ── Fusion head ──
-        combined = tfn_dim + phi_dim
+        combined = tfn_dim + phi_dim + pnet_dim
         self._fusion = _build_mlp(
             [combined] + list(classifier_dims) + [num_classes],
             activation='gelu', norm='ln')
@@ -1120,6 +1128,7 @@ class HybridGTTFN(nn.Module):
     def forward(self, batch, precomputed_geom=None):
         tfn_feats = []
         dist_feats = []
+        pnet_feats = []
         for idx, pc in enumerate(batch):
             # ── GT-TFN branch ──
             geom_i = precomputed_geom[idx] if precomputed_geom is not None else None
@@ -1134,13 +1143,18 @@ class HybridGTTFN(nn.Module):
             row_feat = self._dist_phi(dist_mat)  # (N, phi_dim)
             dist_feat = row_feat.mean(dim=0)     # (phi_dim,)
 
+            # ── PointNet branch ──
+            pnet_feat = self._pnet_phi(pc).max(dim=0).values  # (pnet_dim,)
+
             tfn_feats.append(tfn_feat)
             dist_feats.append(dist_feat)
+            pnet_feats.append(pnet_feat)
 
-        tfn_all = torch.stack(tfn_feats)    # (B, tfn_dim)
-        dist_all = torch.stack(dist_feats)  # (B, phi_dim)
-        combined = torch.cat([tfn_all, dist_all], dim=-1)  # (B, tfn_dim+phi_dim)
-        return self._fusion(combined)        # (B, num_classes)
+        tfn_all = torch.stack(tfn_feats)      # (B, tfn_dim)
+        dist_all = torch.stack(dist_feats)    # (B, phi_dim)
+        pnet_all = torch.stack(pnet_feats)    # (B, pnet_dim)
+        combined = torch.cat([tfn_all, dist_all, pnet_all], dim=-1)
+        return self._fusion(combined)          # (B, num_classes)
 
 
 # ============================================================================

@@ -1,0 +1,1 @@
+{"dataset": "ECG5000", "model": "PersNet", "fraction_pct": 70, "trial": 3, "n_train_used": 175, "n_train_full": 250, "n_test": 500, "mlp_test_acc": NaN, "xgb_test_acc": NaN, "classifier": "xgboost", "augment": false, "multi_scale": false, "hidden_channels": null, "dropout": 0.1}
