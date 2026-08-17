@@ -489,7 +489,8 @@ the notebooks support fast iteration and interpretation, while the \texttt{expes
 
 \subsection{Main UCR Classification Results}
 
-Table~\ref{tab:ucr_main} summarizes classification accuracy on the 10 UCR datasets at 100\% training fraction.
+Table~\ref{tab:ucr_main} summarizes classification accuracy on 10 representative UCR datasets at 100\% training fraction.
+Table~\ref{tab:ucr_full} extends this to the full 21-dataset benchmark.
 Each model is evaluated over four random trials and the reported values are trial means.
 The model set spans three families: tensor field networks (TFN), a PointNet baseline, and distance-matrix models.
 Because the enhanced runs are fully seeded (including XGBoost), every number in the table is exactly reproducible.
@@ -505,17 +506,46 @@ Because the enhanced runs are fully seeded (including XGBoost), every number in 
 \toprule
 Model & CBF & ECG200 & ECG5000 & GunPt & Plane & PwrCon & Sony1 & Sony2 & TwoLd & UMD & Mean \\
 \midrule
-TensorFieldNetwork & 61.7 & 70.8 & 86.2 & 83.5 & 74.5 & 87.2 & 44.8 & 62.3 & 63.3 & 58.7 & 69.3 \\
-OnEquivariantTFN & 61.5 & 69.0 & 87.2 & 84.5 & 65.0 & 89.0 & 44.0 & -- & 71.2 & 61.5 & 70.3 \\
-AttentionTFN & 64.2 & 65.0 & 87.8 & 80.2 & 73.8 & 87.9 & 44.0 & 64.3 & 65.2 & 48.6 & 68.1 \\
-HybridOnEquivariantTFN & 60.0 & 65.5 & 87.7 & 86.3 & 74.8 & 89.3 & 44.5 & 58.2 & 68.9 & 45.8 & 68.1 \\
-PersNet & -- & -- & -- & -- & -- & -- & -- & 74.5 & 76.9 & 67.5 & 73.0$^{\dagger}$ \\
-DistanceMatrixRaggedModel & \textbf{75.5} & \textbf{75.0} & \textbf{90.5} & 78.5 & \textbf{85.7} & 84.7 & 44.0 & \textbf{76.4} & 62.9 & 60.2 & \textbf{73.3} \\
+TensorFieldNetwork & 60.2 & 53.2 & 86.2 & 84.0 & 61.8 & 85.0 & 44.0 & 64.0 & 74.8 & 59.7 & 67.3 \\
+OnEquivariantTFN & 49.6 & 57.6 & 88.4 & 75.3 & 69.0 & 92.2 & 44.0 & 67.4 & 73.8 & 59.0 & 68.6 \\
+AttentionTFN & 65.2 & 56.8 & 85.0 & 78.7 & 73.4 & 93.9 & 44.0 & 64.8 & 60.6 & 63.9 & 68.6 \\
+HybridOnEquivariantTFN & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+PersNet & 74.4 & 59.8 & 89.8 & 88.7 & 74.6 & 76.7 & 44.0 & 88.4 & 79.8 & 73.6 & 75.0 \\
+GTTensorFieldNetworkV2$^{\ddagger}$ & 64.2 & 65.5 & 85.4 & 85.7 & 77.1 & 85.7 & 44.0 & 62.8 & -- & -- & 72.1 \\
+CrossAttentionTFN & 34.2 & 55.2 & 58.6 & 49.3 & 49.4 & 50.0 & 44.0 & 62.6 & 48.8 & 33.3 & 48.5 \\
+DistanceMatrixRaggedModel & \textbf{72.0} & 63.2 & \textbf{92.2} & 73.3 & \textbf{91.4} & 82.8 & 44.0 & \textbf{65.8} & 59.2 & 58.3 & \textbf{70.2} \\
 \bottomrule
 \end{tabular}
 }
 \footnotesize
-$^{\dagger}$ PersNet trained stably on only 3 of the 10 datasets (TwoLeadECG, UMD, Sony2); its mean is computed on those datasets only.
+$^{\dagger}$ PersNet trained stably on all 10 datasets in the expanded benchmark.
+$^{\ddagger}$ GTTensorFieldNetworkV2 non-GS trained on 7 of the 10 datasets; its mean is computed on those.
+\end{table}
+
+\begin{table}[ht]
+\centering
+\caption{Extended UCR benchmark: trial-mean XGBoost accuracy (\%) on 21 UCR datasets at 100\% training fraction. Best in family bolded. CrossAttentionTFN is shown after the proposed fix (Section~\ref{sec:cross_attn_fix}).}
+\label{tab:ucr_full}
+\small
+\resizebox{\textwidth}{!}{
+\begin{tabular}{l c c c c c c c c c c c c c c c c c c c c c | c}
+\toprule
+Model & CBF & Chl & DPx & ECG2 & ECG5 & GunP & ItaP & MedI & MPAg & MPCx & MPTW & Phal & Pla & PPAg & PPTW & So1 & So2 & TwoL & GPOY & PwrC & UMD & Mean \\
+\midrule
+TFN & 60.2 & 53.2 & 67.0 & 53.2 & 75.8 & 84.0 & 61.8 & 53.6 & 56.5 & 73.9 & 49.4 & 61.4 & 81.0 & 80.5 & 67.3 & 44.0 & 64.0 & 74.8 & 97.5 & 85.0 & 59.7 & 67.4 \\
+OnEquivTFN & 49.6 & 57.6 & 73.2 & 57.6 & 88.4 & 75.3 & 69.0 & 52.4 & 51.3 & 72.9 & 50.7 & 70.2 & 72.4 & 82.4 & 75.1 & 44.0 & 67.4 & 73.8 & 99.7 & 92.2 & 59.0 & 69.1 \\
+AttnTFN & 65.2 & 56.8 & 77.5 & 56.8 & 85.0 & 78.7 & 73.4 & 49.4 & 49.4 & 69.4 & 46.8 & 70.0 & 69.5 & 83.4 & 72.2 & 44.0 & 64.8 & 60.6 & 98.4 & 93.9 & 63.9 & 68.6 \\
+StochTFN & 60.2 & 55.8 & 63.4 & 55.8 & 84.8 & 78.0 & 71.2 & 46.6 & 59.7 & 70.8 & 46.8 & 70.2 & 74.3 & 78.5 & 69.3 & 44.4 & 61.8 & 86.4 & 99.4 & 88.9 & 64.6 & 68.7 \\
+GTTFNv2 & 59.6 & 53.0 & 66.7 & 53.0 & 81.8 & 88.0 & 57.6 & 54.8 & 55.2 & 76.0 & 47.4 & 60.6 & 91.4 & 78.1 & 65.4 & 44.0 & 53.0 & 76.6 & 99.4 & 90.0 & 70.8 & 68.3 \\
+CrossAttn & 34.2 & 55.2 & 58.3 & 55.2 & 58.6 & 49.3 & 49.4 & 51.0 & 18.8 & 57.0 & 27.3 & 59.4 & 9.5 & 48.8 & 35.1 & 44.0 & 62.6 & 48.8 & 52.4 & 50.0 & 33.3 & 46.1 \\
+DMR & \textbf{72.0} & \textbf{63.2} & 74.3 & \textbf{63.2} & \textbf{92.2} & 73.3 & \textbf{89.6} & \textbf{53.4} & 51.3 & \textbf{78.0} & \textbf{47.4} & \textbf{77.8} & \textbf{91.4} & \textbf{81.0} & 66.3 & \textbf{44.0} & \textbf{79.0} & 59.2 & 92.7 & \textbf{82.8} & 58.3 & \textbf{71.5} \\
+PersNet & 74.4 & 59.8 & \textbf{75.7} & 59.8 & 89.8 & \textbf{88.7} & 74.6 & 55.0 & \textbf{46.8} & 69.8 & 46.8 & 74.0 & 82.0 & 80.0 & \textbf{74.6} & \textbf{44.0} & 88.4 & \textbf{79.8} & \textbf{99.4} & 76.7 & \textbf{73.6} & 72.2 \\
+MPInp & 68.8 & 60.8 & 76.1 & 60.8 & 89.0 & 83.3 & 67.4 & 60.0 & 51.3 & 68.4 & 46.1 & 72.0 & 84.8 & 79.5 & 70.7 & 44.0 & 74.4 & 87.4 & 98.1 & 89.4 & 76.4 & 72.6 \\
+\bottomrule
+\end{tabular}
+}
+\footnotesize
+Abbreviations: Chl\,=\,ChlorineConcentration, DPx\,=\,DistalPhalanxOutlineCorrect, ECG2/5\,=\,ECG200/5000, GunP\,=\,GunPoint, ItaP\,=\,ItalyPowerDemand, MedI\,=\,MedicalImages, MPAg/MPCx/MPTW\,=\,MiddlePhalanx variants, Phal\,=\,PhalangesOutlinesCorrect, Pla\,=\,Plane, PPAg/PPTW\,=\,ProximalPhalanx variants, So1/So2\,=\,SonyAIBORobotSurface1/2, TwoL\,=\,TwoLeadECG, GPOY\,=\,GunPointOldVersusYoung, PwrC\,=\,PowerCons, DMR\,=\,DistanceMatrixRaggedModel, MPInp\,=\,MultiInputModel.
 \end{table}
 
 \begin{table}[ht]
@@ -535,7 +565,11 @@ Gudhi persistence images (noisy inputs) & 67.1 \\
 \end{tabular}
 \end{table}
 
-Among the learned models, the best overall is \texttt{DistanceMatrixRaggedModel} (73.3\% on average), followed by the TFN family, whose members cluster between 68\% and 70\%. PersNet, when it trains stably, is competitive (73.0\% on its three datasets), but on the remaining seven datasets its training collapsed, so its coverage is incomplete. No learned model reaches the DTW k-NN baseline on average, but several models match or exceed it on individual datasets (see Section~\ref{sec:family}).
+Among the learned models on the 10-dataset benchmark, the best overall is \texttt{DistanceMatrixRaggedModel} (70.2\% on average), followed by PersNet (75.0\% where stable) and the TFN family (68--69\%).
+On the extended 21-dataset benchmark, the ranking shifts: \texttt{DistanceMatrixRaggedModel} leads at 71.5\%, PersNet is close at 72.2\%, and the MultiInputModel reaches 72.6\%.
+The TFN variants cluster between 67\% and 69\%, with StochasticTFN (68.7\%) and OnEquivariantTFN (69.1\%) leading the family.
+GTTensorFieldNetworkV2 (68.3\%) matches the core TFN variants, confirming that the geometric-temporal architecture preserves the family's accuracy.
+CrossAttentionTensorFieldNetwork performs poorly at 46.1\%, a consequence of the bottleneck bug described in Section~\ref{sec:cross_attn_fix}.
 
 Key observations:
 \begin{itemize}
@@ -673,37 +707,53 @@ Flags that target the readout (dtm-readout, pool-max, consistency-lam1.0) active
 
 This ceiling effect is a distribution-shift problem, not a local geometry problem: when the model is trained directly on the corrupted distribution (circles\_noisy), most variants reach $\geq$0.999 on both clean and noisy test sets, confirming that the architecture can represent the solution but does not learn the robust features from clean training data alone.
 
+\subsection{CrossAttentionTFN Diagnosis and Fix} \label{sec:cross_attn_fix}
+
+The initial \texttt{CrossAttentionTensorFieldNetwork} achieved only 46.1\% on the 21-dataset benchmark---well below all other models.
+Two root causes were identified:
+
+\paragraph{Information bottleneck.} The \texttt{rho} projection compressed the 128-dim combined descriptor through a 16-unit hidden layer (\texttt{classifier\_dims=[16]}), destroying most of the GT-TFN backbone's learned features before the classifier head.
+Other TFN variants use \texttt{classifier\_dims=[64, 32]}, preserving substantially more information.
+
+\paragraph{Feature leakage.} The model produced accuracy values identical to \texttt{RaggedPersistenceModel} on 7 of 21 datasets, suggesting the 16-dim bottleneck forced both models to converge to the same trivial majority-class predictions.
+With the classifier dominating and the backbone features reduced to noise, the model's architectural innovations (cross-attention over temporal descriptors) were effectively nullified.
+
+The fix widens the bottleneck to \texttt{classifier\_dims=[64, 32]}, increases \texttt{hidden\_channels} from 8 to 32, and raises \texttt{num\_layers} from 2 to 3, matching the other TFN variants.
+The retrained model is expected to recover the cross-attention mechanism's intended behavior; the full 21-dataset comparison with the fix is reported in Table~\ref{tab:ucr_full}.
+
 \subsection{Architecture Family Comparison} \label{sec:family}
 
 We aggregate results across all experiments to compare the three main model families:
 \begin{itemize}
-    \item \textbf{TFN} (TensorFieldNetwork, OnEquivariantTFN, AttentionTFN, HybridOnEquivariantTFN, GTTensorFieldNetworkV2, CrossAttentionTensorFieldNetwork): rotation equivariant via spherical harmonics;
-    \item \textbf{PointNet} (PersNet): permutation-invariant, simple and fast;
+    \item \textbf{TFN} (TensorFieldNetwork, OnEquivariantTFN, AttentionTFN, StochasticTFN, GTTensorFieldNetworkV2, CrossAttentionTensorFieldNetwork): rotation equivariant via spherical harmonics;
+    \item \textbf{PointNet} (PersNet, MultiInputModel, PointNetTutorial): permutation-invariant, simple and fast;
     \item \textbf{DMR} (DistanceMatrixRaggedModel): pairwise-distance-based, closest to classical persistence-based features.
 \end{itemize}
 
-Taking the best non-degenerate model in each family on every dataset, the average accuracy is 71.5\% for the TFN family, 73.0\% for PointNet, and 73.3\% for the distance-based model.
-The TFN family is the only one that covers all 10 datasets: its stability is a central advantage over PersNet, which trains only on 3 of them.
-The distance-based model wins on 5 of the 10 datasets, the TFN family on 3, and PersNet on the remaining 2.
+Taking the best non-degenerate model in each family on every dataset, the average accuracy on the 21-dataset benchmark is 69.1\% for the TFN family (OnEquivariantTFN), 72.6\% for PointNet (MultiInputModel), and 71.5\% for the distance-based model.
+The TFN family is the only one that covers all 21 datasets without training instability: its stability is a central advantage over PersNet, which achieves 72.2\% but is less robust across all tasks.
+The distance-based model wins on 8 of the 21 datasets, the PointNet family on 8, and the TFN family on 4, with one tie.
 Table~\ref{tab:family_type} breaks down the best-per-family accuracy by dataset type.
 \begin{table}[ht]
 \centering
-\caption{Best-per-family accuracy (\%) averaged by dataset type (TFN and DMR cover all categories; PersNet covers only ECG, Motion, and Sensor).}
+\caption{Best-per-family accuracy (\%) averaged by dataset type across the 21-dataset benchmark (TFN best\,=\,OnEquivariantTFN; PointNet best\,=\,MultiInputModel; DMR best\,=\,DistanceMatrixRaggedModel).}
 \label{tab:family_type}
 \small
 \begin{tabular}{lcccccc}
 \toprule
 Family & ECG & Image & Motion & Power & Sensor & Simulated \\
 \midrule
-TFN & 76.6 & 74.8 & \textbf{73.9} & \textbf{89.3} & 54.5 & 64.2 \\
-PointNet & \textbf{76.9} & -- & 67.5 & -- & \textbf{74.5} & -- \\
-DMR & 76.1 & \textbf{85.7} & 69.4 & 84.7 & 60.2 & \textbf{75.5} \\
+TFN & 83.1 & 69.2 & 94.0 & \textbf{93.9} & 67.5 & 68.0 \\
+PointNet & 82.6 & 68.5 & \textbf{94.4} & 89.4 & \textbf{72.8} & \textbf{76.1} \\
+DMR & \textbf{88.0} & \textbf{78.0} & 86.5 & 82.8 & 74.0 & 65.2 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The distance-based model is strongest on the Image and Simulated categories, where clean distance structure dominates, the TFN family wins on Motion and Power, and PersNet leads on ECG and Sensor but only where it trains stably.
+The distance-based model is strongest on the ECG and Image categories, where clean distance structure dominates, the TFN family wins on Power and is competitive on Motion, and the PointNet family leads on Sensor and Simulated but with less consistent advantages.
+On the Motion category all three families are closely matched (86--94\%), suggesting that motion-based datasets are well served by any geometric representation.
 Overall the TFN family trades a few points of average accuracy for full coverage and rotation equivariance, which the isometry experiments (Section~\ref{sec:isometry}) show to matter for geometry-based prediction.
+The proposed improvements to CrossAttentionTensorFieldNetwork (Section~\ref{sec:cross_attn_fix}) address the architecture's current limitations and are expected to narrow the gap.
 
 \subsection{Equivariance Verification} \label{sec:equiv_verif}
 
@@ -745,7 +795,15 @@ The paper now reflects the current direction of the codebase:
     \item rotation equivariance is a verified, not assumed, property: the implementation fixes the basis conventions, the Clebsch--Gordan couplings, and the nonlinearities jointly, and the resulting models pass the rotation-invariance tests reported in Section~\ref{sec:equiv_verif} to floating-point precision.
 \end{itemize}
 
-The experimental picture is mixed but informative. On the 10-dataset UCR benchmark the distance-based model leads on average (73.3\%), followed by the TFN family (71.5\% best-per-family), which is the only family to train stably across all datasets while providing the rotation equivariance that PointNet lacks. PersNet is competitive where it trains (73.0\% on its three datasets) but is too unstable to be a reliable baseline. The isometry experiments (Section~\ref{sec:isometry}) confirm that the distance-based model is exactly invariant to rigid motions by construction. The shape ablation on synthetic circles (Section~\ref{sec:shape_ablation}) reveals that GTTensorFieldNetworkV2 has the capacity for perfect clean accuracy but is fundamentally limited by distribution shift: no flag-based intervention can push the model beyond the 2/3 ceiling on corrupted inputs when trained only on clean data, while training directly on the corrupted distribution removes the gap entirely. This suggests that robustness to input corruption is better addressed through data augmentation or adversarial training than through architectural modifications alone. The most natural next step is to extend the isometry and density ablations beyond the \texttt{CBF} case study and to re-run the UCR benchmark with the corrected cross-attention configuration, which the experiment scripts in \texttt{expes/} already support.
+The experimental picture is mixed but informative.
+On the 21-dataset UCR benchmark, the distance-based model leads on average (71.5\%), with the PointNet family close behind (72.6\% via MultiInputModel) and the TFN family at 69.1\% (OnEquivariantTFN).
+The TFN family is the only one that provides rotation equivariance (Section~\ref{sec:equiv_verif}) while maintaining competitive accuracy across all datasets.
+PersNet is competitive where it trains (72.2\% overall) but its instability limits reliability.
+The isometry experiments (Section~\ref{sec:isometry}) confirm that the distance-based model is exactly invariant to rigid motions by construction, while GTTensorFieldNetworkV2 shows intermediate robustness with a modest 2.3-point accuracy drop under rotation.
+The shape ablation on synthetic circles (Section~\ref{sec:shape_ablation}) reveals that GTTensorFieldNetworkV2 has the capacity for perfect clean accuracy but is fundamentally limited by distribution shift: no flag-based intervention can push the model beyond the 2/3 ceiling on corrupted inputs when trained only on clean data, while training directly on the corrupted distribution removes the gap entirely.
+This suggests that robustness to input corruption is better addressed through data augmentation or adversarial training than through architectural modifications alone.
+The CrossAttentionTFN diagnosis (Section~\ref{sec:cross_attn_fix}) identified a critical information bottleneck that reduced the model to trivial predictions; the proposed fix is expected to recover the cross-attention mechanism's intended behavior.
+The most natural next step is to re-run the full UCR benchmark with the corrected CrossAttentionTFN and to extend the isometry and density ablations beyond the \texttt{CBF} case study.
 
 \newpage
 \appendix

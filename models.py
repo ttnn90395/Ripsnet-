@@ -1211,6 +1211,7 @@ def _load_gt_improvements():
         HybridOnEquivariantTensorFieldNetwork as _HybridOnEquivariantTFNBase,
         EndToEndClassifier as _EndToEndClassifierBase,
         EndToEndTensorFieldNetwork as _EndToEndTFNBase,
+        HybridGTTFN as _HybridGTTFNBase,
         build_enhanced_pointcloud,
     )
 
@@ -1226,6 +1227,7 @@ def _load_gt_improvements():
             _RelaxedEquivariantTFNBase, _RelaxedOnEquivariantTFNBase,
             _HybridTFNClassifierBase, _HybridOnEquivariantTFNBase,
             _EndToEndClassifierBase, _EndToEndTFNBase,
+            _HybridGTTFNBase,
             build_enhanced_pointcloud)
 
 
@@ -1236,6 +1238,7 @@ def _load_gt_improvements():
  RelaxedEquivariantTFN, RelaxedOnEquivariantTensorFieldNetwork,
  HybridTFNClassifier, HybridOnEquivariantTensorFieldNetwork,
  EndToEndClassifier, EndToEndTensorFieldNetwork,
+ HybridGTTFN,
  build_enhanced_pointcloud) = _load_gt_improvements()
 
 
@@ -1559,6 +1562,7 @@ __all__ = [
     'HybridOnEquivariantTensorFieldNetwork',
     'EndToEndClassifier',
     'EndToEndTensorFieldNetwork',
+    'HybridGTTFN',
     'build_enhanced_pointcloud',
     # Notebook / ragged models
     'ScalarDistanceDeepSet',

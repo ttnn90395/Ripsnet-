@@ -52,7 +52,7 @@ from models import (
     OnEquivariantTensorFieldNetwork, AttentionTensorFieldNetwork,
     StochasticTensorFieldNetwork, CrossAttentionTensorFieldNetwork,
     RelaxedOnEquivariantTensorFieldNetwork, HybridOnEquivariantTensorFieldNetwork,
-    GraphMambaTensorFieldNetwork,
+    GraphMambaTensorFieldNetwork, HybridGTTFN,
 )
 from tfn_enhancements import (
     MLPClassifierHead, MultiScalePersistenceEncoder, PointCloudAugmenter,
@@ -238,7 +238,7 @@ TFN_MODELS = {
     'OnEquivariantTensorFieldNetwork', 'AttentionTensorFieldNetwork',
     'StochasticTensorFieldNetwork', 'CrossAttentionTensorFieldNetwork',
     'RelaxedOnEquivariantTensorFieldNetwork', 'HybridOnEquivariantTensorFieldNetwork',
-    'GraphMambaTensorFieldNetwork',
+    'GraphMambaTensorFieldNetwork', 'HybridGTTFN',
 }
 
 use_consistency = (args.consistency and model_name in TFN_MODELS
@@ -319,8 +319,8 @@ def build_backbone(name, hp):
             num_rbf=64, classifier_dims=[64, 32], radial_hidden=64)
     if name == 'CrossAttentionTensorFieldNetwork':
         return CrossAttentionTensorFieldNetwork(num_classes=output_dim, n=dim,
-            max_order=1, hidden_channels=8, num_layers=2, num_heads=4,
-            transformer_layers=2, num_rbf=64, classifier_dims=[16], radial_hidden=64)
+            max_order=1, hidden_channels=32, num_layers=3, num_heads=4,
+            transformer_layers=2, num_rbf=64, classifier_dims=[64, 32], radial_hidden=64)
     if name == 'StochasticTensorFieldNetwork':
         return StochasticTensorFieldNetwork(num_classes=output_dim,
             num_mixtures=3, max_order=0, hidden_channels=8, num_layers=2,
@@ -338,6 +338,12 @@ def build_backbone(name, hp):
             max_order=hp.get('max_order', 1), hidden_channels=hp.get('hidden_channels', 32),
             num_layers=hp.get('num_layers', 4), num_rbf=hp.get('num_rbf', 64),
             k_neighbors=hp.get('k_neighbors', 16), classifier_dims=hp.get('classifier_dims'))
+    if name == 'HybridGTTFN':
+        return HybridGTTFN(n=dim, num_classes=output_dim, max_order=1,
+            hidden_channels=hp.get('hidden_channels', 32),
+            num_layers=hp.get('num_layers', 3), num_rbf=64,
+            cutoff=2.0, k_neighbors=16, phi_dim=128, tfn_dim=128,
+            classifier_dims=[256, 128], radial_hidden=64)
     raise ValueError(f"Unknown model: {name}")
 
 
@@ -474,7 +480,8 @@ def _find_encoder(m):
         if (hasattr(m, '_encode_single') or hasattr(m, '_encode_batch')) and hasattr(m, 'rho'):
             return m
         child = (getattr(m, '_inner', None) or getattr(m, 'base', None)
-                 or getattr(m, 'tfn_backbone', None) or getattr(m, 'backbone', None))
+                 or getattr(m, 'tfn_backbone', None) or getattr(m, 'backbone', None)
+                 or getattr(m, '_tfn', None))
         if child is None or child is m:
             break
         m = child
@@ -566,6 +573,9 @@ def forward_with_geom(model, batch_data, geom=None):
     if mname == 'CrossAttentionTensorFieldNetwork':
         backbone_m = getattr(model, 'backbone', model)
         return backbone_m(batch_data)
+    if mname == 'HybridGTTFN':
+        backbone_m = getattr(model, 'backbone', model)
+        return backbone_m(batch_data)
 
     if geom is not None and mname in TFN_MODELS and not _is_hybrid(model):
         inner = _find_encoder(model)
@@ -607,7 +617,7 @@ def forward_full(model, batch_data, geom=None):
 tr_acc = te_acc = xgb_tr_acc = xgb_te_acc = float('nan')
 trained_ok = False
 try:
-    if (model_name in TFN_MODELS and model_name != 'CrossAttentionTensorFieldNetwork'
+    if (model_name in TFN_MODELS and model_name not in ('CrossAttentionTensorFieldNetwork', 'HybridGTTFN')
             and train_geom is None and not use_multiscale):
         print("  GEOMETRY FAILED — skipping training")
     else:

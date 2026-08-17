@@ -1029,6 +1029,121 @@ class TemporalCrossAttentionTFN(nn.Module):
 
 
 # ============================================================================
+# HybridGTTFN  —  GT-TFN + distance-matrix fusion model
+# ============================================================================
+
+class HybridGTTFN(nn.Module):
+    """
+    Multi-branch model that fuses SO(n)-equivariant GT-TFN features with
+    distance-matrix row features.  Inspired by MultiInputModel's success
+    in combining complementary feature views.
+
+    Branches
+    --------
+    1. GT-TFN encoder: equivariant message passing with CG coupling,
+       sum-pooled invariant node descriptors.
+    2. Distance-matrix MLP: row-wise MLP on the (N,N) distance matrix,
+       mean-pooled over rows (matches DistanceMatrixRaggedModel design).
+
+    The two branches produce fixed-dim feature vectors that are concatenated
+    and fed to a shared classification MLP.
+
+    Parameters
+    ----------
+    n               : ambient dimension
+    num_classes     : output dimension (PV features)
+    max_order       : max GT irrep order (default 1)
+    hidden_channels : GT-TFN channels per irrep (default 32)
+    num_layers      : GT-TFN message-passing layers (default 3)
+    num_rbf         : RBF centres (default 64)
+    cutoff          : RBF cutoff distance (default 2.0)
+    k_neighbors     : k-NN neighbourhood for GT-TFN (default 16)
+    phi_dim         : distance-matrix row MLP width (default 128)
+    tfn_dim         : intermediate dim for GT-TFN branch (default 128)
+    classifier_dims : final MLP dims (default [256, 128])
+    radial_hidden   : radial MLP width (default 64)
+    """
+
+    def __init__(
+        self,
+        n: int,
+        num_classes: int,
+        max_order: int = 1,
+        hidden_channels: int = 32,
+        num_layers: int = 3,
+        num_rbf: int = 64,
+        cutoff: float = 2.0,
+        k_neighbors: int = 16,
+        phi_dim: int = 128,
+        tfn_dim: int = 128,
+        classifier_dims: Optional[List[int]] = None,
+        radial_hidden: int = 64,
+    ):
+        super().__init__()
+        from models import _build_mlp
+
+        if classifier_dims is None:
+            classifier_dims = [256, 128]
+
+        # ── Branch 1: GT-TFN encoder ──
+        self._tfn = TemporalCrossAttentionTFN(
+            num_classes=tfn_dim, n=n, max_order=max_order,
+            hidden_channels=hidden_channels, num_layers=num_layers,
+            num_heads=4, transformer_layers=2, num_rbf=num_rbf,
+            classifier_dims=[classifier_dims[0]], radial_hidden=radial_hidden,
+            dropout=0.1,
+        )
+        self._tfn_dim = tfn_dim
+
+        # ── Branch 2: Distance-matrix row MLP ──
+        self._phi_dim = phi_dim
+        self._dist_phi = None   # lazily built on first forward (need N)
+        self._dist_rho = _build_mlp(
+            [phi_dim] + list(classifier_dims[:1]) + [phi_dim],
+            activation='gelu', norm='ln')
+
+        # ── Fusion head ──
+        combined = tfn_dim + phi_dim
+        self._fusion = _build_mlp(
+            [combined] + list(classifier_dims) + [num_classes],
+            activation='gelu', norm='ln')
+
+        self._n = n
+
+    def _ensure_dist_phi(self, N, device):
+        if self._dist_phi is None or self._dist_phi[0].in_features != N:
+            from models import _build_mlp
+            self._dist_phi = _build_mlp(
+                [N, max(64, self._phi_dim), self._phi_dim],
+                activation='gelu', norm='ln').to(device)
+
+    def forward(self, batch, precomputed_geom=None):
+        tfn_feats = []
+        dist_feats = []
+        for idx, pc in enumerate(batch):
+            # ── GT-TFN branch ──
+            geom_i = precomputed_geom[idx] if precomputed_geom is not None else None
+            tfn_out = self._tfn._encode_descriptor(pc, precomputed_geom=geom_i)
+            tfn_feat = self._tfn.rho(tfn_out.unsqueeze(0)).squeeze(0)  # (tfn_dim,)
+
+            # ── Distance-matrix branch ──
+            N = pc.shape[0]
+            with torch.no_grad():
+                dist_mat = torch.cdist(pc.unsqueeze(0), pc.unsqueeze(0)).squeeze(0)  # (N, N)
+            self._ensure_dist_phi(N, pc.device)
+            row_feat = self._dist_phi(dist_mat)  # (N, phi_dim)
+            dist_feat = row_feat.mean(dim=0)     # (phi_dim,)
+
+            tfn_feats.append(tfn_feat)
+            dist_feats.append(dist_feat)
+
+        tfn_all = torch.stack(tfn_feats)    # (B, tfn_dim)
+        dist_all = torch.stack(dist_feats)  # (B, phi_dim)
+        combined = torch.cat([tfn_all, dist_all], dim=-1)  # (B, tfn_dim+phi_dim)
+        return self._fusion(combined)        # (B, num_classes)
+
+
+# ============================================================================
 # EquivariantSetTransformer  —  encoder-decoder with cross-attention
 # ============================================================================
 
