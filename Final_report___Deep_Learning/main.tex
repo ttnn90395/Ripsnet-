@@ -939,7 +939,7 @@ All accuracies are trial means at 100\% training fraction unless stated otherwis
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.85\textwidth]{images/plots/enhanced_model_data_efficiency.png}
-\caption{XGBoost accuracy vs.\ training fraction for each model family, averaged over 21 datasets (mean $\pm$ SEM). PersNet starts lowest at 20\% but reaches the highest accuracy at 100\%, while HybridGTTFN shows the most consistent improvement across fractions.}
+\caption{XGBoost accuracy vs.\ training fraction for each model family, averaged over 21 datasets (mean $\pm$ SEM). PersNet starts lowest at 20\% (43\%) but shows the steepest improvement, rising to match DMR at 100\% (73\%). HybridGTTFN shows the most consistent improvement across fractions.}
 \label{fig:model_data_efficiency}
 \end{figure}
 
@@ -948,7 +948,7 @@ All accuracies are trial means at 100\% training fraction unless stated otherwis
 \begin{figure}[H]
 \centering
 \includegraphics[width=\textwidth]{images/plots/benchmark_timing.png}
-\caption{CPU timing benchmarks on CBF (15 samples, 126 points each). \textbf{Left:} forward+backward time per pass. \textbf{Right:} parameter counts (log scale). The TFN family is 50--130$\times$ slower than PointNet, but all models train in under a second per epoch at this scale.}
+\caption{CPU timing benchmarks on CBF (15 samples, 126 points each). \textbf{Left:} forward+backward time per pass. \textbf{Right:} parameter counts (log scale). The TFN family is 20--130$\times$ slower than PointNet and DMR, but all models train in under a second per epoch at this scale.}
 \label{fig:timing}
 \end{figure}
 
@@ -973,7 +973,7 @@ All accuracies are trial means at 100\% training fraction unless stated otherwis
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.85\textwidth]{images/plots/accuracy_vs_cost.png}
-\caption{Mean test accuracy (21 datasets, best-config) vs.\ total CPU time per forward+backward pass. Bubble size is proportional to $\sqrt{\text{parameters}}$. The TFN variants achieve the highest accuracy but at 50--130$\times$ the cost of PointNet and DMR models, which remain competitive at a fraction of the compute.}
+\caption{Mean test accuracy (21 datasets, best-config) vs.\ total CPU time per forward+backward pass. Bubble size is proportional to $\sqrt{\text{parameters}}$. The TFN variants achieve the highest accuracy but at 20--130$\times$ the cost of PointNet and DMR models, which remain competitive at a fraction of the compute.}
 \label{fig:accuracy_cost}
 \end{figure}
 
