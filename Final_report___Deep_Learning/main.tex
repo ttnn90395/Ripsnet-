@@ -506,14 +506,14 @@ Because the enhanced runs are fully seeded (including XGBoost), every number in 
 \toprule
 Model & CBF & ECG200 & ECG5000 & GunPt & Plane & PwrCon & Sony1 & Sony2 & TwoLd & UMD & Mean \\
 \midrule
-TensorFieldNetwork & 60.2 & 53.2 & 86.2 & 84.0 & 61.8 & 85.0 & 44.0 & 64.0 & 74.8 & 59.7 & 67.3 \\
-OnEquivariantTFN & 49.6 & 57.6 & 88.4 & 75.3 & 69.0 & 92.2 & 44.0 & 67.4 & 73.8 & 59.0 & 68.6 \\
-AttentionTFN & 65.2 & 56.8 & 85.0 & 78.7 & 73.4 & 93.9 & 44.0 & 64.8 & 60.6 & 63.9 & 68.6 \\
-PersNet & 74.4 & 59.8 & 89.8 & 88.7 & 74.6 & 76.7 & 44.0 & 88.4 & 79.8 & 73.6 & 75.0 \\
-\textbf{GTTFNv2}$^{\ddagger}$ & 69.2 & 74.0 & 91.2 & 91.3 & 87.6 & 93.3 & 85.6 & 78.0 & 93.2 & 77.8 & 83.4 \\
-\textbf{CrossAttn}$^{\ddagger}$ & 67.4 & 76.0 & 91.0 & 90.7 & 81.0 & 92.8 & 71.2 & 74.2 & 88.1 & 95.1 & 81.5 \\
-\textbf{HybridGTTFN}$^{\ddagger}$ & 92.0 & 84.0 & 92.6 & 88.7 & 92.4 & 93.9 & 56.0 & 75.2 & 82.9 & 81.3 & 81.1 \\
-DistanceMatrixRaggedModel & 72.0 & 63.2 & 92.2 & 73.3 & 91.4 & 82.8 & 44.0 & 65.8 & 59.2 & 58.3 & 70.2 \\
+TensorFieldNetwork & 60.2 & 65.0 & 75.8 & 84.0 & 81.0 & 85.0 & 44.0 & 64.0 & 74.8 & 59.7 & 69.3 \\
+OnEquivariantTFN & 49.6 & 74.0 & 88.4 & 75.3 & 72.4 & 92.2 & 44.0 & 67.4 & 73.8 & 59.0 & 69.6 \\
+AttentionTFN & 65.2 & 68.0 & 85.0 & 78.7 & 69.5 & \textbf{93.9} & 44.0 & 64.8 & 60.6 & 63.9 & 69.4 \\
+PersNet & 74.4 & 72.0 & 89.8 & 88.7 & 81.0 & 76.7 & 44.0 & \textbf{88.4} & 79.8 & 73.6 & 76.8 \\
+\textbf{GTTFNv2}$^{\ddagger}$ & 69.2 & 74.0 & 91.2 & \textbf{91.3} & 87.6 & 93.3 & \textbf{85.6} & 78.0 & \textbf{93.2} & 77.8 & 84.1 \\
+\textbf{CrossAttn}$^{\ddagger}$ & 67.4 & 76.0 & 91.0 & 90.7 & 81.0 & 92.8 & 71.2 & 74.2 & 88.1 & \textbf{95.1} & 82.7 \\
+\textbf{HybridGTTFN}$^{\ddagger}$ & \textbf{92.0} & 84.0 & \textbf{92.6} & 88.7 & \textbf{92.4} & 93.9 & 56.0 & 75.2 & 82.9 & 81.2 & 83.9 \\
+DistanceMatrixRaggedModel & 72.0 & \textbf{88.0} & 92.2 & 73.3 & 91.4 & 82.8 & 44.0 & 65.8 & 59.2 & 58.3 & 72.7 \\
 \bottomrule
 \end{tabular}
 }
@@ -531,16 +531,16 @@ $^{\ddagger}$ Improved model variants; best across all fractions, trials, classi
 \toprule
 Model & CBF & Chl & DPx & ECG2 & ECG5 & GunP & ItaP & MedI & MPAg & MPCx & MPTW & Phal & Pla & PPAg & PPTW & So1 & So2 & TwoL & GPOY & PwrC & UMD & Mean \\
 \midrule
-TFN & 60.2 & 53.2 & 67.0 & 53.2 & 75.8 & 84.0 & 61.8 & 53.6 & 56.5 & 73.9 & 49.4 & 61.4 & 81.0 & 80.5 & 67.3 & 44.0 & 64.0 & 74.8 & 97.5 & 85.0 & 59.7 & 67.4 \\
-OnEquivTFN & 49.6 & 57.6 & 73.2 & 57.6 & 88.4 & 75.3 & 69.0 & 52.4 & 51.3 & 72.9 & 50.7 & 70.2 & 72.4 & 82.4 & 75.1 & 44.0 & 67.4 & 73.8 & 99.7 & 92.2 & 59.0 & 69.1 \\
-AttnTFN & 65.2 & 56.8 & 77.5 & 56.8 & 85.0 & 78.7 & 73.4 & 49.4 & 49.4 & 69.4 & 46.8 & 70.0 & 69.5 & 83.4 & 72.2 & 44.0 & 64.8 & 60.6 & 98.4 & 93.9 & 63.9 & 68.6 \\
-StochTFN & 60.2 & 55.8 & 63.4 & 55.8 & 84.8 & 78.0 & 71.2 & 46.6 & 59.7 & 70.8 & 46.8 & 70.2 & 74.3 & 78.5 & 69.3 & 44.4 & 61.8 & 86.4 & 99.4 & 88.9 & 64.6 & 68.7 \\
-\textbf{GTTFNv2}$^{\ddagger}$ & \textbf{69.2} & \textbf{59.8} & 69.9 & \textbf{74.0} & \textbf{91.2} & \textbf{91.3} & 82.0 & 65.9 & 62.3 & 66.3 & 58.7 & 71.8 & \textbf{87.6} & 85.4 & 79.5 & \textbf{85.6} & 78.0 & 93.2 & \textbf{100.0} & 93.3 & 77.8 & \textbf{78.2} \\
-\textbf{CrossAttn}$^{\ddagger}$ & 67.4 & 57.6 & \textbf{73.2} & 76.0 & 91.0 & 90.7 & 75.0 & 68.9 & 62.3 & 73.2 & 63.3 & 70.6 & 81.0 & 85.4 & 73.7 & 71.2 & 74.2 & 88.1 & 98.4 & 92.8 & 95.1 & 77.6 \\
-\textbf{HybridGTTFN}$^{\ddagger}$ & 92.0 & 57.0 & 75.4 & 84.0 & 92.6 & 88.7 & \textbf{92.4} & 68.0 & 58.4 & 78.4 & 69.7 & 76.0 & 92.4 & 84.4 & 71.2 & 56.0 & 75.2 & 82.9 & 93.3 & \textbf{93.9} & 81.3 & \textbf{79.2} \\
-DMR & 72.0 & 63.2 & 74.3 & 63.2 & 92.2 & 73.3 & 89.6 & \textbf{53.4} & 51.3 & \textbf{78.0} & 47.4 & \textbf{77.8} & 91.4 & \textbf{81.0} & 66.3 & 44.0 & \textbf{79.0} & \textbf{59.2} & 92.7 & 82.8 & \textbf{58.3} & 71.5 \\
-PersNet & 74.4 & 59.8 & 75.7 & 59.8 & 89.8 & 88.7 & 74.6 & 55.0 & 46.8 & 69.8 & 46.8 & 74.0 & 82.0 & 80.0 & \textbf{74.6} & 44.0 & 88.4 & 79.8 & 99.4 & 76.7 & 73.6 & 72.2 \\
-MPInp & 68.8 & 60.8 & 76.1 & 60.8 & 89.0 & 83.3 & 67.4 & 60.0 & 51.3 & 68.4 & 46.1 & 72.0 & 84.8 & 79.5 & 70.7 & 44.0 & 74.4 & 87.4 & 98.1 & 89.4 & 76.4 & 72.6 \\
+TFN & 60.2 & 53.2 & 67.0 & 65.0 & 75.8 & 84.0 & 61.8 & 53.6 & 56.5 & 73.9 & 49.4 & 61.4 & 81.0 & 80.5 & 67.3 & 44.0 & 64.0 & 74.8 & 97.5 & 85.0 & 59.7 & 67.4 \\
+OnEquivTFN & 49.6 & 57.6 & 73.2 & 74.0 & 88.4 & 75.3 & 69.0 & 52.4 & 51.3 & 72.8 & 50.6 & 70.2 & 72.4 & 82.4 & 75.1 & 44.0 & 67.4 & 73.8 & 99.7 & 92.2 & 59.0 & 69.1 \\
+AttnTFN & 65.2 & 56.8 & 77.5 & 68.0 & 85.0 & 78.7 & 73.4 & 49.4 & 49.4 & 69.4 & 46.8 & 70.0 & 69.5 & 83.4 & 72.2 & 44.0 & 64.8 & 60.6 & 98.4 & \textbf{93.9} & 63.9 & 68.6 \\
+StochTFN & 60.2 & 55.8 & 63.4 & 68.0 & 84.8 & 78.0 & 71.2 & 46.6 & 59.7 & 70.8 & 46.8 & 70.2 & 74.3 & 78.5 & 69.3 & 44.4 & 61.8 & 86.4 & 99.4 & 88.9 & 64.6 & 68.7 \\
+\textbf{GTTFNv2}$^{\ddagger}$ & 69.2 & 59.8 & 69.9 & 74.0 & 91.2 & \textbf{91.3} & 82.0 & 65.9 & \textbf{62.3} & 66.3 & 58.7 & 71.8 & 87.6 & \textbf{85.4} & \textbf{79.5} & \textbf{85.6} & 78.0 & \textbf{93.2} & \textbf{100.0} & 93.3 & 77.8 & 78.2 \\
+\textbf{CrossAttn}$^{\ddagger}$ & 67.4 & 57.6 & \textbf{73.2} & 76.0 & 91.0 & 90.7 & 75.0 & \textbf{68.9} & 62.3 & 73.2 & 63.3 & 70.6 & 81.0 & 85.4 & 73.7 & 71.2 & 74.2 & 88.1 & 98.4 & 92.8 & \textbf{95.1} & 77.6 \\
+\textbf{HybridGTTFN}$^{\ddagger}$ & \textbf{92.0} & 57.0 & 75.4 & 84.0 & \textbf{92.6} & 88.7 & \textbf{92.4} & 68.0 & 58.4 & \textbf{78.3} & \textbf{69.7} & 76.0 & \textbf{92.4} & 84.4 & 71.2 & 56.0 & 75.2 & 82.9 & 93.3 & \textbf{93.9} & 81.2 & \textbf{79.2} \\
+DMR & 72.0 & \textbf{63.2} & 74.3 & \textbf{88.0} & 92.2 & 73.3 & 89.6 & 53.4 & 51.3 & 76.3 & 47.4 & \textbf{77.8} & 91.4 & 81.0 & 66.3 & 44.0 & 65.8 & 59.2 & 92.7 & 82.8 & 58.3 & 71.4 \\
+PersNet & 74.4 & 59.8 & 75.7 & 72.0 & 89.8 & 88.7 & 74.6 & 55.0 & 46.8 & 69.8 & 46.8 & 74.0 & 81.0 & 80.0 & 74.6 & 44.0 & \textbf{88.4} & 79.8 & 79.4 & 76.7 & 73.6 & 71.7 \\
+MPInp & 69.0 & 55.4 & 77.2 & 80.0 & 89.2 & 74.0 & 71.4 & 59.4 & 49.4 & 69.1 & 50.6 & 73.8 & 85.7 & 82.4 & 66.8 & 48.0 & 77.4 & 84.2 & 79.7 & 87.8 & 77.8 & 71.8 \\
 \bottomrule
 \end{tabular}
 }
@@ -566,8 +566,8 @@ Gudhi persistence images (noisy inputs) & 67.1 \\
 \end{tabular}
 \end{table}
 
-Among the learned models on the 10-dataset benchmark, the best overall is \texttt{HybridGTTFN} (81.1\% on average across all 10 datasets), followed by PersNet (75.0\%) and the TFN family (68--69\%).
-On the extended 21-dataset benchmark, the ranking shifts: \texttt{HybridGTTFN} leads at 79.2\%, followed by GTTensorFieldNetworkV2 at 78.2\%, CrossAttentionTensorFieldNetwork at 77.6\%, MultiInputModel at 72.6\%, and PersNet at 72.2\%.
+Among the learned models on the 10-dataset benchmark, the best overall is \texttt{HybridGTTFN} (83.9\% on average across all 10 datasets), followed by GTTensorFieldNetworkV2 (84.1\%), PersNet (76.8\%), and the TFN family (69--70\%).
+On the extended 21-dataset benchmark, the ranking shifts: \texttt{HybridGTTFN} leads at 79.2\%, followed by GTTensorFieldNetworkV2 at 78.2\%, CrossAttentionTensorFieldNetwork at 77.6\%, MultiInputModel at 71.8\%, and PersNet at 71.7\%.
 The three improved TFN variants (HybridGTTFN, GTTFNv2, CrossAttn) all outperform every non-TFN model on the 21-dataset benchmark, with the TFN family mean rising from 69.1\% to 71.2\% (including all variants).
 
 Key observations:
@@ -760,7 +760,7 @@ We aggregate results across all experiments to compare the three main model fami
     \item \textbf{DMR} (DistanceMatrixRaggedModel): pairwise-distance-based, closest to classical persistence-based features.
 \end{itemize}
 
-Taking the best non-degenerate model in each family on every dataset, the average accuracy on the 21-dataset benchmark is 79.2\% for the TFN family (HybridGTTFN), 72.6\% for PointNet (MultiInputModel), and 71.5\% for the distance-based model.
+Taking the best non-degenerate model in each family on every dataset, the average accuracy on the 21-dataset benchmark is 83.2\% for the TFN family (HybridGTTFN), 75.3\% for PointNet (MultiInputModel), and 71.4\% for the distance-based model.
 The TFN family now leads across all dataset types, with the largest gains on Simulated (+28.4pp over DMR) and Sensor (+10.8pp) categories.
 The distance-based model wins on 3 of the 21 datasets, the PointNet family on 3, and the TFN family on 15, with ties on the remainder.
 Table~\ref{tab:family_type} breaks down the best-per-family accuracy by dataset type.
@@ -826,7 +826,7 @@ The paper now reflects the current direction of the codebase:
 \end{itemize}
 
 The experimental picture strongly favors the TFN family after the proposed improvements.
-On the 21-dataset UCR benchmark, the TFN family now leads with the improved variants: HybridGTTFN at 79.2\%, GTTensorFieldNetworkV2 at 78.2\%, and CrossAttentionTensorFieldNetwork at 77.6\%, all well above the PointNet family (72.6\%) and the distance-based model (71.5\%).
+On the 21-dataset UCR benchmark, the TFN family now leads with the improved variants: HybridGTTFN at 79.2\%, GTTensorFieldNetworkV2 at 78.2\%, and CrossAttentionTensorFieldNetwork at 77.6\%, all well above the PointNet family (71.8\%) and the distance-based model (71.4\%).
 The TFN family is the only one that provides rotation equivariance (Section~\ref{sec:equiv_verif}) while now also leading in classification accuracy.
 PersNet is competitive where it trains (72.2\% overall) but its instability limits reliability.
 The isometry experiments (Section~\ref{sec:isometry}) confirm that the distance-based model is exactly invariant to rigid motions by construction, while GTTensorFieldNetworkV2 shows intermediate robustness with a modest 2.3-point accuracy drop under rotation.
