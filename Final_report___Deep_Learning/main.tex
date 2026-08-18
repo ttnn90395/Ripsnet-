@@ -497,7 +497,7 @@ All three improved TFN variants outperform every non-TFN model on the 21-dataset
 \begin{figure}[ht]
 \centering
 \includegraphics[width=0.85\textwidth]{images/plots/enhanced_per_model_comparison.png}
-\caption{Per-model accuracy at 100\% training fraction, averaged over 21 datasets (4 trials each). Error bars are standard deviation across datasets. The improved TFN variants lead among the models in this study.}
+\caption{Per-model accuracy at 100\% training fraction, averaged over available datasets (9--21 depending on the model). Error bars are standard deviation across datasets. PersNet and DMR were evaluated on the initial 10-dataset subset; GTTFNv2, CrossAttn, and HybridGTTFN on the full 21-dataset benchmark.}
 \label{fig:per_model_main}
 \end{figure}
 
@@ -563,8 +563,8 @@ Key observations:
 \begin{itemize}
     \item \texttt{DistanceMatrixRaggedModel} leads on ECG (Table~\ref{tab:family_type}), where clean distance structure dominates.
     \item PersNet is highly unstable: it either trains to a competitive accuracy or collapses entirely, with no intermediate regime.
-    \item Accuracy improves monotonically with training fraction for every model that trains stably, confirming that the learned descriptors capture signal rather than memorizing small training sets (\cref{fig:model_data_efficiency}).
-    \item Training curves on CBF (\cref{fig:training_curves}) show that TFN variants converge more slowly than PointNet/DMR (50--100 epochs vs.\ 20) but reach comparable final accuracy.
+    \item Accuracy improves with training fraction for every model, though the MLP head saturates around 54\% (\cref{fig:model_data_efficiency}). XGBoost extracts substantially more signal from small training sets than the end-to-end MLP head.
+    \item Training curves on CBF (\cref{fig:training_curves}) show that GTTFNv2 requires $\sim$50 epochs to reach 80\% accuracy, while HybridGTTFN, PersNet, and DMR converge within 10--20 epochs. AttnTFN plateaus at 80\% throughout training.
     \item Timing benchmarks (\cref{fig:timing} and \cref{fig:accuracy_cost}) confirm the 50--130$\times$ cost gap between TFN and non-equivariant models, with HybridGTTFN being the most expensive at 530\,ms per pass.
 \end{itemize}
 
@@ -896,7 +896,7 @@ All accuracies are trial means at 100\% training fraction unless stated otherwis
 \begin{figure}[H]
 \centering
 \includegraphics[width=\textwidth]{images/plots/enhanced_mlp_vs_xgb_100pct.png}
-\caption{Per-dataset test accuracy (\%) of the MLP head and the XGBoost classifier at 100\% training fraction. XGBoost on the learned descriptors is consistently stronger than the end-to-end MLP head, and is the metric reported in Table~\ref{tab:ucr_main}.}
+\caption{Per-dataset test accuracy (\%) of the MLP head and the XGBoost classifier at 100\% training fraction. XGBoost generally outperforms the MLP head, though on some small datasets (e.g., CBF) the MLP head is competitive. Many MLP results are missing due to training collapse. XGBoost accuracy is the metric reported in Table~\ref{tab:ucr_main}.}
 \label{fig:mlp_vs_xgb}
 \end{figure}
 
@@ -905,7 +905,7 @@ All accuracies are trial means at 100\% training fraction unless stated otherwis
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.85\textwidth]{images/plots/enhanced_data_efficiency.png}
-\caption{Mean test accuracy as a function of the training fraction, averaged over all models and datasets. Accuracy improves monotonically as the fraction grows, and the XGBoost classifier extracts more signal from small training sets than the MLP head.}
+\caption{Mean test accuracy as a function of the training fraction, averaged over all models and datasets. XGBoost accuracy improves with more training data, while the MLP head saturates around 54\% due to the small training sets and end-to-end training instability.}
 \label{fig:data_efficiency}
 \end{figure}
 
@@ -921,7 +921,7 @@ All accuracies are trial means at 100\% training fraction unless stated otherwis
 \begin{figure}[H]
 \centering
 \includegraphics[width=\textwidth]{images/plots/enhanced_mlp_heatmap.png}
-\caption{MLP(+aug) test accuracy (\%) at 100\% training fraction, by dataset and model. The MLP head is more fragile than XGBoost, confirming that the learned descriptors are the informative representation.}
+\caption{MLP(+aug) test accuracy (\%) at 100\% training fraction, by dataset and model. The MLP head frequently achieves below-chance accuracy (e.g., PersNet at 34\% on 3-class CBF), confirming that end-to-end training fails on small datasets. Many model--dataset pairs have no MLP results, indicating training collapse.}
 \label{fig:mlp_heatmap}
 \end{figure}
 
@@ -939,7 +939,7 @@ All accuracies are trial means at 100\% training fraction unless stated otherwis
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.85\textwidth]{images/plots/enhanced_model_data_efficiency.png}
-\caption{XGBoost accuracy vs.\ training fraction for each model family, averaged over 21 datasets (mean $\pm$ SEM). All models improve monotonically; the TFN variants and DMR converge faster than PersNet at low fractions.}
+\caption{XGBoost accuracy vs.\ training fraction for each model family, averaged over 21 datasets (mean $\pm$ SEM). PersNet starts lowest at 20\% but reaches the highest accuracy at 100\%, while HybridGTTFN shows the most consistent improvement across fractions.}
 \label{fig:model_data_efficiency}
 \end{figure}
 
@@ -957,14 +957,14 @@ All accuracies are trial means at 100\% training fraction unless stated otherwis
 \begin{figure}[H]
 \centering
 \includegraphics[width=\textwidth]{images/plots/training_curves.png}
-\caption{Training loss (left) and accuracy (right) on CBF over 200 epochs (15 training samples). Solid lines: training set; dashed lines: validation proxy (full training set re-evaluated). TFN variants converge more slowly than PersNet and DMR but reach comparable final accuracy.}
+\caption{Training loss (left) and accuracy (right) on CBF over 200 epochs (15 training samples). Solid lines: training set; dashed lines: validation proxy. Most models converge to 100\% training accuracy; AttnTFN plateaus at 80\% with notably higher loss, suggesting instability with the small training set.}
 \label{fig:training_curves}
 \end{figure}
 
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.85\textwidth]{images/plots/convergence_comparison.png}
-\caption{Validation accuracy convergence for each model family on CBF. PersNet and DMR reach high accuracy within 20 epochs; TFN variants require 50--100 epochs but achieve similar final performance.}
+\caption{Validation accuracy convergence for each model family on CBF (15 training samples). HybridGTTFN, PersNet, and DMR reach high accuracy within 10--20 epochs; GTTFNv2 requires $\sim$50 epochs to surpass 80\%; AttnTFN plateaus at 80\% throughout training.}
 \label{fig:convergence}
 \end{figure}
 
@@ -973,7 +973,7 @@ All accuracies are trial means at 100\% training fraction unless stated otherwis
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.85\textwidth]{images/plots/accuracy_vs_cost.png}
-\caption{Mean test accuracy (21 datasets) vs.\ total CPU time per forward+backward pass. Bubble size is proportional to $\sqrt{\text{parameters}}$. The TFN family occupies the high-accuracy, high-cost quadrant, while PointNet variants are fast but less accurate.}
+\caption{Mean test accuracy (21 datasets, best-config) vs.\ total CPU time per forward+backward pass. Bubble size is proportional to $\sqrt{\text{parameters}}$. The TFN variants achieve the highest accuracy but at 50--130$\times$ the cost of PointNet and DMR models, which remain competitive at a fraction of the compute.}
 \label{fig:accuracy_cost}
 \end{figure}
 
