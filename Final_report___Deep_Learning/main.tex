@@ -174,7 +174,7 @@ The \texttt{TensorFieldNetwork} class implements an SO(3)-equivariant point-clou
 The $n$-dimensional generalization was motivated by a stronger symmetry goal: robustness to both permutations and rigid isometries, rather than only one at a time.
 This TFN family is the main architectural contribution of the project.
 
-At a schematic level, a TFN layer forms geometric messages from relative positions, couples them with feature tensors, and projects the result onto irreducible channels via Clebsch--Gordan coefficients:
+At a schematic level (illustrated in \cref{fig:tfn_arch}), a TFN layer forms geometric messages from relative positions, couples them with feature tensors, and projects the result onto irreducible channels via Clebsch--Gordan coefficients:
 \[
 m_{ij}^{(\ell)} = \Phi_\ell(d_{ij}) \otimes b_\ell(\hat r_{ij}),
 \qquad
@@ -242,7 +242,7 @@ The \texttt{HybridGTTFN} model combines three complementary feature streams:
     \item \textbf{Distance-matrix branch:} row-wise MLP on the pairwise distance matrix, mean-pooled;
     \item \textbf{PointNet branch:} coordinate MLP with max-pooling.
 \end{enumerate}
-The three feature vectors are concatenated and fed to a shared classification MLP.
+The three feature vectors are concatenated and fed to a shared classification MLP (\cref{fig:hybrid_arch}).
 This design targets datasets where scalar distances or raw coordinates carry the primary discriminative signal that the sparsified k-NN graph used by the TFN backbone may not capture.
 
 \begin{algorithm}[H]
@@ -260,34 +260,122 @@ Apply gating, residual connections, and channel mixing\;
 \Return updated features\;
 \end{algorithm}
 
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    block/.style={rectangle, draw, fill=blue!12, minimum height=0.7cm, minimum width=2.2cm, align=center, font=\small},
+    opblock/.style={rectangle, draw, fill=orange!18, minimum height=0.7cm, minimum width=2.2cm, align=center, font=\small},
+    outblock/.style={rectangle, draw, fill=green!15, minimum height=0.7cm, minimum width=2.2cm, align=center, font=\small},
+    arrow/.style={->, thick, >=stealth}
+]
+% Input
+\node[block, fill=gray!15] (input) at (0, 0) {Point Cloud\\$P \in \mathbb{R}^{N \times n}$};
+% k-NN
+\node[opblock] (knn) at (0, -1.2) {k-NN Graph\\($k$ neighbors)};
+% RBF + Harmonics
+\node[opblock] (rbf) at (-1.8, -2.4) {RBF Expansion\\$\Phi(d_{ij})$};
+\node[opblock] (har) at (1.8, -2.4) {GT Harmonics\\$b_\ell(\hat{r}_{ij})$};
+% CG coupling
+\node[opblock, fill=orange!30] (cg) at (0, -3.6) {Clebsch--Gordan\\Coupling $\otimes$};
+% Feature update
+\node[block] (update) at (0, -4.8) {Gated Update\\+ Residual};
+% Invariant readout
+\node[outblock] (readout) at (0, -6.0) {Invariant\\Readout};
+% Classifier
+\node[outblock, fill=green!25] (cls) at (0, -7.2) {MLP\\Classifier};
+
+\draw[arrow] (input) -- (knn);
+\draw[arrow] (knn) -- (rbf);
+\draw[arrow] (knn) -- (har);
+\draw[arrow] (rbf) -- (cg);
+\draw[arrow] (har) -- (cg);
+\draw[arrow] (cg) -- (update);
+\draw[arrow] (update) -- (readout);
+\draw[arrow] (readout) -- (cls);
+
+% Annotation
+\node[anchor=west, font=\footnotesize, text=gray] at (3.2, -1.2) {Local geometry};
+\node[anchor=west, font=\footnotesize, text=gray] at (3.2, -3.6) {Equivariant core};
+\node[anchor=west, font=\footnotesize, text=gray] at (3.2, -6.0) {Permutation-invariant};
+\end{tikzpicture}
+\caption{Architecture of a single TFN message-passing layer. The input point cloud is embedded in a k-NN graph; pairwise distances are expanded with radial basis functions and relative directions with GT harmonics; features are coupled through Clebsch--Gordan tensor products; and the result is updated with gated nonlinearities and residual connections. An invariant readout pools over points, and an MLP classifier maps to class logits.}
+\label{fig:tfn_arch}
+\end{figure}
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    block/.style={rectangle, draw, fill=blue!12, minimum height=0.6cm, minimum width=2.0cm, align=center, font=\footnotesize},
+    branch/.style={rectangle, draw, fill=yellow!20, minimum height=0.6cm, minimum width=2.8cm, align=center, font=\footnotesize},
+    outblock/.style={rectangle, draw, fill=green!15, minimum height=0.6cm, minimum width=2.4cm, align=center, font=\footnotesize},
+    arrow/.style={->, thick, >=stealth}
+]
+% Input
+\node[block, fill=gray!15] (input) at (0, 0) {Point Cloud $P$};
+
+% Three branches
+\node[branch] (tfn) at (-3.2, -1.5) {GT-TFN\\Equivariant MP};
+\node[branch] (dm) at (0, -1.5) {Distance Matrix\\Row MLP};
+\node[branch] (pn) at (3.2, -1.5) {PointNet\\Coord MLP};
+
+% Pooling
+\node[block] (p1) at (-3.2, -2.7) {Invariant Pool};
+\node[block, fill=orange!15] (p2) at (0, -2.7) {Mean Pool};
+\node[block, fill=orange!15] (p3) at (3.2, -2.7) {Max Pool};
+
+% Concat
+\node[outblock, fill=yellow!30] (concat) at (0, -3.9) {Concatenate};
+
+% Classifier
+\node[outblock] (cls) at (0, -5.1) {Classification MLP};
+
+\draw[arrow] (input) -- (tfn);
+\draw[arrow] (input) -- (dm);
+\draw[arrow] (input) -- (pn);
+\draw[arrow] (tfn) -- (p1);
+\draw[arrow] (dm) -- (p2);
+\draw[arrow] (pn) -- (p3);
+\draw[arrow] (p1) -- (concat);
+\draw[arrow] (p2) -- (concat);
+\draw[arrow] (p3) -- (concat);
+\draw[arrow] (concat) -- (cls);
+
+% Labels
+\node[anchor=east, font=\scriptsize, text=blue!60!black] at (-4.8, -1.5) {\textbf{Branch 1}};
+\node[anchor=east, font=\scriptsize, text=blue!60!black] at (-1.6, -1.5) {\textbf{Branch 2}};
+\node[anchor=west, font=\scriptsize, text=blue!60!black] at (4.8, -1.5) {\textbf{Branch 3}};
+\end{tikzpicture}
+\caption{HybridGTTFN architecture. Three complementary branches---equivariant GT-TFN message-passing, distance-matrix row-MLP, and PointNet coordinate MLP---extract features that are concatenated and fed to a shared classification MLP.}
+\label{fig:hybrid_arch}
+\end{figure}
+
 At a high level, the TFN variants differ mainly in how much structure they add around this core layer: the base \texttt{TensorFieldNetwork} keeps the architecture close to the original TFN idea, \texttt{GTTensorFieldNetworkV2} adds aggressive engineering improvements, and the hierarchical and orthogonal variants adapt the same backbone to larger or more symmetry-sensitive settings.
 
 \paragraph{Computational cost.}
-Table~\ref{tab:model_cost} summarizes the parameter counts and per-forward time complexity of each model family.
-For the UCR datasets ($N=15$--$200$ points, $k=16$ neighbors, $L=1$--$3$ layers), all models train in seconds on CPU.
-The TFN family pays $O(LNk)$ per forward pass; the distance-matrix model pays $O(N^2)$; PointNet pays $O(N)$.
-The $O(N^2)$ cost of the distance-matrix model is not a bottleneck at these scales but would become one for point clouds with thousands of points.
+Table~\ref{tab:model_cost} reports empirical parameter counts and CPU timing on the CBF dataset (15 samples, 126 points each).
+The TFN family pays $O(LNk)$ per forward pass: GTTFNv2 takes 87\,ms forward + 108\,ms backward, while the more complex CrossAttentionTFN and HybridGTTFN take 481\,ms and 530\,ms respectively.
+Distance-matrix and PointNet models are 50--130$\times$ faster (2--13\,ms total), reflecting their simpler $O(N)$ or $O(N^2)$ computation without equivariant tensor products.
+At the UCR scale ($N=15$--$200$), all models train in seconds per epoch on CPU.
 
 \begin{table}[ht]
 \centering
-\caption{Parameter counts and per-forward time complexity for the UCR configurations ($N$ points, $k$ neighbors, $L$ layers, $T$ transformer layers). Typical $N$: 15--200; $k=16$; $L$: 1--3.}
+\caption{Empirical parameter counts and CPU timing on CBF (15 samples, 126 points). Times are mean over 5 forward+backward passes.}
 \label{tab:model_cost}
 \small
-\begin{tabular}{lrc}
+\begin{tabular}{lrrr}
 \toprule
-Model & Parameters & Complexity \\
+Model & Parameters & Fwd (ms) & Bwd (ms) \\
 \midrule
-GTTensorFieldNetworkV2 & 2k--120k & $O(LNk)$ \\
-TensorFieldNetwork & same as GTTFNv2 & $O(LNk)$ \\
-OnEquivariantTFN & $2\times$ TFN & $O(2LNk)$ \\
-AttentionTFN & 80k--300k & $O(LNk)$ \\
-CrossAttentionTFN & 180k--400k & $O(LNk + TN^2D)$ \\
-HybridGTTFN & $\sim$280k & $O(LNk + N^2)$ \\
-StochasticTFN & 200k--350k & $O(LNk)$ \\
-DistanceMatrixRaggedModel & 50k--110k & $O(N^2)$ \\
-PersNet & $\sim$160k & $O(N)$ \\
-PointNetTutorial & $\sim$155k & $O(N)$ \\
-MultiInputModel & $\sim$350k & $O(N)$ \\
+GTTensorFieldNetworkV2 & 384k & 87 & 108 \\
+TensorFieldNetwork & 384k & 101 & 115 \\
+AttentionTFN & 196k & 128 & 183 \\
+CrossAttentionTFN & 352k & 237 & 244 \\
+StochasticTFN & 124k & 50 & 34 \\
+HybridGTTFN & 705k & 263 & 267 \\
+DistanceMatrixRaggedModel & 164k & 3 & 9 \\
+PersNet & 206k & 2 & 8 \\
+PointNetTutorial & 206k & 2 & 2 \\
+MultiInputModel & 489k & 5 & 8 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -475,7 +563,9 @@ Key observations:
 \begin{itemize}
     \item \texttt{DistanceMatrixRaggedModel} leads on ECG (Table~\ref{tab:family_type}), where clean distance structure dominates.
     \item PersNet is highly unstable: it either trains to a competitive accuracy or collapses entirely, with no intermediate regime.
-    \item Accuracy improves monotonically with training fraction for every model that trains stably, confirming that the learned descriptors capture signal rather than memorizing small training sets.
+    \item Accuracy improves monotonically with training fraction for every model that trains stably, confirming that the learned descriptors capture signal rather than memorizing small training sets (\cref{fig:model_data_efficiency}).
+    \item Training curves on CBF (\cref{fig:training_curves}) show that TFN variants converge more slowly than PointNet/DMR (50--100 epochs vs.\ 20) but reach comparable final accuracy.
+    \item Timing benchmarks (\cref{fig:timing} and \cref{fig:accuracy_cost}) confirm the 50--130$\times$ cost gap between TFN and non-equivariant models, with HybridGTTFN being the most expensive at 530\,ms per pass.
 \end{itemize}
 
 \paragraph{Statistical significance.}
@@ -833,6 +923,58 @@ All accuracies are trial means at 100\% training fraction unless stated otherwis
 \includegraphics[width=\textwidth]{images/plots/enhanced_mlp_heatmap.png}
 \caption{MLP(+aug) test accuracy (\%) at 100\% training fraction, by dataset and model. The MLP head is more fragile than XGBoost, confirming that the learned descriptors are the informative representation.}
 \label{fig:mlp_heatmap}
+\end{figure}
+
+\subsection{Per-Dataset Model Comparison}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{images/plots/enhanced_per_dataset_comparison.png}
+\caption{Per-dataset XGBoost accuracy (\%) for the top six models at 100\% training fraction, across all 21 UCR datasets. No single model dominates across all dataset types.}
+\label{fig:per_dataset}
+\end{figure}
+
+\subsection{Per-Model Data Efficiency}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{images/plots/enhanced_model_data_efficiency.png}
+\caption{XGBoost accuracy vs.\ training fraction for each model family, averaged over 21 datasets (mean $\pm$ SEM). All models improve monotonically; the TFN variants and DMR converge faster than PersNet at low fractions.}
+\label{fig:model_data_efficiency}
+\end{figure}
+
+\subsection{CPU Timing Benchmarks}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{images/plots/benchmark_timing.png}
+\caption{CPU timing benchmarks on CBF (15 samples, 126 points each). \textbf{Left:} forward+backward time per pass. \textbf{Right:} parameter counts (log scale). The TFN family is 50--130$\times$ slower than PointNet, but all models train in under a second per epoch at this scale.}
+\label{fig:timing}
+\end{figure}
+
+\subsection{Training Curves}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{images/plots/training_curves.png}
+\caption{Training loss (left) and accuracy (right) on CBF over 200 epochs (15 training samples). Solid lines: training set; dashed lines: validation proxy (full training set re-evaluated). TFN variants converge more slowly than PersNet and DMR but reach comparable final accuracy.}
+\label{fig:training_curves}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{images/plots/convergence_comparison.png}
+\caption{Validation accuracy convergence for each model family on CBF. PersNet and DMR reach high accuracy within 20 epochs; TFN variants require 50--100 epochs but achieve similar final performance.}
+\label{fig:convergence}
+\end{figure}
+
+\subsection{Accuracy vs.\ Computational Cost}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{images/plots/accuracy_vs_cost.png}
+\caption{Mean test accuracy (21 datasets) vs.\ total CPU time per forward+backward pass. Bubble size is proportional to $\sqrt{\text{parameters}}$. The TFN family occupies the high-accuracy, high-cost quadrant, while PointNet variants are fast but less accurate.}
+\label{fig:accuracy_cost}
 \end{figure}
 
 \clearpage
