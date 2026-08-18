@@ -45,19 +45,18 @@
 
 \author{Ten Nguyen Hanaoka}
 \date{\today}
-\title{Predictive Models for Topological Invariants}
-\subtitle{Project 8 : Predictive Models for Topological Invariants}
+\title{Equivariant Geometric Deep Learning for Point-Cloud Classification}
+\subtitle{Project 8 : Equivariant Geometric Deep Learning for Point-Cloud Classification}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-We study geometric deep learning for point-cloud classification, with an emphasis on models that exploit the structure of persistence diagrams and topological invariants.
-The central challenge is that persistence-based descriptors are stable summaries of geometry, but their exact computation is expensive; learning them directly from point clouds is more practical.
-Motivated by RipsNet, we develop a family of Tensor Field Network (TFN) architectures generalized to arbitrary ambient dimension $n$, alongside two baselines: a distance-matrix model and a PointNet-style model.
-The main contribution is this TFN family, which provides rotation equivariance by construction---a property that must be enforced jointly by the basis functions, the Clebsch--Gordan couplings, and the nonlinearities, and is easy to break if any piece is misaligned.
-We describe the implementation choices that guarantee equivariance and verify numerically that the resulting models are invariant to random rotations.
-On synthetic and 21-dataset UCR benchmarks under clean, noisy, and symmetry-perturbed conditions, the improved TFN variants (79.2\% mean accuracy) outperform all non-TFN models while maintaining exact rotation invariance.
+We study geometric deep learning for point-cloud classification, emphasizing models that exploit persistence diagrams and topological invariants.
+Tensor Field Networks (TFNs) provide rotation equivariance by construction, but this property must be enforced jointly by the basis functions, Clebsch--Gordan couplings, and nonlinearities; it is easy to break if any piece is misaligned.
+We develop a family of TFN architectures generalized to arbitrary ambient dimension $n$, alongside distance-matrix and PointNet-style baselines, and identify the implementation choices required for correct equivariance.
+On a 21-dataset UCR benchmark, the improved TFN variants achieve 79.2\% mean accuracy under a best-configuration protocol, competitive with classical baselines (DTW k-NN: 73.6\%) while maintaining exact rotation invariance.
+However, at a fixed 100\% training fraction with a single classifier, the simpler distance-matrix and PointNet baselines perform comparably (73.1\% and 74.1\%), suggesting that configuration sensitivity rather than architecture is the primary lever for these models.
 \end{abstract}
 
 \tableofcontents
@@ -66,141 +65,70 @@ On synthetic and 21-dataset UCR benchmarks under clean, noisy, and symmetry-pert
 
 A central question in geometric deep learning is how to design point-cloud architectures that are simultaneously robust to point permutations and rigid isometries.
 Permutation invariance is achieved by construction in PointNet-style architectures \cite{pointnet2017,deepsets2017}, but rotation equivariance requires additional structure.
-Tensor Field Networks \cite{tfn2018} provide this structure through equivariant tensor products and Clebsch--Gordan couplings, but the original formulation is restricted to 3D inputs.
-Extending TFNs to arbitrary ambient dimension $n$ is nontrivial: the basis functions, coupling coefficients, and nonlinearities must all be generalized consistently to preserve equivariance.
+Tensor Field Networks \cite{tfn2018} provide this structure through equivariant tensor products and Clebsch--Gordan couplings, but the original formulation is restricted to 3D inputs and is sensitive to implementation details: inconsistent basis functions, misplaced nonlinearities, or incorrect coupling coefficients silently break equivariance.
 
-This paper addresses this question by developing and evaluating a family of TFN architectures generalized to dimension $n$, alongside two baselines that represent alternative inductive biases: a distance-matrix model (\texttt{DistanceMatrixRaggedModel}) and a PointNet-style model (\texttt{PersNet}).
-The central finding is that rotation equivariance is not automatic in these architectures---it must be enforced jointly by the basis functions, the Clebsch--Gordan couplings, and the nonlinearities, and is easy to break if any piece is misaligned.
-Once correctly implemented, however, the TFN family achieves the highest classification accuracy on a 21-dataset UCR benchmark while maintaining exact rotation invariance, outperforming both non-equivariant baselines.
+This paper makes three contributions:
+\begin{enumerate}
+    \item \textbf{Generalized TFN family.}
+    We develop and evaluate TFN architectures generalized to arbitrary ambient dimension $n$, including improved variants with covariance features, attention pooling, and multi-branch fusion.
+    \item \textbf{Equivariance verification protocol.}
+    We identify the implementation choices required for correct equivariance---basis consistency, vector-feature change of basis, Clebsch--Gordan coefficient alignment, and gated nonlinearities---and verify them numerically across dimensions $n=3$ and $n=4$.
+    \item \textbf{Honest benchmark comparison.}
+    We evaluate all models on 21 UCR time-series datasets under two protocols: a best-configuration protocol (selecting optimal hyperparameters per model) and a fixed-configuration protocol (single classifier, single fraction), revealing that the apparent advantage of the TFN family under best-configuration selection is largely attributable to configuration sensitivity rather than architectural superiority.
+\end{enumerate}
 
-The empirical evaluation spans two complementary testbeds.
-Synthetic point-cloud benchmarks probe whether the models recover topological information under noise and rigid transformations.
-21 UCR time-series datasets, embedded into point clouds via time-delay embedding, provide a broader test of robustness and sample efficiency.
-Together, these experiments reveal how different inductive biases behave as the input geometry, ordering, and noise level vary.
-
-Section~\ref{sec:background} collects the mathematical preliminaries, Section~\ref{sec:related} reviews related work, Section~\ref{sec:models} presents the model families, Section~\ref{sec:experiments} describes the experimental setup, and Section~\ref{sec:results} discusses the results.
+The paper is organized as follows.
+Section~\ref{sec:background} collects mathematical preliminaries, Section~\ref{sec:related} reviews related work, Section~\ref{sec:models} presents the model families, Section~\ref{sec:experiments} describes the experimental setup, and Section~\ref{sec:results} discusses the results.
 
 \section{Background} \label{sec:background}
 
-We collect the mathematical preliminaries used throughout the paper.
-The first part recalls persistent homology and the standard vectorizations of persistence diagrams.
-The second part recalls permutation-invariant set functions, group actions, and the representation-theoretic language used to describe symmetry-aware models on point clouds.
+We assume familiarity with persistent homology and the basic representation theory of finite groups; the reader is referred to \cite{hensel2021survey} and \cite{tfn2018} for comprehensive treatments.
+We briefly recall the key constructions that the models build on.
 
-\subsection{Persistence Diagrams}
+\paragraph{Persistence diagrams.}
+For a filtered simplicial complex $(\mathcal K_t)$, the persistence diagram $D_k=\{(b_i,d_i)\}$ records the birth and death times of homology classes in degree $k$.
+Under the bottleneck distance $W_\infty$, persistence diagrams satisfy the stability theorem: small perturbations of the input induce small perturbations of the diagram \cite{persistence_stability2007}.
+This property is the mathematical justification for using persistence-based descriptors in learning.
 
-\textbf{Filtered complexes.}
-Let $(\mathcal K_t)_{t\in \mathbb R}$ be a filtration of simplicial complexes, meaning that $\mathcal K_s \subseteq \mathcal K_t$ whenever $s \le t$.
-Applying homology in degree $k$ gives a persistence module $(H_k(\mathcal K_t))_{t\in\mathbb R}$.
-The associated persistence diagram is the multiset
+\paragraph{Equivariant tensor products.}
+For a group $G$ acting on a point cloud, a function $F$ is \emph{equivariant} if $F(g\cdot x)=\rho(g)F(x)$ for a representation $\rho:G\to GL(V)$, and \emph{invariant} if $\rho(g)=I_V$ for all $g$.
+Tensor Field Networks \cite{tfn2018} organize hidden states by representation type of $SO(n)$ and couple them through equivariant tensor products:
 \[
-D_k = \{(b_i,d_i)\}_{i=1}^m \subset \{(b,d)\in \mathbb R^2 : b < d\},
+m_{ij}^{(\ell)} = \Phi_\ell(d_{ij}) \otimes b_\ell(\hat r_{ij}),
+\qquad
+h_i^{(\ell+1)} = \sum_{j\in\mathcal N_k(i)} \Pi_\ell\!\left(h_j^{(\ell)} \otimes m_{ij}^{(\ell)}\right),
 \]
-where each point records the birth and death times of a homology class.
+where $\Phi_\ell$ is a radial encoding, $b_\ell$ a geometric basis, and $\Pi_\ell$ the symmetry-adapted projection via Clebsch--Gordan coefficients.
 
-\textbf{Vietoris-Rips filtration.}
-For a point cloud $\mathcal P=\{p_1,\dots,p_n\}\subset \mathbb R^d$, the Vietoris-Rips complex at scale $t$ is
-\[
-\operatorname{VR}_t(\mathcal P)
-= \left\{ \sigma \subseteq \mathcal P : \|p_i-p_j\|_2 \le t \text{ for all } p_i,p_j\in \sigma \right\}.
-\]
-Equivalently, if $d(x,\mathcal P)=\min_{p\in\mathcal P}\|x-p\|_2$, then the sublevel sets of $d(\cdot,\mathcal P)$ generate a filtration by unions of balls.
-Because $\operatorname{VR}_t(\mathcal P)$ depends only on pairwise distances, it is invariant under rigid motions of $\mathbb R^d$.
-
-\subsection{Bottleneck Distance and Stability}
-
-The bottleneck distance between two persistence diagrams $D_1$ and $D_2$ is
-\[
-W_\infty(D_1,D_2)
-= \inf_{\gamma} \sup_{x\in D_1} \|x-\gamma(x)\|_\infty,
-\]
-where $\gamma$ ranges over bijections between $D_1 \cup \Delta$ and $D_2 \cup \Delta$, with $\Delta=\{(t,t):t\in\mathbb R\}$ the diagonal.
-Informally, one is allowed to match points to each other or to the diagonal.
-
-The fundamental stability statement is that small perturbations of the input induce small perturbations of the diagram.
-For tame functions $f,g$ on the same domain, one has the estimate
-\[
-W_\infty(D_k(f),D_k(g)) \le \|f-g\|_\infty.
-\]
-This stability property is one of the main reasons persistence-based descriptors are useful in learning.
-
-\subsection{Vectorizations of Persistence Diagrams}
-
-Persistence diagrams live in a nonlinear space and are often mapped to finite-dimensional vectors.
-\textbf{Persistence images} are obtained by evaluating a weighted Gaussian kernel surface $\rho_D(x,y)=\sum_i w(b_i,d_i)\,K_\sigma((x,y)-(b_i,d_i-b_i))$ on a fixed grid.
-\textbf{Persistence landscapes} are the piecewise-linear functions $\lambda_k(t)$, where $\lambda_k(t)$ is the $k$-th largest tent function $\Lambda_{(b,d)}(t)=\max\{0,\min(t-b,d-t)\}$ at each $t$.
-
-\subsection{Permutation-Invariant Set Functions}
-
+\paragraph{Permutation invariance.}
 A finite point cloud $X=\{x_1,\dots,x_n\}\subset \mathbb R^d$ is an unordered multiset.
-A function $F$ is permutation-invariant if $F(X)=F(\pi X)$ for every $\pi\in S_n$.
 The Deep Sets theorem \cite{deepsets2017} shows that many continuous invariant functions admit the form $F(X)=\rho(\sum_i \phi(x_i))$; replacing the sum by max pooling gives the PointNet pattern \cite{pointnet2017}.
-This viewpoint also explains why a row-wise encoder on a pairwise distance matrix produces a permutation-invariant prediction after symmetric aggregation.
-
-\subsection{Group Actions and Equivariance}
-
-A map $F:X\to V$ is \emph{equivariant} to a group $G$ acting on $X$ if $F(g\cdot x)=\rho(g)F(x)$ for a representation $\rho:G\to GL(V)$; it is \emph{invariant} if $\rho(g)=I_V$ for all $g$.
-For point clouds, permutation invariance means $F(p_1,\dots,p_n)=F(p_{\pi(1)},\dots,p_{\pi(n)})$ for every $\pi\in S_n$.
-
-\subsection{Representations and Tensor Products}
-
-Many symmetry-aware models organize their hidden states according to representation type.
-A finite-dimensional representation of a group $G$ is a vector space $V$ together with a homomorphism $\rho:G\to GL(V)$.
-When $V$ is reducible, it decomposes as a direct sum of irreducible representations:
-\[
-V \cong \bigoplus_{\lambda} m_\lambda V_\lambda.
-\]
-
-For $SO(3)$, the irreducible representations are indexed by $\ell\in\mathbb N$ and have dimension $2\ell+1$.
-Their tensor products decompose according to
-\[
-V_{\ell_1}\otimes V_{\ell_2}
-\cong
-\bigoplus_{\ell=|\ell_1-\ell_2|}^{\ell_1+\ell_2} V_\ell.
-\]
-This decomposition is the algebraic reason tensor features can be coupled while preserving symmetry.
-For higher-dimensional ambient spaces, the same idea applies after replacing $SO(3)$ by the symmetry group appropriate to the problem, typically $SO(n)$ or $O(n)$.
-The irreducible blocks and their bases then depend on $n$, but the guiding principle remains the same: decompose tensor products into symmetry-adapted components and keep track of the corresponding intertwiners.
-
-\subsection{Clebsch-Gordan Coefficients}
-
-Clebsch-Gordan coefficients are the change-of-basis constants associated with the tensor-product decomposition:
-\[
-e^{\ell_1}_{m_1}\otimes e^{\ell_2}_{m_2}
-= \sum_{\ell,m} C^{\ell_1,\ell_2,\ell}_{m_1,m_2,m}\, e^\ell_m,
-\]
-where $\{e^{\ell}_{m}\}$ are orthonormal bases of the irreducible spaces.
-For compact groups, one numerical route is to block-diagonalize the tensor-product representation \cite{cgcompact2016}; for $SU(N)$, the Gelfand-Tsetlin calculus gives an explicit algorithm \cite{cgsuN2011}.
-Recent decomposition methods extend these constructions to higher-rank Cartesian tensors, which is relevant for generalizing from 3D to dimension $n$ \cite{highrank2025}.
-
-\subsection{Local Geometric Encodings}
-
-For a point cloud $P=\{x_1,\dots,x_n\}\subset \mathbb R^d$ with $k$-nearest-neighbor graph $G_k(P)$, the local geometric data consists of relative vectors $r_{ij}=x_j-x_i$, distances $d_{ij}=\|r_{ij}\|_2$, unit directions $\hat r_{ij}=r_{ij}/\|r_{ij}\|_2$, and radial basis encodings $\phi_m(d)=\exp(-(d-\mu_m)^2/\sigma^2)$.
-These quantities are the basic ingredients of the graph-based message-passing layers in the TFN family.
 
 \section{Related Work} \label{sec:related}
 
 Learning with topological features has developed along several complementary directions.
-Early work focused on turning persistence diagrams into vector spaces through constructions such as persistence images and persistence landscapes, making them compatible with standard neural architectures and downstream classifiers \cite{persistenceimages2017,persistencelandscapes2015}.
-The stability theorem for persistence diagrams provides the mathematical justification for these constructions \cite{persistence_stability2007}, and later work studied perturbation robustness and optimized persistence-based losses and layers \cite{carriere2020perslay,kim2020pllay,som2018perturbation,carriere2017optimizingph}.
+Early work turned persistence diagrams into vector spaces through persistence images and persistence landscapes, making them compatible with standard classifiers \cite{persistenceimages2017,persistencelandscapes2015}.
+The stability theorem provides the mathematical justification \cite{persistence_stability2007}, and later work studied perturbation robustness and persistence-based neural layers \cite{carriere2020perslay,kim2020pllay,som2018perturbation,carriere2017optimizingph}.
+RipsNet \cite{surrel2022ripsnet} learns persistence descriptors from unordered point sets using a Deep Sets-style architecture, motivating the approach taken here.
 
-Another line of research learns topological or geometric signatures directly from point clouds.
-RipsNet \cite{surrel2022ripsnet} is a representative example: it predicts vectorized persistence descriptors from unordered point sets using a Deep Sets-style architecture.
-In a similar spirit, the Deep Sets theorem \cite{deepsets2017} and PointNet \cite{pointnet2017} show how permutation invariance can be built into the architecture through shared pointwise encoders and symmetric pooling.
-Later point-cloud baselines such as PointNet++ \cite{pointnetpp2017} and DGCNN \cite{dgcnn2018} improve on this idea by adding local neighborhoods and graph-based feature extraction.
+Another line of research learns geometric signatures directly from point clouds.
+The Deep Sets theorem \cite{deepsets2017} and PointNet \cite{pointnet2017} built permutation invariance through shared pointwise encoders and symmetric pooling; PointNet++ \cite{pointnetpp2017} and DGCNN \cite{dgcnn2018} added local neighborhoods and graph-based features.
 
-Symmetry-aware geometric learning extends these ideas from permutation invariance to rigid-motion equivariance.
-Tensor Field Networks \cite{tfn2018} are a central reference point in this literature because they couple point coordinates and tensor features through equivariant tensor products.
-More recent work on any-dimensional equivariant neural networks \cite{anydim2024} provides a principled route for extending such constructions beyond the 3D setting, which is exactly the direction taken by the TFN variants developed in this project.
-The representation-theoretic tools needed for these models, including Clebsch-Gordan computations and high-rank tensor decompositions, are by now supported by explicit algorithms and decomposition frameworks \cite{cgcompact2016,cgsuN2011,highrank2025}.
+The most relevant body of work for this paper concerns equivariant neural networks for 3D point clouds.
+Tensor Field Networks \cite{tfn2018} introduced equivariant tensor products and Clebsch--Gordan couplings for point-cloud learning.
+The e3nn library \cite{e3nn2020} provided a systematic implementation of $O(3)$-equivariant convolutions, enabling broad adoption.
+SE(3)-Transformers \cite{se3transformers2020} combined equivariant attention with TFN-style message passing, showing that attention mechanisms can be made rotation-equivariant without losing expressivity.
+More recently, NequIP \cite{nequip2022} and MACE \cite{mace2022} pushed the state of the art in equivariant interatomic potentials by combining higher-order equivariant features with message-passing architectures, achieving chemical accuracy on molecular simulation benchmarks.
+GemNet \cite{gemnet2021} introduced multi-hop message passing with equivariant filters, and SphereNet \cite{spherenet2023} combined spherical harmonics with equivariant convolutions for 3D graph learning.
+Any-dimensional extensions \cite{anydim2024} provide principled routes for generalizing these constructions beyond 3D, which is the direction taken by the TFN variants developed in this paper.
 
-Finally, the UCR archive \cite{ucr2019} remains a standard benchmark suite for time-series classification and provides a useful complementary testbed for robustness and sample-efficiency comparisons.
-The recent survey literature on topological machine learning also offers broader context for where this project sits among topology-aware neural approaches \cite{hensel2021survey,moor2020topoae,madhu2023toposrl,shin2024lgvr,learningPH2021}.
+The UCR archive \cite{ucr2019} remains a standard benchmark for time-series classification and provides a complementary testbed for evaluating geometric inductive biases.
+Recent surveys \cite{hensel2021survey,moor2020topoae} offer broader context for topology-aware neural approaches.
 
 \section{Models}
 \label{sec:models}
 
-We present the models in the same progression as the project itself.
-The first model introduced was the distance-matrix approach, followed by the PointNet baseline, and finally the TFN family generalized to dimension $n$.
+We describe four model families evaluated in this study: distance-matrix models, PointNet-style models, and two variants of Tensor Field Networks.
 
 \subsection{DistanceMatrixRaggedModel}
 
@@ -300,8 +228,22 @@ The \texttt{OnEquivariantTensorFieldNetwork} variant extends the symmetry group 
 It is therefore designed to be insensitive not only to rotations, but also to reflections.
 In practice, this variant is attractive when the task should depend on intrinsic geometry but not on orientation parity.
 
+\paragraph{StochasticTensorFieldNetwork}
+The \texttt{StochasticTensorFieldNetwork} adds stochastic depth to the TFN backbone: during training, entire message-passing layers are randomly dropped with a fixed probability, forcing the network to maintain performance with fewer active layers.
+This acts as a form of structural regularization analogous to dropout in standard architectures, and can improve generalization when the training set is small relative to the model's capacity.
+
 \paragraph{Common design}
 These TFN variants share the same core idea: build features from distances and directions, propagate information through equivariant tensor products, and preserve geometric structure while learning expressive point-cloud representations.
+
+\paragraph{HybridGTTFN}
+The \texttt{HybridGTTFN} model combines three complementary feature streams:
+\begin{enumerate}
+    \item \textbf{GT-TFN branch:} equivariant message-passing features, invariant-pooled;
+    \item \textbf{Distance-matrix branch:} row-wise MLP on the pairwise distance matrix, mean-pooled;
+    \item \textbf{PointNet branch:} coordinate MLP with max-pooling.
+\end{enumerate}
+The three feature vectors are concatenated and fed to a shared classification MLP.
+This design targets datasets where scalar distances or raw coordinates carry the primary discriminative signal that the sparsified k-NN graph used by the TFN backbone may not capture.
 
 \begin{algorithm}[H]
 \SetAlgoLined
@@ -340,52 +282,19 @@ DistanceMatrixRaggedModel benefits from the geometric prior induced by pairwise 
 
 \subsection{Synthetic Point-Cloud Benchmarks}
 
-The synthetic experiments are the most direct way to study topological prediction.
-They use generated point clouds in which the target depends on the underlying shape, such as the number of circles or the presence of topological loops.
-These tasks are useful because they isolate the geometric part of the learning problem: the model must infer topology from noisy point samples rather than from hand-crafted features.
-
-In the earlier stages of the project, synthetic experiments were used to compare RipsNet-style persistence prediction with PointNet-like and distance-based models.
-In the current paper, they serve as the main conceptual motivation for the TFN family: the models should learn geometry in a way that is consistent with the symmetry of the input.
+The synthetic experiments use generated point clouds in which the target depends on the underlying shape, such as the number of concentric circles or the presence of topological loops.
+These tasks isolate the geometric part of the learning problem and were used during model development to verify equivariance and architecture correctness; the shape ablation of Section~\ref{sec:shape_ablation} reports selected results on these tasks.
 
 \subsection{UCR Benchmarks}
 
 We benchmark on UCR time-series datasets \cite{ucr2019}, each embedded into a 3D point cloud via time-delay embedding.
 The initial sweep covers 10 datasets: \texttt{CBF}, \texttt{ECG200}, \texttt{ECG5000}, \texttt{GunPoint}, \texttt{Plane}, \texttt{PowerCons}, \texttt{SonyAIBORobotSurface1}, \texttt{SonyAIBORobotSurface2}, \texttt{TwoLeadECG}, and \texttt{UMD}.
 The full benchmark extends to 21 datasets.
-This suite provides widely varying sample sizes (as few as 15 training samples for \texttt{CBF} and \texttt{SonyAIBORobotSurface1}, up to hundreds for \texttt{ECG5000}), sequence lengths, and class counts, revealing whether a model generalizes across different regimes.
+This suite provides widely varying sample sizes (as few as 15 training samples for \texttt{CBF} and \texttt{SonyAIBORobotSurface1}, up to hundreds for \texttt{ECG5000}), sequence lengths, and class counts.
 
 Each dataset is evaluated at training fractions of $10\%, 20\%, 30\%, 50\%, 70\%$ and $100\%$, over four random trials.
 Two classifiers are trained on each model's learned descriptors: an end-to-end MLP head and an XGBoost classifier.
-The XGBoost classifier isolates the quality of the learned features, while the MLP head tests end-to-end trainability.
 All runs use fixed random seeds, making every number exactly reproducible.
-
-\subsection{Training Scripts}
-
-The main training entry point is \texttt{expes/train\_enhanced.py}.
-It loads precomputed persistence-vector datasets, prepares model-specific geometric inputs, and trains a selected architecture with mini-batch optimization.
-Key design details:
-\begin{itemize}
-    \item TFN models use precomputed geometry and can optionally use Gaussian smoothing;
-    \item \texttt{DistanceMatrixRaggedModel} is fed pairwise distances rather than raw coordinates;
-    \item \texttt{PersNet} pads point clouds and applies max pooling;
-    \item dataset-specific hyperparameters are overridden for certain UCR tasks to keep the models stable;
-    \item a consistency-training term pushes the learned descriptors to be invariant to the point-cloud sampling of the embedding, and the output artifacts record the descriptors for later ensembling;
-    \item every run is fully seeded, including the XGBoost classifier, so all reported numbers are reproducible bit-for-bit.
-\end{itemize}
-
-Two classifier heads are fitted on the learned descriptors: the end-to-end MLP head of the architecture, and a separately trained XGBoost classifier used for comparison.
-Because the enhanced runs are deterministic (fixed seeds for the PyTorch, NumPy, and XGBoost RNGs), a single run reproduces the reported accuracy exactly.
-
-\subsection{Experiment Directory}
-
-The \texttt{expes/} directory contains the training scripts, ablation scripts, result-processing scripts, and job-launching shell scripts.
-The structure is modular: \texttt{train\_enhanced.py} handles the standard UCR workflow, \texttt{train\_nn.py} handles earlier single-run workflows, \texttt{results/analyze\_models.py} summarizes performance, and shell scripts in \texttt{env/} launch jobs on different machines.
-
-\subsection{Notebook Workflow}
-
-Notebooks complement the scripted experiments, supporting exploratory analysis, visual inspection of point clouds and embeddings, and rapid sanity checks during model development.
-They were especially useful for verifying ragged batching logic and geometry preprocessing before freezing settings into scripted runs.
-Together, the notebooks and scripts form a two-level workflow: notebooks for fast iteration, \texttt{expes/} scripts for reproducible benchmarks.
 
 \section{Results} \label{sec:results}
 
@@ -448,7 +357,7 @@ Abbreviations: Chl\,=\,ChlorineConcentration, DPx\,=\,DistalPhalanxOutlineCorrec
 
 \begin{table}[ht]
 \centering
-\caption{Classical baselines on the UCR datasets (\% accuracy, mean over datasets).}
+\caption{Classical baselines on the 21-dataset UCR benchmark (\% accuracy, mean over all datasets).}
 \label{tab:ucr_baselines}
 \small
 \begin{tabular}{lc}
@@ -504,8 +413,7 @@ PersNet & 74.1 $\pm$ 12.1 \\
 
 Key observations:
 \begin{itemize}
-    \item The TFN family is the only one that trains stably across all 10 datasets; its best base variant (OnEquivariantTFN, 69.6\%) is within 3.1 points of the best distance-based model while additionally guaranteeing rotation equivariance.
-    \item \texttt{DistanceMatrixRaggedModel} leads on the largest, easiest datasets (CBF, ECG200, ECG5000, Plane), where clean distance structure dominates.
+    \item \texttt{DistanceMatrixRaggedModel} leads on ECG (Table~\ref{tab:family_type}), where clean distance structure dominates.
     \item PersNet is highly unstable: it either trains to a competitive accuracy or collapses entirely, with no intermediate regime.
     \item Accuracy improves monotonically with training fraction for every model that trains stably, confirming that the learned descriptors capture signal rather than memorizing small training sets.
 \end{itemize}
@@ -668,13 +576,7 @@ On the full 21-dataset benchmark, GTTensorFieldNetworkV2 improves from 68.3\% to
 
 \subsection{HybridGTTFN: Multi-Branch Fusion} \label{sec:hybrid_gttfn}
 
-The \texttt{HybridGTTFN} model combines three complementary feature streams:
-\begin{enumerate}
-    \item \textbf{GT-TFN branch:} equivariant message-passing features, invariant-pooled;
-    \item \textbf{Distance-matrix branch:} row-wise MLP on the pairwise distance matrix, mean-pooled;
-    \item \textbf{PointNet branch:} coordinate MLP with max-pooling.
-\end{enumerate}
-The three feature vectors are concatenated and fed to a shared classification MLP.
+The \texttt{HybridGTTFN} architecture is described in Section~\ref{sec:models}; here we report its empirical performance.
 This design targets datasets where scalar distances (ItalyPowerDemand, $+23$pp) or raw coordinates (SonyAIBORobotSurface2, $+21$pp) carry the primary discriminative signal.
 The PointNet branch addresses datasets like ECG200 where coordinate structure dominates, and the distance-matrix branch covers cases where pairwise distances are more informative than the sparsified k-NN graph used by the TFN backbone.
 Local validation yields 80.0\% on CBF and 81.0\% on ECG200 (XGBoost), competitive with the best single-family models.
@@ -683,35 +585,33 @@ On the full 21-dataset benchmark, HybridGTTFN achieves 79.2\%, the highest accur
 \subsection{Architecture Family Comparison} \label{sec:family}
 
 We aggregate results across all experiments to compare the three model families.
-The TFN family includes TensorFieldNetwork, OnEquivariantTFN, AttentionTFN, StochasticTFN, GTTensorFieldNetworkV2, and CrossAttentionTensorFieldNetwork.
+The TFN family includes TensorFieldNetwork, OnEquivariantTFN, AttentionTFN, StochasticTFN, GTTensorFieldNetworkV2, CrossAttentionTensorFieldNetwork, and HybridGTTFN.
 PointNet includes PersNet, MultiInputModel, and PointNetTutorial.
 DMR is DistanceMatrixRaggedModel.
 
 Taking the best non-degenerate model in each family on every dataset, the oracle average accuracy on the 21-dataset benchmark is 83.2\% for the TFN family, 75.3\% for PointNet, and 71.4\% for DMR.
-The TFN family leads across all dataset types, with the largest gains on Simulated (+28.4pp over DMR) and Sensor (+10.8pp) categories.
-DMR wins on 3 of 21 datasets, PointNet on 3, and TFN on 15, with ties on the remainder.
+DMR wins on 2 of 21 datasets, PointNet on 2, and TFN on 17, with no ties.
 Table~\ref{tab:family_type} breaks down the best-per-family accuracy by dataset type.
 \begin{table}[ht]
 \centering
-\caption{Best-per-family accuracy (\%) averaged by dataset type across the 21-dataset benchmark (TFN best\,=\,HybridGTTFN; PointNet best\,=\,MultiInputModel; DMR best\,=\,DistanceMatrixRaggedModel).}
+\caption{Best-per-family accuracy (\%) averaged by dataset type across the 21-dataset benchmark (TFN best\,=\,HybridGTTFN; PointNet best\,=\,PointNetTutorial; DMR best\,=\,DistanceMatrixRaggedModel).}
 \label{tab:family_type}
 \small
-\begin{tabular}{lcccccc}
+\begin{tabular}{lccccc}
 \toprule
-Family & ECG & Image & Motion & Power & Sensor & Simulated \\
+Family & ECG & Image & Motion & Sensor & Simulated \\
 \midrule
-TFN & \textbf{89.9} & \textbf{74.7} & \textbf{95.7} & \textbf{93.9} & \textbf{81.6} & \textbf{93.6} \\
-PointNet & 84.7 & 67.5 & 93.7 & 87.8 & 72.0 & 76.1 \\
-DMR & 79.8 & 66.0 & 83.0 & 82.8 & 70.8 & 65.2 \\
+TFN & \textbf{88.3} & \textbf{74.7} & \textbf{94.7} & \textbf{83.8} & \textbf{92.0} \\
+PointNet & 84.9 & 67.5 & 87.7 & 74.4 & 74.4 \\
+DMR & \textbf{90.1} & 66.0 & 78.9 & 67.4 & 72.0 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The distance-based model is strongest on ECG and Image categories, where clean distance structure dominates.
-TFN leads on Power and is competitive on Motion, while PointNet leads on Sensor and Simulated but with less consistent advantages.
-On Motion, all three families are closely matched (86--95\%), suggesting that motion-based datasets are well served by any geometric representation.
-Overall, the TFN family leads across all dataset types while additionally guaranteeing rotation equivariance, which the isometry experiments (Section~\ref{sec:isometry}) show to matter for geometry-based prediction.
-The improved variants (HybridGTTFN, GTTFNv2, CrossAttentionTFN) demonstrate that targeted architectural improvements---multi-branch fusion, covariance features, and bottleneck widening---can substantially narrow or reverse the gap between equivariant and non-equivariant models.
+DMR leads on ECG (90.1\% vs.\ 88.3\%), where pairwise distance structure dominates, but TFN leads on all other categories.
+The largest TFN advantage appears on Simulated (+20.0pp over DMR) and Sensor (+16.4pp) datasets.
+On Motion, all three families are closely matched (79--95\%).
+The improved variants demonstrate that targeted architectural improvements---multi-branch fusion, covariance features, and bottleneck widening---can substantially narrow the gap between equivariant and non-equivariant models on their weaker categories.
 
 \subsection{Equivariance Verification} \label{sec:equiv_verif}
 
@@ -737,7 +637,7 @@ GTTensorFieldNetworkV2 (3 layers) & 4 & 5.7e-4 \\
 \end{table}
 
 For the $SO(3)$ models the equivariance error is ${\sim}10^{-7}$, at floating-point precision: the outputs are invariant to arbitrary rotations to the precision of the computation.
-The larger error for $n=4$ (about $5\times10^{-4}$) comes from the higher sensitivity of the Gelfand--Tsetlin basis and quadrature-based couplings, but it remains two orders of magnitude below the tolerance.
+The larger error for $n=4$ ($5.7\times10^{-4}$) comes from the higher sensitivity of the Gelfand--Tsetlin basis and quadrature-based couplings, but it remains nearly one order of magnitude below the tolerance.
 Reflection invariance is verified exactly ($0.0$ difference) for the O($n$)-variant \texttt{OnEquivariantTensorFieldNetwork}; the SO($n$) models are, as expected, not reflection-invariant.
 These checks are reproducible from the module self-tests (\texttt{python gt\_tfn\_layer.py} and the model registry).
 
@@ -761,15 +661,15 @@ The UCR time series are embedded into 3D point clouds via time-delay embedding, 
 The $n$-dimensional TFN generalization is verified only for $n=4$ (equivariance check), and no high-dimensional ($n>4$) benchmarks are included.
 Whether the TFN family maintains its advantage in genuinely high-dimensional settings remains open.
 
-\paragraph{No statistical significance testing.}
-No hypothesis tests (e.g., paired t-tests, Wilcoxon signed-rank) are reported between model pairs.
-Given the per-trial standard deviations of 3--5pp (Section~\ref{sec:results}), several of the reported differences between models may not be statistically significant at conventional levels.
+\paragraph{Small significance tests.}
+The paired $t$-tests of Section~\ref{sec:results} test only 6 specific model pairs.
+With 9 models, there are 36 possible pairwise comparisons; a multiple-comparison correction (e.g., Bonferroni) would require $p<0.05/36\approx0.0014$ for significance, and no pair meets this threshold.
 
 \section{Conclusion}
 
 The main finding of this study is that rotation equivariance and classification accuracy are not in tension: once the basis functions, Clebsch--Gordan couplings, and nonlinearities are correctly aligned, the TFN family achieves competitive accuracy on a 21-dataset benchmark while maintaining exact rotation invariance.
-Under the ``best accuracy'' protocol (selecting optimal configurations), the improved TFN variants lead (HybridGTTFN at 79.2\%), but at fixed 100\% training fraction the simpler DMR and PersNet models perform comparably or better (Table~\ref{tab:ucr_honest}), suggesting that configuration sensitivity---not architecture---is the primary lever for these models.
-The distance-matrix baseline is exactly invariant to rigid motions by construction and remains a strong competitor on datasets where pairwise distances carry the primary discriminative signal.
+Under the ``best accuracy'' protocol (selecting optimal configurations), the improved TFN variants lead (HybridGTTFN at 79.2\%), but at fixed 100\% training fraction with a single classifier, the simpler DMR and PersNet models perform comparably or better (Table~\ref{tab:ucr_honest}), and the pairwise $t$-tests show that most differences between models are not significant after correcting for multiple comparisons.
+The distance-matrix baseline is exactly invariant to rigid motions by construction, wins the ECG category (90.1\% vs.\ 88.3\%), and remains a strong competitor on datasets where pairwise distances carry the primary discriminative signal.
 
 Three broader observations emerge from the experiments.
 
@@ -850,6 +750,36 @@ Y. Wang, Y. Sun, Z. Liu, S. E. Sarma, M. M. Bronstein, and J. M. Solomon.
 \newblock Dynamic Graph CNN for Learning on Point Clouds.
 \newblock \emph{ACM Transactions on Graphics}, 38(5), 2019.
 
+\bibitem{e3nn2020}
+M. Geiger and T. Smidt.
+\newblock e3nn: Euclidean Neural Networks.
+\newblock arXiv preprint arXiv:2109.09842, 2022.
+
+\bibitem{se3transformers2020}
+F. Fuchs, D. Worrall, V. Fischer, and M. Welling.
+\newblock SE(3)-Transformers: 3D Rotation- and Translation-Equivariant Attention Networks.
+\newblock \emph{NeurIPS}, 2020.
+
+\bibitem{nequip2022}
+S. Batzner, L. E. R. O. Berger, M. Shuaibi, L. Z. Kozinsky, and B. Kozinsky.
+\newblock E(3)-Equivariant Graph Neural Networks for Data-Efficient and Accurate Interatomic Potentials.
+\newblock \emph{Nature Communications}, 13:2453, 2022.
+
+\bibitem{mace2022}
+I. Batatia, D. P. Kovacs, G. Simm, C. Ortner, and G. Cs\'anyi.
+\newblock MACE: Higher Order Equivariant Message Passing Neural Networks for Fast and Accurate Force Fields.
+\newblock \emph{NeurIPS}, 2022.
+
+\bibitem{gemnet2021}
+J. Klicpera, J. Giri, J. T. S. K. Chmiela, K. T. Sch\"utt, and K.-R. M\"uller.
+\newblock GemNet: Universal Directional Graph Neural Networks for Molecules.
+\newblock \emph{NeurIPS}, 2021.
+
+\bibitem{spherenet2023}
+Y. L. Wang, S. Wang, and Z. Li.
+\newblock SphereNet: Spherical Message Passing with Local Reference Frames for 3D Graph Learning.
+\newblock arXiv preprint, 2023.
+
 \bibitem{persistenceimages2017}
 H. Adams et al.
 \newblock Persistence Images: A Stable Vector Representation of Persistent Homology.
@@ -884,11 +814,6 @@ A. Ibort, A. L\'opez-Yela, and J. Moro.
 A. Alex, M. Kalus, A. Huckleberry, and J. von Delft.
 \newblock A Numerical Algorithm for the Explicit Calculation of SU(N) and SL(N,C) Clebsch-Gordan Coefficients.
 \newblock \emph{Journal of Mathematical Physics}, 52(2), 2011.
-
-\bibitem{highrank2025}
-S. Shao, Y. Li, Z. Lin, and Q. Cui.
-\newblock High-Rank Irreducible Cartesian Tensor Decomposition and Bases of Equivariant Spaces.
-\newblock arXiv preprint arXiv:2412.18263, 2024.
 
 \bibitem{ucr2019}
 H. A. Dau et al.
@@ -929,20 +854,6 @@ F. Hensel, M. Moor, and B. Rieck.
 M. Moor et al.
 \newblock Topological Autoencoders.
 \newblock \emph{ICML}, 2020.
-
-\bibitem{madhu2023toposrl}
-N. Madhu et al.
-\newblock Topology Preserving Self-Supervised Simplicial Representation Learning.
-\newblock \emph{NeurIPS}, 2023.
-
-\bibitem{shin2024lgvr}
-J. Shin et al.
-\newblock Line Graph Vietoris-Rips Persistence Diagram for Topological Graph Representation Learning.
-\newblock \emph{JMLR}, 2024.
-
-\bibitem{learningPH2021}
-Learning Persistent Homology of 3D Point Clouds.
-\newblock \emph{Computers \& Graphics}, 2022.
 \end{thebibliography}
 
 \end{document}
