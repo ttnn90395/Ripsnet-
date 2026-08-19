@@ -36,7 +36,7 @@ We study geometric deep learning for point-cloud classification, focusing on mod
 Equivariance requires consistent basis functions, Clebsch--Gordan couplings, and gated nonlinearities; we identify the implementation choices required for correctness and verify them numerically.
 We develop a family of TFN architectures generalized to arbitrary ambient dimension $n$, including improved variants with covariance features, attention pooling, and a multi-branch fusion model (HybridGTTFN) that combines TFN, distance-matrix, and PointNet branches.
 On a 21-dataset UCR time-series benchmark recast as point-cloud problems via time-delay embedding, we evaluate all models under two protocols: a best-configuration protocol (selecting optimal hyperparameters per model) and a fixed-configuration protocol (XGBoost classifier, 100\% training fraction).
-Under the best-configuration protocol, the best multi-branch ensemble (HybridGTTFN) achieves 79.2\% mean accuracy, above DTW k-NN (73.6\%).
+Under the best-configuration protocol, the best multi-branch ensemble (HybridGTTFN) achieves 79.2\% mean accuracy (an inflated upper bound; see Section~\ref{sec:results}), above DTW k-NN (73.6\%).
 However, under the fixed-configuration protocol, the simpler distance-matrix and PointNet baselines perform comparably (73.3\% and 74.3\%) to all TFN variants and to the multi-branch HybridGTTFN (70.7\%), and no pairwise comparison survives Bonferroni correction.
 The 8.5-point gap between protocols for HybridGTTFN demonstrates that configuration sensitivity, not architectural superiority, is the primary driver of apparent TFN performance gains.
 \end{abstract}
@@ -67,7 +67,7 @@ Section~\ref{sec:background} collects mathematical preliminaries, Section~\ref{s
 
 \section{Background} \label{sec:background}
 
-We assume familiarity with persistent homology and the basic representation theory of compact Lie groups; the reader is referred to \cite{hensel2021survey} for topological methods and to the e3nn library \cite{e3nn2020} for the practical implementation of the representation-theoretic machinery used by Tensor Field Networks.
+We assume familiarity with persistent homology and the basic representation theory of compact Lie groups; the reader is referred to \cite{hensel2021survey} for topological methods and to the e3nn library \cite{e3nn2022} for the practical implementation of the representation-theoretic machinery used by Tensor Field Networks.
 We briefly recall the key constructions that the models build on.
 
 \paragraph{Persistence diagrams.}
@@ -77,7 +77,7 @@ This property is the mathematical justification for using persistence-based desc
 
 \paragraph{Equivariant tensor products.}
 For a group $G$ acting on a point cloud, a function $F$ is \emph{equivariant} if $F(g\cdot x)=\rho(g)F(x)$ for a representation $\rho:G\to GL(V)$, and \emph{invariant} if $\rho(g)=I_V$ for all $g$.
-Tensor Field Networks \cite{tfn2018} organize hidden states by representation type of $SO(n)$ and couple them through equivariant tensor products:
+Tensor Field Networks \cite{tfn2018} organize hidden states by representation type of $SO(n)$ and couple them through equivariant tensor products (the same mechanism is restated in \cref{sec:models} for the model descriptions below):
 \[
 m_{ij}^{(\ell)} = \Phi_\ell(d_{ij}) \otimes b_\ell(\hat r_{ij}),
 \qquad
@@ -101,7 +101,7 @@ The Deep Sets theorem \cite{deepsets2017} and PointNet \cite{pointnet2017} built
 
 The most relevant body of work for this paper concerns equivariant neural networks for 3D point clouds.
 Tensor Field Networks \cite{tfn2018} introduced equivariant tensor products and Clebsch--Gordan couplings for point-cloud learning.
-The e3nn library \cite{e3nn2020} provided a systematic implementation of $O(3)$-equivariant convolutions, enabling broad adoption.
+The e3nn library \cite{e3nn2022} provided a systematic implementation of $O(3)$-equivariant convolutions, enabling broad adoption.
 SE(3)-Transformers \cite{se3transformers2020} combined equivariant attention with TFN-style message passing, showing that attention mechanisms can be made rotation-equivariant without losing expressivity.
 More recently, NequIP \cite{nequip2022} and MACE \cite{mace2022} pushed the state of the art in equivariant interatomic potentials by combining higher-order equivariant features with message-passing architectures, achieving chemical accuracy on molecular simulation benchmarks.
 GemNet \cite{gemnet2021} introduced multi-hop message passing with equivariant filters, and SphereNet \cite{spherenet2023} proposed spherical message passing combining distance, angle, and torsion information for 3D molecular graph learning.
@@ -444,7 +444,7 @@ The best-configured HybridGTTFN drops to 70.7\% (17 datasets), below both PersNe
 No pairwise comparison between any two models achieves significance after Bonferroni correction (Section~\ref{sec:significance}).
 This is the paper's central negative result: under honest evaluation, the equivariant TFN family does not outperform simple baselines on UCR data.
 Note that PersNet's honest mean (74.3\%) exceeds its best-config mean (71.7\%) because the honest computation covers only the 9 datasets with valid XGBoost results (CBF was excluded because XGBoost training collapsed on all 4 trials); these 9 datasets are easier on average than the full 21-dataset suite, so the ranking should be interpreted in light of the unequal dataset coverage in \cref{tab:ucr_honest}.
-DTW k-NN (73.6\%) closely matches PersNet (74.3\%), confirming that at small sample sizes the benchmark is dominated by training set size rather than model architecture.
+DTW k-NN (73.6\%, 21 datasets) is close to PersNet's honest mean (74.3\%, 9 datasets), confirming that at small sample sizes the benchmark is dominated by training set size rather than model architecture; the comparison is approximate because the two numbers are computed over different dataset subsets.
 
 \paragraph{Comparison with published baselines.}
 Table~\ref{tab:sota} compares the models in this study against published results on the same 21 datasets.
@@ -504,7 +504,7 @@ DMR & 72.0 & \textbf{88.0} & 92.2 & 73.3 & 91.4 & 82.8 & 44.0 & 65.8 & 59.2 & 58
 \bottomrule
 \end{tabular}
 \footnotesize
-$^{\ddagger}$ Improved variants; best across all fractions, trials, and multi-scale configs. Values are upper bounds, not expected test performance (see Table~\ref{tab:ucr_honest}).
+$^{\ddagger}$ Improved variants; best across all fractions, trials, and multi-scale configs. Values are upper bounds, not expected test performance (see Table~\ref{tab:ucr_honest}). \texttt{HybridGTTFN}$^{\ddagger}$ is a multi-branch ensemble (TFN\,+\,distance-matrix\,+\,PointNet) and is not a pure TFN variant; see Section~\ref{sec:family}.
 \end{table}
 
 \begin{table}[ht]
@@ -661,8 +661,9 @@ The TFN family includes TensorFieldNetwork, OnEquivariantTFN, AttentionTFN, Stoc
 HybridGTTFN combines TFN, distance-matrix, and PointNet branches and is classified separately as a multi-branch ensemble.
 PointNet includes PersNet, MultiInputModel, and PointNetTutorial.
 DMR is DistanceMatrixRaggedModel.
+Of these, StochasticTensorFieldNetwork was evaluated only under the best-configuration protocol and is not included in the honest-protocol comparison (Table~\ref{tab:ucr_honest}).
 
-A direct per-model comparison under the honest protocol (Table~\ref{tab:ucr_honest}) shows that the TFN family's best representative (TensorFieldNetwork, 69.2\%) is below both PersNet (74.3\%) and DMR (73.3\%), while HybridGTTFN as a multi-branch ensemble reaches 70.7\%.
+A direct per-model comparison under the honest protocol (Table~\ref{tab:ucr_honest}) shows that the TFN family's best representative under this protocol (OnEquivariantTFN, 70.3\%) is below both PersNet (74.3\%) and DMR (73.3\%), while HybridGTTFN as a multi-branch ensemble reaches 70.7\%.
 The best-config protocol (Table~\ref{tab:ucr_full}) inflates the TFN family's appearance because it contains more models (6) than the other families and thus more opportunities to find a lucky configuration per dataset.
 Table~\ref{tab:family_type} breaks down the best per-model accuracy by dataset type: within each family, the highest-scoring model is selected per task, and the resulting per-task bests are averaged by category.
 \begin{table}[ht]
@@ -694,7 +695,7 @@ All checks run with the classifier in evaluation mode (dropout off) and a tolera
 Table~\ref{tab:equiv} reports the resulting errors.
 \begin{table}[ht]
 \centering
-\caption{Rotation invariance: maximum absolute output difference under a random rotation, per model and ambient dimension $n$. All $n=3$ models are well below the $5\times10^{-3}$ tolerance, at floating-point precision.}
+\caption{Rotation invariance: maximum absolute output difference under a random rotation, per model and ambient dimension $n$. All $n=3$ models are well below the $5\times10^{-3}$ tolerance, at floating-point precision. $^\dagger$ Additionally, \texttt{OnEquivariantTensorFieldNetwork} was verified to be exactly reflection-invariant ($0.0$ difference under point inversion).}
 \label{tab:equiv}
 \small
 \begin{tabular}{llc}
@@ -702,9 +703,8 @@ Table~\ref{tab:equiv} reports the resulting errors.
 Model & $n$ & Max difference \\
 \midrule
 TensorFieldNetwork & 3 & 4.2e-7 \\
-OnEquivariantTensorFieldNetwork & 3 & 6.0e-7 \\
+OnEquivariantTensorFieldNetwork$^\dagger$ & 3 & 6.0e-7 \\
 AttentionTensorFieldNetwork & 3 & 4.8e-7 \\
-HybridOnEquivariantTensorFieldNetwork & 3 & 6.0e-7 \\
 GTTensorFieldNetworkV2 (3 layers) & 4 & 5.7e-4 \\
 \bottomrule
 \end{tabular}
@@ -763,7 +763,7 @@ The results paint a consistent picture across all experiments: rotation equivari
 
 \paragraph{The honest-protocol result.}
 Under the fixed-configuration protocol, PersNet (74.3\%) and DMR (73.3\%)---two of the simplest models, neither employing equivariant convolutions---match or exceed all TFN variants.
-This result is robust to the choice of model family: the best TFN (TensorFieldNetwork at 69.2\%) and the best multi-branch ensemble (HybridGTTFN at 70.7\%) both fall short.
+This result is robust to the choice of model family: the best TFN (OnEquivariantTFN at 70.3\%) and the best multi-branch ensemble (HybridGTTFN at 70.7\%) both fall short.
 The absence of any statistically significant pairwise difference after Bonferroni correction (28 comparisons, threshold $p\!<\!0.0018$) reinforces that the model family is not the primary determinant of accuracy at this scale.
 
 \paragraph{Why best-config numbers are misleading.}
@@ -856,7 +856,7 @@ Analysis of the gap between TFN-family models and the best-performing baselines 
 \end{enumerate}
 
 On the full 21-dataset benchmark (Table~\ref{tab:ucr_full}), \texttt{GTTensorFieldNetworkV2} improves from 68.3\% to 78.2\%, with notable gains on ECG5000 (81.8\%\,$\to$\,91.2\%), GunPoint (88.0\%\,$\to$\,91.3\%), and SonyAIBORobotSurface1 (44.0\%\,$\to$\,85.6\%).
-The 68.3\% baseline is the mean best-config accuracy of \texttt{GTTensorFieldNetworkV2} on the 21-dataset benchmark before the three improvements were applied.
+The 68.3\% baseline is the mean best-config accuracy of \texttt{GTTensorFieldNetworkV2} on the 21-dataset benchmark before the three improvements were applied (separate evaluation runs without the covariance features, attention pooling, or classifier head changes).
 
 \section*{Supporting Plots}
 
@@ -964,7 +964,7 @@ Y. Wang, Y. Sun, Z. Liu, S. E. Sarma, M. M. Bronstein, and J. M. Solomon.
 \newblock Dynamic Graph CNN for Learning on Point Clouds.
 \newblock \emph{ACM Transactions on Graphics}, 38(5), 2019.
 
-\bibitem{e3nn2020}
+\bibitem{e3nn2022}
 M. Geiger and T. Smidt.
 \newblock e3nn: Euclidean Neural Networks.
 \newblock arXiv preprint arXiv:2207.09453, 2022.
