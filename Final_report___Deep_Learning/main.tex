@@ -104,7 +104,7 @@ Tensor Field Networks \cite{tfn2018} introduced equivariant tensor products and 
 The e3nn library \cite{e3nn2020} provided a systematic implementation of $O(3)$-equivariant convolutions, enabling broad adoption.
 SE(3)-Transformers \cite{se3transformers2020} combined equivariant attention with TFN-style message passing, showing that attention mechanisms can be made rotation-equivariant without losing expressivity.
 More recently, NequIP \cite{nequip2022} and MACE \cite{mace2022} pushed the state of the art in equivariant interatomic potentials by combining higher-order equivariant features with message-passing architectures, achieving chemical accuracy on molecular simulation benchmarks.
-GemNet \cite{gemnet2021} introduced multi-hop message passing with equivariant filters, and SphereNet \cite{spherenet2023} combined spherical harmonics with equivariant convolutions for 3D graph learning.
+GemNet \cite{gemnet2021} introduced multi-hop message passing with equivariant filters, and SphereNet \cite{spherenet2023} proposed spherical message passing combining distance, angle, and torsion information for 3D molecular graph learning.
 Any-dimensional extensions \cite{anydim2024} provide principled routes for generalizing these constructions beyond 3D, which is the direction taken by the TFN variants developed in this paper.
 
 The UCR archive \cite{ucr2019} remains a standard benchmark for time-series classification and provides a complementary testbed for evaluating geometric inductive biases.
@@ -990,9 +990,9 @@ J. Gasteiger, F. Becker, and S. G\"unnemann.
 \newblock \emph{NeurIPS}, 2021.
 
 \bibitem{spherenet2023}
-Y. L. Wang, S. Wang, and Z. Li.
-\newblock SphereNet: Spherical Message Passing with Local Reference Frames for 3D Graph Learning.
-\newblock arXiv preprint, 2023.
+Y. Liu, L. Wang, M. Liu, Y. Lin, X. Zhang, B. Oztekin, and S. Ji.
+\newblock Spherical Message Passing for 3D Molecular Graphs.
+\newblock \emph{ICLR}, 2022.
 
 \bibitem{persistenceimages2017}
 H. Adams et al.
