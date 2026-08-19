@@ -67,7 +67,7 @@ Section~\ref{sec:background} collects mathematical preliminaries, Section~\ref{s
 
 \section{Background} \label{sec:background}
 
-We assume familiarity with persistent homology and the basic representation theory of compact Lie groups; the reader is referred to \cite{hensel2021survey} for topological methods and to the e3nn documentation \cite{e3nn2020} for the representation-theoretic machinery used by Tensor Field Networks.
+We assume familiarity with persistent homology and the basic representation theory of compact Lie groups; the reader is referred to \cite{hensel2021survey} for topological methods and to the e3nn library \cite{e3nn2020} for the practical implementation of the representation-theoretic machinery used by Tensor Field Networks.
 We briefly recall the key constructions that the models build on.
 
 \paragraph{Persistence diagrams.}
@@ -86,7 +86,7 @@ h_i^{(\ell+1)} = \sum_{j\in\mathcal N_k(i)} \Pi_\ell\!\left(h_j^{(\ell)} \otimes
 where $\Phi_\ell$ is a radial encoding, $b_\ell$ a geometric basis, and $\Pi_\ell$ the symmetry-adapted projection via Clebsch--Gordan coefficients.
 
 \paragraph{Permutation invariance.}
-A finite point cloud $X=\{x_1,\dots,x_N\}\subset \mathbb R^d$ is an unordered multiset.
+A finite point cloud $X=\{x_1,\dots,x_N\}\subset \mathbb R^n$ is an unordered multiset.
 The Deep Sets theorem \cite{deepsets2017} shows that many continuous invariant functions admit the form $F(X)=\rho(\sum_i \phi(x_i))$; replacing the sum by max pooling gives the PointNet pattern \cite{pointnet2017}.
 
 \section{Related Work} \label{sec:related}
@@ -393,7 +393,7 @@ These tasks isolate the geometric part of the learning problem and were used dur
 
 We benchmark on UCR time-series datasets \cite{ucr2019}, each embedded into a 3D point cloud via time-delay embedding.
 This choice deserves justification: UCR provides a controlled testbed with well-characterized properties---small training sets (15--200 samples), known baselines, and reproducible evaluation---that is ideal for isolating the effect of architectural inductive biases.
-The time-delay embedding maps each time series $x_1,\dots,x_T$ to a 3D point cloud $(x_t,x_{t+\tau},x_{t+2\tau})$; this produces point clouds whose geometry encodes temporal autocorrelation structure.
+The time-delay embedding maps each time series $x_1,\dots,x_T$ to a 3D point cloud $\{(x_t,x_{t+\tau},x_{t+2\tau})\}_{t=1}^{T-2\tau}$; this produces point clouds whose geometry encodes temporal autocorrelation structure.
 Rotation equivariance is relevant here because the choice of delay $\tau$ and the alignment of the time series introduce an arbitrary rotation of the embedded point cloud: two series with identical temporal structure but different phase offsets will produce rotated point clouds.
 An equivariant model should classify them identically, while a non-equivariant model may not.
 In practice, however, the UCR datasets are pre-aligned (same $\tau$, same starting index), so this rotational ambiguity does not arise in the standard evaluation.
@@ -475,7 +475,8 @@ HybridGTTFN$^{\ddagger}$ (this study) & 70.7 \\
 \end{table}
 
 \paragraph{Statistical significance} \label{sec:significance}.
-Paired $t$-tests at 100\% training fraction (XGBoost, per-dataset means over 4 trials) yield the following: HybridGTTFN vs.\ GTTFNv2 ($p=0.036$), HybridGTTFN vs.\ CrossAttn ($p=0.026$), HybridGTTFN vs.\ DMR ($p=0.577$), HybridGTTFN vs.\ PersNet ($p=0.951$), GTTFNv2 vs.\ DMR ($p=0.243$), PersNet vs.\ DMR ($p=0.596$).
+Paired $t$-tests at 100\% training fraction (XGBoost, per-dataset means over 4 trials) were conducted across the 9 models evaluated under at least one protocol (the 8 in Table~\ref{tab:ucr_honest} plus StochasticTensorFieldNetwork, which was evaluated under best-config only).
+Selected comparisons: HybridGTTFN vs.\ GTTFNv2 ($p=0.036$), HybridGTTFN vs.\ CrossAttn ($p=0.026$), HybridGTTFN vs.\ DMR ($p=0.577$), HybridGTTFN vs.\ PersNet ($p=0.951$), GTTFNv2 vs.\ DMR ($p=0.243$), PersNet vs.\ DMR ($p=0.596$).
 With 9 models, there are 36 possible pairwise comparisons; a Bonferroni correction requires $p<0.05/36\approx0.0014$ for significance.
 No pairwise comparison meets this threshold.
 None of the reported differences between models are statistically significant after correction, which is consistent with the interpretation that the TFN family's advantage in the ``best accuracy'' tables is driven by configuration sensitivity rather than a fundamental architectural difference.
@@ -741,7 +742,7 @@ Rotation equivariance is therefore not needed for classification accuracy on the
 The equivariance guarantee would matter if the inputs were subject to unknown rotations (e.g., unaligned sensor data, augmented training sets with random rotations), but this regime is not tested here.
 
 \paragraph{Small significance tests.}
-Section~\ref{sec:significance} reports paired $t$-tests on 6 specific model pairs.
+Section~\ref{sec:significance} reports paired $t$-tests on 6 selected model pairs from the 9-model comparison.
 With 9 models, there are 36 possible pairwise comparisons; a Bonferroni correction requires $p<0.05/36\approx0.0014$ for significance.
 No pairwise comparison meets this threshold.
 None of the reported differences between models are statistically significant after correction.
@@ -785,11 +786,6 @@ DMR and PersNet are among the simplest models in the study: DMR operates on pair
 Their strong performance under honest evaluation suggests that for UCR time-series data embedded as point clouds, simple geometric priors---pairwise distances for DMR, coordinate-based features for PersNet---are sufficient, and the additional complexity of equivariant tensor products does not pay off at this scale.
 
 \section{Conclusion}
-
-The central finding of this study is that rotation equivariance is architecturally sound but does not improve classification accuracy on small-scale time-series data when evaluated honestly.
-Under the fixed-configuration protocol, the simplest models---PersNet (73.4\%) and DMR (73.1\%)---match or exceed all TFN variants, including the multi-branch HybridGTTFN (70.7\%), and no pairwise comparison survives Bonferroni correction.
-The apparent advantage of TFN variants under best-configuration selection (HybridGTTFN: 79.2\%) is an artifact of hyperparameter sensitivity: the 8.5-point gap between protocols for HybridGTTFN exceeds the entire range of mean accuracy differences between models.
-Meanwhile, DTW k-NN (73.6\%)---a method that uses no learned features at all---matches the best fixed-configuration result, confirming that the UCR benchmark with small $N$ is dominated by sample size rather than model architecture.
 
 Three broader lessons emerge from the experiments.
 
@@ -969,7 +965,7 @@ Y. Wang, Y. Sun, Z. Liu, S. E. Sarma, M. M. Bronstein, and J. M. Solomon.
 \bibitem{e3nn2020}
 M. Geiger and T. Smidt.
 \newblock e3nn: Euclidean Neural Networks.
-\newblock arXiv preprint arXiv:2109.09842, 2021.
+\newblock arXiv preprint arXiv:2109.09842, 2020.
 
 \bibitem{se3transformers2020}
 F. Fuchs, D. Worrall, V. Fischer, and M. Welling.
