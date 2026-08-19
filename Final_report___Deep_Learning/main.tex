@@ -36,7 +36,7 @@ We study geometric deep learning for point-cloud classification, focusing on mod
 Equivariance requires consistent basis functions, Clebsch--Gordan couplings, and gated nonlinearities; we identify the implementation choices required for correctness and verify them numerically.
 We develop a family of TFN architectures generalized to arbitrary ambient dimension $n$, including improved variants with covariance features, attention pooling, and a multi-branch fusion model (HybridGTTFN) that combines TFN, distance-matrix, and PointNet branches.
 On a 21-dataset UCR time-series benchmark recast as point-cloud problems via time-delay embedding, we evaluate all models under two protocols: a best-configuration protocol (selecting optimal hyperparameters per model) and a fixed-configuration protocol (XGBoost classifier, 100\% training fraction).
-Under the best-configuration protocol, the best improved TFN variant (HybridGTTFN) achieves 79.2\% mean accuracy, above DTW k-NN (73.6\%).
+Under the best-configuration protocol, the best multi-branch ensemble (HybridGTTFN) achieves 79.2\% mean accuracy, above DTW k-NN (73.6\%).
 However, under the fixed-configuration protocol, the simpler distance-matrix and PointNet baselines perform comparably (73.1\% and 73.4\%) to all TFN variants and to the multi-branch HybridGTTFN (70.7\%), and no pairwise comparison survives Bonferroni correction.
 The 8.5-point gap between protocols for HybridGTTFN demonstrates that configuration sensitivity, not architectural superiority, is the primary driver of apparent TFN performance gains.
 \end{abstract}
@@ -414,7 +414,7 @@ DTW k-NN uses dynamic time warping with $k=1$ (1-NN) and the sakoe-chiba band co
 We present results under two evaluation protocols.
 The \emph{fixed-configuration protocol} (Table~\ref{tab:ucr_honest}) reports mean accuracy at 100\% training fraction with XGBoost, averaged over 4 trials---the primary, more reliable estimate of model quality.
 The \emph{best-configuration protocol} (Tables~\ref{tab:ucr_main} and~\ref{tab:ucr_full}) reports the best accuracy achieved across all training fractions (10--100\%), trials, and multi-scale configurations (separate model runs at different k-NN neighborhood sizes; the best neighborhood size is selected per dataset)---an inflated upper bound that measures what each model can achieve with favorable hyperparameters.
-Because the enhanced runs are fully seeded (including XGBoost), every number in both tables is exactly reproducible.
+Because the enhanced runs are fully seeded (including XGBoost), the full protocol is reproducible given the same configuration search.
 
 \looseness=-1
 \begin{table}[ht]
@@ -660,7 +660,7 @@ PointNet includes PersNet, MultiInputModel, and PointNetTutorial.
 DMR is DistanceMatrixRaggedModel.
 
 A direct per-model comparison under the honest protocol (Table~\ref{tab:ucr_honest}) shows that the TFN family's best representative (TensorFieldNetwork, 69.2\%) is below both PersNet (73.4\%) and DMR (73.1\%), while HybridGTTFN as a multi-branch ensemble reaches 70.7\%.
-The best-config protocol (Table~\ref{tab:ucr_full}) inflates the TFN family's appearance because it contains more models (7) and thus more opportunities to find a lucky configuration per dataset.
+The best-config protocol (Table~\ref{tab:ucr_full}) inflates the TFN family's appearance because it contains more models (6) than the other families and thus more opportunities to find a lucky configuration per dataset.
 Table~\ref{tab:family_type} breaks down the per-model best accuracy by dataset type, computed by selecting the single best-performing model across all families on each task and then averaging by category.
 \begin{table}[ht]
 \centering
@@ -818,7 +818,7 @@ The shape ablation (Section~\ref{sec:shape_ablation}) shows that architectural c
 Explicit data augmentation---random rotations, noise injection, subsampling---during training is the natural remedy and should be combined with the equivariant backbone to test whether the equivariance guarantee provides an additional benefit under augmentation.
 
 \paragraph{Larger-scale evaluation.}
-The UCR datasets ($N=15$--$200$ points, $d=3$) test only one regime.
+The UCR datasets ($N=15$--$200$ points, $n=3$) test only one regime.
 Evaluating on larger point clouds (3D scanned objects, molecular dynamics trajectories) with genuinely rotation-dependent structure would better test whether the equivariant inductive bias provides a benefit that is not visible at the UCR scale.
 
 \paragraph{Hyperparameter sensitivity.}
