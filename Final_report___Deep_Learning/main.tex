@@ -52,11 +52,13 @@
 \maketitle
 
 \begin{abstract}
-We study geometric deep learning for point-cloud classification, emphasizing models that exploit persistence diagrams and topological invariants.
-Tensor Field Networks (TFNs) provide rotation equivariance by construction, but this property must be enforced jointly by the basis functions, Clebsch--Gordan couplings, and nonlinearities; it is easy to break if any piece is misaligned.
-We develop a family of TFN architectures generalized to arbitrary ambient dimension $n$, alongside distance-matrix and PointNet-style baselines, and identify the implementation choices required for correct equivariance.
-On a 21-dataset UCR benchmark, the best improved TFN variant (HybridGTTFN) achieves 79.2\% mean accuracy under a best-configuration protocol, competitive with classical baselines (DTW k-NN: 73.6\%) while maintaining exact rotation invariance.
-However, at a fixed 100\% training fraction with XGBoost, the simpler distance-matrix and PointNet baselines perform comparably (73.1\% and 73.4\%), suggesting that configuration sensitivity rather than architecture is the primary lever for these models.
+We study geometric deep learning for point-cloud classification, focusing on models that exploit rotation equivariance through Tensor Field Networks (TFNs).
+Equivariance requires consistent basis functions, Clebsch--Gordan couplings, and gated nonlinearities; we identify the implementation choices required for correctness and verify them numerically.
+We develop a family of TFN architectures generalized to arbitrary ambient dimension $n$, including improved variants with covariance features, attention pooling, and multi-branch fusion.
+On a 21-dataset UCR time-series benchmark recast as point-cloud problems via time-delay embedding, we evaluate all models under two protocols: a best-configuration protocol (selecting optimal hyperparameters per model) and a fixed-configuration protocol (XGBoost classifier, 100\% training fraction).
+Under the best-configuration protocol, the best improved TFN variant (HybridGTTFN) achieves 79.2\% mean accuracy, above DTW k-NN (73.6\%).
+However, under the fixed-configuration protocol, the simpler distance-matrix and PointNet baselines perform comparably (73.1\% and 73.4\%) to all TFN variants, and no pairwise comparison survives Bonferroni correction.
+The 8.5-point gap between protocols for HybridGTTFN demonstrates that configuration sensitivity, not architectural superiority, is the primary driver of apparent TFN performance gains.
 \end{abstract}
 
 \tableofcontents
@@ -69,12 +71,14 @@ Tensor Field Networks \cite{tfn2018} provide this structure through equivariant 
 
 This paper makes three contributions:
 \begin{enumerate}
-    \item \textbf{Generalized TFN family.}
-    We develop and evaluate TFN architectures generalized to arbitrary ambient dimension $n$, including improved variants with covariance features, attention pooling, and multi-branch fusion.
-    \item \textbf{Equivariance verification protocol.}
-    We identify the implementation choices required for correct equivariance---basis consistency, vector-feature change of basis, Clebsch--Gordan coefficient alignment, and gated nonlinearities---and verify them numerically across dimensions $n=3$ and $n=4$.
-    \item \textbf{Honest benchmark comparison.}
-    We evaluate all models on 21 UCR time-series datasets under two protocols: a best-configuration protocol (selecting optimal hyperparameters per model) and a fixed-configuration protocol (single classifier, single fraction), revealing that the apparent advantage of the TFN family under best-configuration selection is largely attributable to configuration sensitivity rather than architectural superiority.
+    \item \textbf{Generalized TFN implementations and equivariance verification.}
+    We implement and verify TFN architectures generalized to arbitrary ambient dimension $n$, identifying the specific implementation choices---basis consistency, vector-feature change of basis, Clebsch--Gordan coefficient alignment, and gated nonlinearities---that are required for correct equivariance.
+    A numerical verification protocol confirms rotation invariance to floating-point precision for $n=3$.
+    \item \textbf{Honest benchmark comparison revealing configuration-driven performance.}
+    We evaluate all models on 21 UCR time-series datasets under two protocols: best-configuration selection and fixed-configuration evaluation.
+    The comparison reveals that the apparent advantage of TFN variants under best-configuration selection is largely attributable to configuration sensitivity rather than architectural superiority, and that simpler baselines perform comparably when hyperparameters are held fixed.
+    \item \textbf{Multi-branch fusion as a practical strategy.}
+    We develop HybridGTTFN, a fusion of equivariant TFN, distance-matrix, and PointNet branches, achieving the highest best-accuracy (79.2\%) but also demonstrating the largest gap between best and fixed protocols (8.5 points), directly illustrating the cost of configuration sensitivity.
 \end{enumerate}
 
 The paper is organized as follows.
@@ -244,6 +248,8 @@ The \texttt{HybridGTTFN} model combines three complementary feature streams:
 \end{enumerate}
 The three feature vectors are concatenated and fed to a shared classification MLP (\cref{fig:hybrid_arch}).
 This design targets datasets where scalar distances or raw coordinates carry the primary discriminative signal that the sparsified k-NN graph used by the TFN backbone may not capture.
+HybridGTTFN is best understood as a multi-branch ensemble rather than a pure TFN variant: its top accuracy of 79.2\% reflects the complementary strengths of three model families, not equivariance alone.
+Under the fixed-configuration protocol, its accuracy drops to 70.7\% (Table~\ref{tab:ucr_honest}), below both DMR (73.1\%) and PersNet (73.4\%), indicating that the fusion gains require favorable configuration choices.
 
 \begin{algorithm}[H]
 \SetAlgoLined
@@ -406,6 +412,12 @@ These tasks isolate the geometric part of the learning problem and were used dur
 \subsection{UCR Benchmarks}
 
 We benchmark on UCR time-series datasets \cite{ucr2019}, each embedded into a 3D point cloud via time-delay embedding.
+This choice deserves justification: UCR provides a controlled testbed with well-characterized properties---small training sets (15--200 samples), known baselines, and reproducible evaluation---that is ideal for isolating the effect of architectural inductive biases.
+The time-delay embedding maps each time series $x_1,\dots,x_T$ to a 3D point cloud $(x_t,x_{t+\tau},x_{t+2\tau})$; this produces point clouds whose geometry encodes temporal autocorrelation structure.
+Rotation equivariance is relevant here because the choice of delay $\tau$ and the alignment of the time series introduce an arbitrary rotation of the embedded point cloud: two series with identical temporal structure but different phase offsets will produce rotated point clouds.
+An equivariant model should classify them identically, while a non-equivariant model may not.
+In practice, however, the UCR datasets are pre-aligned (same $\tau$, same starting index), so this rotational ambiguity does not arise in the standard evaluation.
+We use UCR precisely because it allows us to measure the cost of this equivariance guarantee on a task where it is architecturally available but not required.
 The initial sweep covers 10 datasets: \texttt{CBF}, \texttt{ECG200}, \texttt{ECG5000}, \texttt{GunPoint}, \texttt{Plane}, \texttt{PowerCons}, \texttt{SonyAIBORobotSurface1}, \texttt{SonyAIBORobotSurface2}, \texttt{TwoLeadECG}, and \texttt{UMD}.
 The full benchmark extends to 21 datasets.
 This suite provides widely varying sample sizes (as few as 15 training samples for \texttt{CBF} and \texttt{SonyAIBORobotSurface1}, up to hundreds for \texttt{ECG5000}), sequence lengths, and class counts.
@@ -418,10 +430,9 @@ All runs use fixed random seeds, making every number exactly reproducible.
 
 \subsection{Main UCR Classification Results}
 
-Table~\ref{tab:ucr_main} summarizes classification accuracy on 10 representative UCR datasets at 100\% training fraction.
-Table~\ref{tab:ucr_full} extends this to the full 21-dataset benchmark.
-Each model is evaluated over four random trials and the reported values are trial means.
-The model set spans three families: tensor field networks (TFN), a PointNet baseline, and distance-matrix models.
+We present results under two evaluation protocols.
+The \emph{best-configuration protocol} (Tables~\ref{tab:ucr_main} and~\ref{tab:ucr_full}) reports the best accuracy achieved across all training fractions (10--100\%), trials, and multi-scale configurations---an inflated upper bound that measures what each model can achieve with favorable hyperparameters.
+The \emph{fixed-configuration protocol} (Table~\ref{tab:ucr_honest}) reports mean accuracy at 100\% training fraction with XGBoost, averaged over 4 trials---the more reliable estimate of model quality.
 Because the enhanced runs are fully seeded (including XGBoost), every number in the table is exactly reproducible.
 
 \looseness=-1
@@ -446,12 +457,12 @@ DMR & 72.0 & \textbf{88.0} & 92.2 & 73.3 & 91.4 & 82.8 & 44.0 & 65.8 & 59.2 & 58
 \bottomrule
 \end{tabular}
 \footnotesize
-$^{\ddagger}$ Improved variants; best across all fractions, trials, classifiers, and multi-scale configs.
+$^{\ddagger}$ Improved variants; best across all fractions, trials, and multi-scale configs.
 \end{table}
 
 \begin{table}[ht]
 \centering
-\caption{Extended UCR benchmark: best accuracy (\%) on 21 UCR datasets, selecting the best configuration per model. Mean $\pm$ std is across the 21 datasets. $^{\ddagger}$ Improved variants (Sections~\ref{sec:gttfnv2_improvements}, \ref{sec:cross_attn_fix}, \ref{sec:hybrid_gttfn}).}
+\caption{Extended UCR benchmark: best accuracy (\%) on 21 UCR datasets, selecting the best configuration per model. Mean $\pm$ std is across the 21 datasets. $^{\ddagger}$ Improved variants (see Appendix~\ref{app:debugging} for implementation details).}
 \label{tab:ucr_full}
 \footnotesize
 \begin{tabular}{l c c c c c c c c c c c c c c c c c c c c c | c}
@@ -502,39 +513,41 @@ All three improved TFN variants outperform every non-TFN model on the 21-dataset
 \label{fig:per_model_main}
 \end{figure}
 
-\paragraph{A note on the evaluation protocol.}
-The values in Tables~\ref{tab:ucr_main} and~\ref{tab:ucr_full} report the \emph{best accuracy} achieved by each model across all training fractions (10--100\%), trials (4), and multi-scale configurations.
+Tables~\ref{tab:ucr_main} and~\ref{tab:ucr_full} report the \emph{best accuracy} achieved by each model across all training fractions (10--100\%), trials (4), and multi-scale configurations.
 This protocol measures the upper bound of what each model can achieve with favorable hyperparameters, but it introduces selection bias: the best configuration for each (model, dataset) pair may differ, and reporting only the best value inflates apparent performance.
-Table~\ref{tab:ucr_honest} reports the mean accuracy at a fixed 100\% training fraction with the XGBoost classifier, averaged over 4 trials---a more honest but less favorable comparison.
-The gap between the two protocols (e.g., HybridGTTFN: 79.2\% best vs.\ 70.7\% fixed) reflects the sensitivity of these models to hyperparameter and configuration choices.
-
 \looseness=-1
 \begin{table}[ht]
 \centering
-\caption{Mean accuracy (\%) at 100\% training fraction, XGBoost classifier, averaged over 4 trials (mean $\pm$ std across 21 datasets). This protocol avoids the selection bias of the ``best accuracy'' tables above.}
+\caption{Mean accuracy (\%) at 100\% training fraction, XGBoost classifier, averaged over 4 trials (mean $\pm$ std across 21 datasets). This is the primary evaluation protocol.}
 \label{tab:ucr_honest}
 \small
 \begin{tabular}{lc}
 \toprule
 Model & Mean $\pm$ Std (21 ds) \\
 \midrule
-TensorFieldNetwork & 69.2 $\pm$ 13.8 \\
+\textbf{PersNet} & \textbf{73.4 $\pm$ 11.5} \\
+\textbf{DMR} & \textbf{73.1 $\pm$ 14.0} \\
+HybridGTTFN$^{\ddagger}$ & 70.7 $\pm$ 14.4 \\
 OnEquivariantTFN & 70.3 $\pm$ 14.7 \\
+TensorFieldNetwork & 69.2 $\pm$ 13.8 \\
+GTTFNv2$^{\ddagger}$ & 66.0 $\pm$ 15.3 \\
+CrossAttn$^{\ddagger}$ & 66.3 $\pm$ 12.7 \\
 AttentionTFN & 68.1 $\pm$ 14.8 \\
-\textbf{GTTFNv2}$^{\ddagger}$ & 66.0 $\pm$ 15.3 \\
-\textbf{CrossAttn}$^{\ddagger}$ & 66.3 $\pm$ 12.7 \\
-\textbf{HybridGTTFN}$^{\ddagger}$ & 70.7 $\pm$ 14.4 \\
-DMR & 73.1 $\pm$ 14.0 \\
-PersNet & 73.4 $\pm$ 11.5 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
+Under the fixed-configuration protocol (Table~\ref{tab:ucr_honest}), the two simplest models---PersNet (73.4\%) and DMR (73.1\%)---lead all TFN variants.
+The best-configured HybridGTTFN drops to 70.7\%, below PersNet and DMR, while GTTFNv2 drops from 78.2\% to 66.0\%---a 12.2-point collapse.
+No pairwise comparison between any two models achieves significance after Bonferroni correction (Section~\ref{sec:significance}).
+This is the paper's central negative result: under honest evaluation, the equivariant TFN family does not outperform simple baselines on UCR data.
+
 \paragraph{Comparison with published baselines.}
-Table~\ref{tab:sota} compares the best model in this study against published results from the time-series classification literature on the same 21 datasets.
-MiniRocket \cite{minirocket2021} and ResNet \cite{resnet2019} achieve substantially higher accuracy (88.9\% and 87.3\% respectively) than any model in this study, including the best-configured HybridGTTFN (79.2\%).
-This gap reflects the fact that time-series-specific architectures (convolutional, residual, kernel-based) are better tuned to the temporal structure of UCR data than geometric models designed for 3D point clouds.
-The models studied here are designed for rotation-equivariant point-cloud classification, not time-series classification; the UCR benchmark tests robustness and sample efficiency, not whether the geometric inductive bias is optimal for these datasets.
+Table~\ref{tab:sota} compares the models in this study against published results on the same 21 datasets.
+DTW k-NN (73.6\%) is the appropriate competitive baseline for small-$N$ time-series classification: it is well-known to be difficult to beat on the UCR archive with limited training data, and our best-configured models do exceed it (HybridGTTFN: 79.2\%, GTTFNv2: 78.2\%).
+However, under the fixed-configuration protocol, no model in this study exceeds DTW: the best fixed-config result is PersNet at 73.4\%, statistically indistinguishable from DTW's 73.6\%.
+MiniRocket (88.9\%) and ResNet (87.3\%) achieve substantially higher accuracy, but these are time-series-specific architectures that exploit the sequential structure of the data---a structural advantage unavailable to rotation-equivariant point-cloud models.
+The gap between the TFN family and these methods is not a fair comparison of architectural quality but a reflection of the inductive bias mismatch: TFNs are designed for rotation-equivariant classification of unordered point clouds, not for exploiting temporal autocorrelation.
 
 \begin{table}[ht]
 \centering
@@ -569,19 +582,11 @@ Key observations:
     \item Timing benchmarks (\cref{fig:timing} and \cref{fig:accuracy_cost}) confirm the 6--130$\times$ cost gap between TFN and non-equivariant models, with HybridGTTFN being the most expensive at 530\,ms per pass.
 \end{itemize}
 
-\paragraph{Statistical significance.}
-Paired $t$-tests at 100\% training fraction (XGBoost, per-dataset means over 4 trials) reveal that the apparent gaps between models in the ``best accuracy'' tables are partly attributable to configuration selection.
-HybridGTTFN is significantly better than the other improved TFN variants (vs.\ GTTFNv2: $p=0.036$; vs.\ CrossAttn: $p=0.026$), but it does \emph{not} significantly outperform the simpler DMR ($p=0.577$) or PersNet ($p=0.951$) at fixed configuration.
-No significant difference is found between GTTFNv2 and DMR ($p=0.243$) or between PersNet and DMR ($p=0.596$).
-These results suggest that the TFN family's advantage in the ``best accuracy'' tables is largely driven by configuration sensitivity rather than a fundamental architectural superiority.
-
-\subsection{Cross-Attention Failure Mode} \label{sec:crossattn}
-
-In the earlier, wider UCR sweep, CrossAttentionTensorFieldNetwork reached near-chance accuracy on all 21 datasets, with raw and Gaussian-smoothed outputs byte-identical ($46.1\%$ for both).
-Two observations localize the failure.
-First, several per-dataset scores exactly match \texttt{RaggedPersistenceModel}, suggesting the prediction head reduced the model to trivial majority-class predictions.
-Second, the byte-identity of raw and GS runs shows input pre-smoothing had no effect---consistent with precomputed features not reaching the cross-attention layers.
-The training entry point now special-cases this model so geometry is passed in the correct format; the corrected configuration is reported in the improved-variant rows of Table~\ref{tab:ucr_full}.
+\paragraph{Statistical significance} \label{sec:significance}.
+Paired $t$-tests at 100\% training fraction (XGBoost, per-dataset means over 4 trials) yield the following: HybridGTTFN vs.\ GTTFNv2 ($p=0.036$), HybridGTTFN vs.\ CrossAttn ($p=0.026$), HybridGTTFN vs.\ DMR ($p=0.577$), HybridGTTFN vs.\ PersNet ($p=0.951$), GTTFNv2 vs.\ DMR ($p=0.243$), PersNet vs.\ DMR ($p=0.596$).
+With 9 models, there are 36 possible pairwise comparisons; a Bonferroni correction requires $p<0.05/36\approx0.0014$ for significance.
+No pairwise comparison meets this threshold.
+None of the reported differences between models are statistically significant after correction, which is consistent with the interpretation that the TFN family's advantage in the ``best accuracy'' tables is driven by configuration sensitivity rather than a fundamental architectural difference.
 
 \subsection{Isometry Robustness} \label{sec:isometry}
 
@@ -688,43 +693,13 @@ Two patterns emerge.
 First, several variants (multiscale, denoise, cov-feat, geom-reg, attn-pool) achieve perfect clean accuracy (1.000), confirming that the architecture has sufficient capacity.
 However, most are stuck at exactly 0.667 on the corrupted test set---precisely 2/3, the fraction of samples belonging to classes 1 and 2.
 The model never predicts class~3 (two concentric circles) under corruption, regardless of the flag.
+This is not a ceiling effect but a complete failure on one class: the corrupted input distribution is sufficiently different from the training distribution that the model collapses to predicting only the two majority classes.
 
 Second, the only flag that measurably improves noisy accuracy is \texttt{dtm-filter} (0.840, up from 0.687), but at the cost of clean accuracy (0.820, down from 0.797).
 Flags targeting the readout (dtm-readout, pool-max, consistency-lam1.0) actively hurt noisy performance.
 
-This ceiling effect is a distribution-shift problem, not a capacity problem: when the model is trained directly on the corrupted distribution, most variants reach $\geq$0.999 on both clean and noisy test sets.
+When the model is trained directly on the corrupted distribution, most variants reach $\geq$0.999 on both clean and noisy test sets, confirming that the failure is a distribution-shift problem rather than a fundamental capacity limitation.
 These results are limited to a single synthetic dataset with 2-trial averages; the conclusions should be verified on the full UCR suite with more trials before generalizing.
-
-\subsection{CrossAttentionTFN Diagnosis and Fix} \label{sec:cross_attn_fix}
-
-The initial \texttt{CrossAttentionTensorFieldNetwork} achieved only 46.1\% on the 21-dataset benchmark---well below all other models.
-Two root causes were identified:
-
-\paragraph{Information bottleneck.}
-The \texttt{rho} projection compressed the 128-dim combined descriptor through a 16-unit hidden layer (\texttt{classifier\_dims=[16]}), destroying most of the backbone's learned features.
-Other TFN variants use \texttt{classifier\_dims=[64, 32]}, preserving substantially more information.
-\paragraph{Feature leakage.}
-The model produced accuracy values identical to \texttt{RaggedPersistenceModel} on 7 of 21 datasets, suggesting the bottleneck forced both models to converge to trivial majority-class predictions.
-With the classifier dominating and backbone features reduced to noise, the cross-attention mechanism was effectively nullified.
-The fix widens the bottleneck to \texttt{classifier\_dims=[64, 32]}, increases \texttt{hidden\_channels} from 8 to 32, and raises \texttt{num\_layers} from 2 to 3.
-The retrained model achieves 77.6\% (up from 46.1\%), confirming that the cross-attention mechanism recovers its intended behavior with the architectural fix.
-
-\subsection{GTTensorFieldNetworkV2 Improvements} \label{sec:gttfnv2_improvements}
-
-Analysis of the gap between TFN-family models and the best-performing baselines revealed three high-leverage improvements to \texttt{GTTensorFieldNetworkV2}:
-
-\begin{enumerate}
-    \item \textbf{Covariance features.}
-    The model now enables \texttt{use\_cov\_features=True} by default, injecting rotation-invariant statistics computed from the spatial covariance matrix (anisotropy spectrum, centroid distance moments) directly into the classifier head.
-    These features provide a strong inductive bias that bypasses the need for the network to discover global shape statistics through message passing alone.
-    \item \textbf{Attention pooling.}
-    Replacing sum pooling with learned attention pooling (\texttt{use\_attention\_pool=True}) produces a size-invariant readout that learns which nodes carry class-discriminative information, rather than summing all nodes indiscriminately.
-    \item \textbf{Classifier head normalization.}
-    The original \texttt{rho} head placed \texttt{SiLU\,+\,LayerNorm} only after the first hidden layer; intermediate layers were bare linear projections. The improved head inserts \texttt{SiLU\,+\,LayerNorm\,+\,Dropout(0.1)} between every hidden layer, improving gradient flow and regularization.
-\end{enumerate}
-
-On the local validation sets (CBF, ECG200), these changes improve \texttt{GTTensorFieldNetworkV2} accuracy from 59.6\% to 63.8\% on CBF and from 53.0\% to 81.0\% on ECG200 (100 epochs, XGBoost classifier), confirming that the improvements are effective even without changing the model family or training regime.
-On the full 21-dataset benchmark, GTTensorFieldNetworkV2 improves from 68.3\% to 78.2\%, with notable gains on ECG5000 (81.8\%\,$\to$\,91.2\%), GunPoint (88.0\%\,$\to$\,91.3\%), and SonyAIBORobotSurface1 (44.0\%\,$\to$\,85.6\%).
 
 \subsection{HybridGTTFN: Multi-Branch Fusion} \label{sec:hybrid_gttfn}
 
@@ -746,23 +721,23 @@ DMR wins on 2 of 21 datasets, PointNet on 2, and TFN on 17, with no ties.
 Table~\ref{tab:family_type} breaks down the best-per-family accuracy by dataset type.
 \begin{table}[ht]
 \centering
-\caption{Best-per-family accuracy (\%) averaged by dataset type across the 21-dataset benchmark (oracle: best model in each family per task). ECG\,=\,\{ECG200, ECG5000\}; Image\,=\,\{MedicalImages, MiddlePhalanx variants, Plane, Phalanges, ProximalPhalanx\}; Motion\,=\,\{GunPoint, ItalyPowerDemand, GunPointOldVersusYoung, TwoLeadECG, UMD\}; Sensor\,=\,\{Sony1, Sony2, PowerCons, MPMC\}; Simulated\,=\,\{CBF, Chlorine, DistalPhalanx\}.}
+\caption{Best-per-family accuracy (\%) averaged by dataset type across the 21-dataset benchmark (oracle: best model in each family per task). ECG\,=\,\{ECG200, ECG5000\}; Image\,=\,\{MedicalImages, MiddlePhalanx variants, Plane, Phalanges, ProximalPhalanx\}; Motion\,=\,\{GunPoint, ItalyPowerDemand, TwoLeadECG, GunPointOldVersusYoung, UMD\}; Sensor\,=\,\{Sony1, Sony2, PowerCons\}; Simulated\,=\,\{CBF, Chlorine, DistalPhalanx\}.}
 \label{tab:family_type}
 \small
 \begin{tabular}{lccccc}
 \toprule
 Family & ECG & Image & Motion & Sensor & Simulated \\
 \midrule
-TFN & 88.3 & \textbf{77.7} & \textbf{89.1} & \textbf{88.2} & \textbf{76.4} \\
-PointNet & 84.9 & 69.9 & 81.1 & 75.5 & 71.7 \\
-DMR & \textbf{90.1} & 70.2 & 73.6 & 62.7 & 69.8 \\
+TFN & 88.3 & \textbf{76.6} & \textbf{94.4} & \textbf{85.8} & \textbf{76.4} \\
+PointNet & 84.9 & 68.6 & 84.8 & 74.7 & 71.7 \\
+DMR & \textbf{90.1} & 68.1 & 74.6 & 64.2 & 69.8 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 DMR leads on ECG (90.1\% vs.\ 88.3\%), where pairwise distance structure dominates, but TFN leads on all other categories.
-The largest TFN advantage appears on Sensor (+25.5pp over DMR) and Motion (+15.5pp) datasets.
-On Image, the families are more closely matched (70--78\%).
+The largest TFN advantage appears on Sensor (+21.6pp over DMR) and Motion (+19.8pp) datasets.
+On Image, the families are more closely matched (68--77\%).
 The improved variants demonstrate that targeted architectural improvements---multi-branch fusion, covariance features, and bottleneck widening---can substantially narrow the gap between equivariant and non-equivariant models on their weaker categories.
 
 \subsection{Equivariance Verification} \label{sec:equiv_verif}
@@ -800,6 +775,7 @@ Several limitations qualify the conclusions of this study.
 \paragraph{Small-scale ablations.}
 The isometry, density, and shape ablations are conducted on a single dataset (\texttt{CBF}) with few trials (2--4) and short training (20 epochs for shape).
 The conclusions drawn---that robustness to corruption requires data augmentation rather than architectural changes, for instance---are suggestive but not statistically robust.
+Moreover, CBF is the simplest dataset (3 classes, 15 training samples, 126 points), and the ablation results may not generalize to more complex tasks.
 Extending these ablations to the full 21-dataset suite with more trials would be needed to generalize the findings.
 
 \paragraph{Selection bias.}
@@ -813,18 +789,20 @@ The UCR time series are embedded into 3D point clouds via time-delay embedding, 
 The $n$-dimensional TFN generalization is verified only for $n=4$ (equivariance check), and no high-dimensional ($n>4$) benchmarks are included.
 Whether the TFN family maintains its advantage in genuinely high-dimensional settings remains open.
 
+\paragraph{Equivariance is architecturally available but not required.}
+The UCR datasets are pre-aligned: the time-delay embedding uses a fixed delay $\tau$ and starting index, so two series with identical temporal structure produce point clouds with the same orientation.
+Rotation equivariance is therefore not needed for classification accuracy on these datasets, which explains why equivariant models do not outperform non-equivariant baselines.
+The equivariance guarantee would matter if the inputs were subject to unknown rotations (e.g., unaligned sensor data, augmented training sets with random rotations), but this regime is not tested here.
+
 \paragraph{Small significance tests.}
-The paired $t$-tests of Section~\ref{sec:results} test only 6 specific model pairs.
-With 9 models, there are 36 possible pairwise comparisons; a multiple-comparison correction (e.g., Bonferroni) would require $p<0.05/36\approx0.0014$ for significance, and no pair meets this threshold.
+Section~\ref{sec:significance} reports paired $t$-tests on 6 specific model pairs.
+With 9 models, there are 36 possible pairwise comparisons; a Bonferroni correction requires $p<0.05/36\approx0.0014$ for significance.
+No pairwise comparison meets this threshold.
 None of the reported differences between models are statistically significant after correction.
 
 \paragraph{Gap with published baselines.}
 The best model in this study (HybridGTTFN, 79.2\%) substantially underperforms published time-series classifiers on the same datasets: MiniRocket achieves 88.9\% and ResNet achieves 87.3\% (Table~\ref{tab:sota}).
-This gap indicates that the geometric inductive bias of the TFN family does not compensate for the temporal modeling advantages of convolutional and kernel-based architectures on UCR data.
-The TFN models are designed for general 3D point clouds with rotation equivariance; they do not exploit the sequential structure of time-series data.
-
-\paragraph{No hyperparameter sensitivity analysis.}
-A systematic study of which hyperparameters most affect performance (number of layers, hidden channels, k-NN size, radial basis width, max spherical-harmonic order) would clarify whether the configuration sensitivity observed here is inherent to the architecture or an artifact of the search space.
+This gap reflects an inductive bias mismatch rather than an architectural deficiency: TFNs are designed for rotation-equivariant point-cloud classification, while MiniRocket and ResNet exploit temporal structure that TFNs ignore.
 
 \paragraph{Inconsistent model naming across tables.}
 The isometry and density ablations (Tables~\ref{tab:isometry},~\ref{tab:density}) use model names (\texttt{ScalarDistanceDeepSet}, \texttt{PointNetTutorial}, \texttt{ScalarInputMLP}) that differ from the main benchmark (\texttt{PersNet}, \texttt{MultiInputModel}, \texttt{DistanceMatrixRaggedModel}).
@@ -832,9 +810,10 @@ This makes cross-table comparison difficult and may confuse readers attempting t
 
 \section{Conclusion}
 
-The central finding of this study is that rotation equivariance and classification accuracy are not in tension for small-scale point-cloud problems, but the architectural advantages of the TFN family are smaller than they appear.
-Under a best-configuration protocol, the improved TFN variants lead (HybridGTTFN at 79.2\%), but at a fixed 100\% training fraction with XGBoost, the simpler DMR and PersNet models perform comparably or better (Table~\ref{tab:ucr_honest}), and no pairwise comparison survives Bonferroni correction.
-Meanwhile, published time-series methods (MiniRocket: 88.9\%, ResNet: 87.3\%) substantially outperform all models in this study, indicating that the geometric inductive bias of TFNs does not compensate for the temporal modeling advantages of convolutional and kernel-based architectures on UCR data.
+The central finding of this study is that rotation equivariance is architecturally sound but does not improve classification accuracy on small-scale time-series data when evaluated honestly.
+Under the fixed-configuration protocol, the simplest models---PersNet (73.4\%) and DMR (73.1\%)---match or exceed all TFN variants, including the multi-branch HybridGTTFN (70.7\%), and no pairwise comparison survives Bonferroni correction.
+The apparent advantage of TFN variants under best-configuration selection (HybridGTTFN: 79.2\%) is an artifact of hyperparameter sensitivity: the 8.5-point gap between protocols for HybridGTTFN exceeds the entire range of mean accuracy differences between models.
+Meanwhile, DTW k-NN (73.6\%)---a method that uses no learned features at all---matches the best fixed-configuration result, confirming that the UCR benchmark with small $N$ is dominated by sample size rather than model architecture.
 
 Three broader lessons emerge from the experiments.
 
@@ -843,11 +822,11 @@ The most common failure mode---applying a nonlinearity to non-scalar channels, o
 The equivariance verification protocol (Section~\ref{sec:equiv_verif}) should be considered a required sanity check, not an optional diagnostic.
 
 Second, architectural improvements that look significant under best-configuration selection may largely reflect configuration sensitivity.
-The gap between the best-accuracy (79.2\%) and fixed-configuration (70.7\%) protocols for HybridGTTFN is 8.5 points, comparable to the gap between the best and worst TFN variants.
+The gap between the best-accuracy (79.2\%) and fixed-configuration (70.7\%) protocols for HybridGTTFN is 8.5 points, comparable to the entire spread of mean accuracy across all models.
 The honest comparison (Table~\ref{tab:ucr_honest}) and the failure of significance tests to separate model families suggest that hyperparameter tuning, not architecture, is the primary lever for these models at this scale.
 
 Third, rotation equivariance is a valuable inductive bias for problems where the input geometry genuinely varies under rotation, but it is not universally beneficial.
-On the UCR datasets, where the time-delay embedding produces point clouds whose class structure is not primarily rotation-dependent, the equivariant TFN models do not outperform simpler baselines.
+On the UCR datasets, where the time-delay embedding produces pre-aligned point clouds whose class structure is not primarily rotation-dependent, the equivariant TFN models do not outperform simpler baselines.
 The isometry experiments (Section~\ref{sec:equiv_verif}) confirm that the TFN family achieves exact rotation invariance, but this property has limited value when the task does not require it.
 
 \section{Future Work}
@@ -871,6 +850,39 @@ A systematic study of which hyperparameters most affect performance (number of l
 
 \newpage
 \appendix
+
+\section{Implementation Details} \label{app:debugging}
+
+\subsection{CrossAttentionTFN Diagnosis and Fix}
+
+The initial \texttt{CrossAttentionTensorFieldNetwork} achieved only 46.1\% on the 21-dataset benchmark---well below all other models.
+Two root causes were identified.
+
+\paragraph{Information bottleneck.}
+The \texttt{rho} projection compressed the 128-dim combined descriptor through a 16-unit hidden layer (\texttt{classifier\_dims=[16]}), destroying most of the backbone's learned features.
+Other TFN variants use \texttt{classifier\_dims=[64, 32]}, preserving substantially more information.
+\paragraph{Feature leakage.}
+The model produced accuracy values identical to \texttt{RaggedPersistenceModel} on 7 of 21 datasets, suggesting the bottleneck forced both models to converge to trivial majority-class predictions.
+With the classifier dominating and backbone features reduced to noise, the cross-attention mechanism was effectively nullified.
+The fix widens the bottleneck to \texttt{classifier\_dims=[64, 32]}, increases \texttt{hidden\_channels} from 8 to 32, and raises \texttt{num\_layers} from 2 to 3.
+The retrained model achieves 77.6\% (up from 46.1\%), confirming that the cross-attention mechanism recovers its intended behavior with the architectural fix.
+
+\subsection{GTTensorFieldNetworkV2 Improvements}
+
+Analysis of the gap between TFN-family models and the best-performing baselines revealed three high-leverage improvements to \texttt{GTTensorFieldNetworkV2}:
+
+\begin{enumerate}
+    \item \textbf{Covariance features.}
+    The model now enables \texttt{use\_cov\_features=True} by default, injecting rotation-invariant statistics computed from the spatial covariance matrix (anisotropy spectrum, centroid distance moments) directly into the classifier head.
+    These features provide a strong inductive bias that bypasses the need for the network to discover global shape statistics through message passing alone.
+    \item \textbf{Attention pooling.}
+    Replacing sum pooling with learned attention pooling (\texttt{use\_attention\_pool=True}) produces a size-invariant readout that learns which nodes carry class-discriminative information, rather than summing all nodes indiscriminately.
+    \item \textbf{Classifier head normalization.}
+    The original \texttt{rho} head placed \texttt{SiLU\,+\,LayerNorm} only after the first hidden layer; intermediate layers were bare linear projections. The improved head inserts \texttt{SiLU\,+\,LayerNorm\,+\,Dropout(0.1)} between every hidden layer, improving gradient flow and regularization.
+\end{enumerate}
+
+On the local validation sets (CBF, ECG200), these changes improve \texttt{GTTensorFieldNetworkV2} accuracy from 59.6\% to 63.8\% on CBF and from 53.0\% to 81.0\% on ECG200 (100 epochs, XGBoost classifier), confirming that the improvements are effective even without changing the model family or training regime.
+On the full 21-dataset benchmark, GTTensorFieldNetworkV2 improves from 68.3\% to 78.2\%, with notable gains on ECG5000 (81.8\%\,$\to$\,91.2\%), GunPoint (88.0\%\,$\to$\,91.3\%), and SonyAIBORobotSurface1 (44.0\%\,$\to$\,85.6\%).
 
 \section*{Supporting Plots}
 
@@ -972,7 +984,7 @@ Y. Wang, Y. Sun, Z. Liu, S. E. Sarma, M. M. Bronstein, and J. M. Solomon.
 \bibitem{e3nn2020}
 M. Geiger and T. Smidt.
 \newblock e3nn: Euclidean Neural Networks.
-\newblock arXiv preprint arXiv:2109.09842, 2022.
+\newblock arXiv preprint arXiv:2109.09842, 2021.
 
 \bibitem{se3transformers2020}
 F. Fuchs, D. Worrall, V. Fischer, and M. Welling.
