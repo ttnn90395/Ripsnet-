@@ -56,7 +56,7 @@ We study geometric deep learning for point-cloud classification, emphasizing mod
 Tensor Field Networks (TFNs) provide rotation equivariance by construction, but this property must be enforced jointly by the basis functions, Clebsch--Gordan couplings, and nonlinearities; it is easy to break if any piece is misaligned.
 We develop a family of TFN architectures generalized to arbitrary ambient dimension $n$, alongside distance-matrix and PointNet-style baselines, and identify the implementation choices required for correct equivariance.
 On a 21-dataset UCR benchmark, the best improved TFN variant (HybridGTTFN) achieves 79.2\% mean accuracy under a best-configuration protocol, competitive with classical baselines (DTW k-NN: 73.6\%) while maintaining exact rotation invariance.
-However, at a fixed 100\% training fraction with a single classifier, the simpler distance-matrix and PointNet baselines perform comparably (73.1\% and 73.4\%), suggesting that configuration sensitivity rather than architecture is the primary lever for these models.
+However, at a fixed 100\% training fraction with XGBoost, the simpler distance-matrix and PointNet baselines perform comparably (73.1\% and 73.4\%), suggesting that configuration sensitivity rather than architecture is the primary lever for these models.
 \end{abstract}
 
 \tableofcontents
@@ -411,7 +411,7 @@ The full benchmark extends to 21 datasets.
 This suite provides widely varying sample sizes (as few as 15 training samples for \texttt{CBF} and \texttt{SonyAIBORobotSurface1}, up to hundreds for \texttt{ECG5000}), sequence lengths, and class counts.
 
 Each dataset is evaluated at training fractions of $10\%, 20\%, 30\%, 50\%, 70\%$ and $100\%$, over four random trials.
-Two classifiers are trained on each model's learned descriptors: an end-to-end MLP head and an XGBoost classifier.
+An XGBoost classifier is trained on each model's learned descriptors.
 All runs use fixed random seeds, making every number exactly reproducible.
 
 \section{Results} \label{sec:results}
@@ -503,7 +503,7 @@ All three improved TFN variants outperform every non-TFN model on the 21-dataset
 \end{figure}
 
 \paragraph{A note on the evaluation protocol.}
-The values in Tables~\ref{tab:ucr_main} and~\ref{tab:ucr_full} report the \emph{best accuracy} achieved by each model across all training fractions (10--100\%), trials (4), classifiers (MLP, XGBoost), and multi-scale configurations.
+The values in Tables~\ref{tab:ucr_main} and~\ref{tab:ucr_full} report the \emph{best accuracy} achieved by each model across all training fractions (10--100\%), trials (4), and multi-scale configurations.
 This protocol measures the upper bound of what each model can achieve with favorable hyperparameters, but it introduces selection bias: the best configuration for each (model, dataset) pair may differ, and reporting only the best value inflates apparent performance.
 Table~\ref{tab:ucr_honest} reports the mean accuracy at a fixed 100\% training fraction with the XGBoost classifier, averaged over 4 trials---a more honest but less favorable comparison.
 The gap between the two protocols (e.g., HybridGTTFN: 79.2\% best vs.\ 70.7\% fixed) reflects the sensitivity of these models to hyperparameter and configuration choices.
@@ -564,7 +564,7 @@ Key observations:
 \begin{itemize}
     \item \texttt{DistanceMatrixRaggedModel} leads on ECG (Table~\ref{tab:family_type}), where clean distance structure dominates.
     \item PersNet is highly unstable: it either trains to a competitive accuracy or collapses entirely, with no intermediate regime.
-    \item Accuracy improves with training fraction for every model, though the MLP head saturates around 54\% (\cref{fig:model_data_efficiency}). XGBoost extracts substantially more signal from small training sets than the end-to-end MLP head.
+    \item Accuracy improves with training fraction for every model (\cref{fig:model_data_efficiency}), though the gains flatten beyond 50\%.
     \item Training curves on CBF (\cref{fig:training_curves}) show that GTTFNv2 requires $\sim$25 epochs to reach 80\% accuracy. PersNet and DMR converge fastest (within 10--20 epochs), while HybridGTTFN requires $\sim$40 epochs. AttnTFN reaches 93\% mid-training but becomes unstable, falling back to 80\% by epoch 200.
     \item Timing benchmarks (\cref{fig:timing} and \cref{fig:accuracy_cost}) confirm the 6--130$\times$ cost gap between TFN and non-equivariant models, with HybridGTTFN being the most expensive at 530\,ms per pass.
 \end{itemize}
@@ -833,7 +833,7 @@ This makes cross-table comparison difficult and may confuse readers attempting t
 \section{Conclusion}
 
 The central finding of this study is that rotation equivariance and classification accuracy are not in tension for small-scale point-cloud problems, but the architectural advantages of the TFN family are smaller than they appear.
-Under a best-configuration protocol, the improved TFN variants lead (HybridGTTFN at 79.2\%), but at a fixed 100\% training fraction with a single classifier, the simpler DMR and PersNet models perform comparably or better (Table~\ref{tab:ucr_honest}), and no pairwise comparison survives Bonferroni correction.
+Under a best-configuration protocol, the improved TFN variants lead (HybridGTTFN at 79.2\%), but at a fixed 100\% training fraction with XGBoost, the simpler DMR and PersNet models perform comparably or better (Table~\ref{tab:ucr_honest}), and no pairwise comparison survives Bonferroni correction.
 Meanwhile, published time-series methods (MiniRocket: 88.9\%, ResNet: 87.3\%) substantially outperform all models in this study, indicating that the geometric inductive bias of TFNs does not compensate for the temporal modeling advantages of convolutional and kernel-based architectures on UCR data.
 
 Three broader lessons emerge from the experiments.
@@ -876,23 +876,13 @@ A systematic study of which hyperparameters most affect performance (number of l
 
 This appendix collects plots from the enhanced UCR benchmark results (\texttt{expes/plot\_enhanced.py}).
 All accuracies are trial means at 100\% training fraction unless stated otherwise.
-``MLP(+aug)'' denotes the end-to-end MLP head with consistency-augmentation training; ``XGBoost'' denotes the seeded classifier fitted on learned descriptors.
-
-\subsection{Per-Dataset MLP vs.\ XGBoost at 100\%}
-
-\begin{figure}[H]
-\centering
-\includegraphics[width=\textwidth]{images/plots/enhanced_mlp_vs_xgb_100pct.png}
-\caption{Per-dataset test accuracy (\%) of the MLP head and the XGBoost classifier at 100\% training fraction. XGBoost generally outperforms the MLP head, though on some small datasets (e.g., CBF) the MLP head is competitive. Many MLP results are missing due to training collapse. XGBoost accuracy is the metric reported in Table~\ref{tab:ucr_main}.}
-\label{fig:mlp_vs_xgb}
-\end{figure}
 
 \subsection{Data Efficiency}
 
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.85\textwidth]{images/plots/enhanced_data_efficiency.png}
-\caption{Mean test accuracy as a function of the training fraction, averaged over all models and datasets. XGBoost accuracy improves with more training data, while the MLP head saturates around 54\% due to the small training sets and end-to-end training instability.}
+\caption{Mean test accuracy as a function of the training fraction, averaged over all models and datasets. Accuracy improves with more training data but gains flatten beyond 50\%.}
 \label{fig:data_efficiency}
 \end{figure}
 
@@ -903,13 +893,6 @@ All accuracies are trial means at 100\% training fraction unless stated otherwis
 \includegraphics[width=\textwidth]{images/plots/enhanced_xgb_heatmap.png}
 \caption{XGBoost test accuracy (\%) at 100\% training fraction, by dataset and model. Empty rows mark models whose training collapsed on that dataset.}
 \label{fig:xgb_heatmap}
-\end{figure}
-
-\begin{figure}[H]
-\centering
-\includegraphics[width=\textwidth]{images/plots/enhanced_mlp_heatmap.png}
-\caption{MLP(+aug) test accuracy (\%) at 100\% training fraction, by dataset and model. The MLP head frequently achieves below-chance accuracy (e.g., PersNet at 34\% on 3-class CBF), confirming that end-to-end training fails on small datasets. Many model--dataset pairs have no MLP results, indicating training collapse.}
-\label{fig:mlp_heatmap}
 \end{figure}
 
 \subsection{Per-Dataset Model Comparison}
