@@ -443,9 +443,8 @@ Under the fixed-configuration protocol, the two simplest models---PersNet (74.3\
 The best-configured HybridGTTFN drops to 70.7\% (17 datasets), below both PersNet and DMR.
 No pairwise comparison between any two models achieves significance after Bonferroni correction (Section~\ref{sec:significance}).
 This is the paper's central negative result: under honest evaluation, the equivariant TFN family does not outperform simple baselines on UCR data.
-Note that PersNet's honest mean (74.3\%) exceeds its best-config mean (71.7\%) because the honest computation covers only the 9 datasets with valid XGBoost results, which are easier on average than the full 21-dataset suite.
-DTW k-NN (73.6\%, computed with $k\!=\!1$ and sakoe-chiba band constraint) closely matches PersNet (74.3\%), confirming that at small sample sizes the benchmark is dominated by training set size rather than model architecture.
-Note that PersNet's honest mean is computed over 9 datasets (CBF was excluded because XGBoost training collapsed to NaN on all 4 trials); the ranking should be interpreted in light of the unequal dataset coverage in \cref{tab:ucr_honest}.
+Note that PersNet's honest mean (74.3\%) exceeds its best-config mean (71.7\%) because the honest computation covers only the 9 datasets with valid XGBoost results (CBF was excluded because XGBoost training collapsed on all 4 trials); these 9 datasets are easier on average than the full 21-dataset suite, so the ranking should be interpreted in light of the unequal dataset coverage in \cref{tab:ucr_honest}.
+DTW k-NN (73.6\%) closely matches PersNet (74.3\%), confirming that at small sample sizes the benchmark is dominated by training set size rather than model architecture.
 
 \paragraph{Comparison with published baselines.}
 Table~\ref{tab:sota} compares the models in this study against published results on the same 21 datasets.
@@ -686,7 +685,7 @@ DMR leads on ECG (90.1\% vs.\ 83.6\%) and Simulated (69.8\% vs.\ 68.8\%), where 
 The largest advantage appears on Sensor (+21.6pp over DMR) and Motion (+17.7pp) datasets.
 On Image, the families are more closely matched (68--74\%).
 These per-task bests are selected from best-config results and reflect configuration sensitivity; under the honest protocol, no family consistently dominates.
-Note that these comparisons exclude HybridGTTFN (multi-branch ensemble); including it would not change the per-task bests, as the individual TFN variants already achieve the highest per-task scores.
+These comparisons exclude HybridGTTFN (multi-branch ensemble); including it would strengthen the TFN family's position on Simulated and Motion but would not change the overall finding that no single family dominates across all categories.
 
 \subsection{Equivariance Verification} \label{sec:equiv_verif}
 
