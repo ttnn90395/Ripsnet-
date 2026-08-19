@@ -59,7 +59,7 @@ This paper makes three contributions:
     The comparison reveals that the apparent advantage of TFN variants under best-configuration selection is largely attributable to configuration sensitivity rather than architectural superiority, and that simpler baselines perform comparably when hyperparameters are held fixed.
     \item \textbf{HybridGTTFN as an illustration of configuration sensitivity.}
     We develop HybridGTTFN, a fusion of equivariant TFN, distance-matrix, and PointNet branches.
-    While it achieves the highest best-accuracy (79.2\%), it also shows the largest gap between best and fixed protocols (8.5 points), directly demonstrating that configuration sensitivity, not architectural superiority, is the primary driver of apparent performance gains.
+    While it achieves the highest best-accuracy (79.2\%), it shows a substantial gap between best and fixed protocols (8.5 points), and the two other improved variants (GTTFNv2, CrossAttentionTFN) show even larger gaps (12.2 and 11.4 points), directly demonstrating that configuration sensitivity, not architectural superiority, is the primary driver of apparent performance gains.
 \end{enumerate}
 
 The paper is organized as follows.
@@ -929,7 +929,7 @@ All accuracies are trial means at 100\% training fraction unless stated otherwis
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.85\textwidth]{images/plots/convergence_comparison.png}
-\caption{Validation accuracy convergence for each model family on CBF (15 training samples, 200 epochs). DMR reaches 80\% accuracy within 8 epochs; PersNet requires 18 epochs. GTTFNv2 requires $\sim$25 epochs to surpass 80\%; HybridGTTFN requires $\sim$38 epochs; AttnTFN reaches 93\% mid-training but becomes unstable.}
+\caption{Validation accuracy convergence for each model family on CBF (15 training samples, 200 epochs). DMR reaches 80\% accuracy within 9 epochs; PersNet requires 19 epochs. GTTFNv2 requires $\sim$25 epochs to surpass 80\%; HybridGTTFN requires $\sim$38 epochs; AttnTFN reaches 93\% mid-training but becomes unstable.}
 \label{fig:convergence}
 \end{figure}
 
@@ -967,7 +967,7 @@ Y. Wang, Y. Sun, Z. Liu, S. E. Sarma, M. M. Bronstein, and J. M. Solomon.
 \bibitem{e3nn2020}
 M. Geiger and T. Smidt.
 \newblock e3nn: Euclidean Neural Networks.
-\newblock arXiv preprint arXiv:2109.09842, 2020.
+\newblock arXiv preprint arXiv:2207.09453, 2022.
 
 \bibitem{se3transformers2020}
 F. Fuchs, D. Worrall, V. Fischer, and M. Welling.
@@ -975,7 +975,7 @@ F. Fuchs, D. Worrall, V. Fischer, and M. Welling.
 \newblock \emph{NeurIPS}, 2020.
 
 \bibitem{nequip2022}
-S. Batzner, L. E. R. O. Berger, M. Shuaibi, L. Z. Kozinsky, and B. Kozinsky.
+S. Batzner, A. Musaelian, L. Sun, M. Geiger, J. P. Mailoa, M. Kornbluth, N. Molinari, T. E. Smidt, and B. Kozinsky.
 \newblock E(3)-Equivariant Graph Neural Networks for Data-Efficient and Accurate Interatomic Potentials.
 \newblock \emph{Nature Communications}, 13:2453, 2022.
 
@@ -985,7 +985,7 @@ I. Batatia, D. P. Kovacs, G. Simm, C. Ortner, and G. Cs\'anyi.
 \newblock \emph{NeurIPS}, 2022.
 
 \bibitem{gemnet2021}
-J. Klicpera, J. Giri, J. T. S. K. Chmiela, K. T. Sch\"utt, and K.-R. M\"uller.
+J. Gasteiger, F. Becker, and S. G\"unnemann.
 \newblock GemNet: Universal Directional Graph Neural Networks for Molecules.
 \newblock \emph{NeurIPS}, 2021.
 
