@@ -54,7 +54,7 @@
 \begin{abstract}
 We study geometric deep learning for point-cloud classification, focusing on models that exploit rotation equivariance through Tensor Field Networks (TFNs).
 Equivariance requires consistent basis functions, Clebsch--Gordan couplings, and gated nonlinearities; we identify the implementation choices required for correctness and verify them numerically.
-We develop a family of TFN architectures generalized to arbitrary ambient dimension $n$, including improved variants with covariance features, attention pooling, and multi-branch fusion.
+We develop a family of TFN architectures generalized to arbitrary ambient dimension $n$, including improved variants with covariance features, attention pooling, and a multi-branch fusion model (HybridGTTFN) that combines TFN, distance-matrix, and PointNet branches.
 On a 21-dataset UCR time-series benchmark recast as point-cloud problems via time-delay embedding, we evaluate all models under two protocols: a best-configuration protocol (selecting optimal hyperparameters per model) and a fixed-configuration protocol (XGBoost classifier, 100\% training fraction).
 Under the best-configuration protocol, the best improved TFN variant (HybridGTTFN) achieves 79.2\% mean accuracy, above DTW k-NN (73.6\%).
 However, under the fixed-configuration protocol, the simpler distance-matrix and PointNet baselines perform comparably (73.1\% and 73.4\%) to all TFN variants, and no pairwise comparison survives Bonferroni correction.
@@ -132,7 +132,7 @@ Recent surveys \cite{hensel2021survey,moor2020topoae} offer broader context for 
 \section{Models}
 \label{sec:models}
 
-We describe four model families evaluated in this study: distance-matrix models, PointNet-style models, and two variants of Tensor Field Networks.
+We describe three model families evaluated in this study: distance-matrix models, PointNet-style models, and Tensor Field Network (TFN) variants.
 
 \subsection{DistanceMatrixRaggedModel}
 
@@ -176,7 +176,6 @@ Feed the pooled representation to the final MLP\;
 
 The \texttt{TensorFieldNetwork} class implements an SO(3)-equivariant point-cloud classifier for 3D inputs, serving as the canonical geometric baseline in this study \cite{tfn2018}.
 The $n$-dimensional generalization was motivated by a stronger symmetry goal: robustness to both permutations and rigid isometries, rather than only one at a time.
-This TFN family is the main architectural contribution of the project.
 
 At a schematic level (illustrated in \cref{fig:tfn_arch}), a TFN layer forms geometric messages from relative positions, couples them with feature tensors, and projects the result onto irreducible channels via Clebsch--Gordan coefficients:
 \[
@@ -188,7 +187,7 @@ where $\Phi_\ell$ is a radial encoding, $b_\ell$ a geometric basis, and $\Pi_\el
 This is the algebraic mechanism that makes the network equivariant.
 
 \paragraph{GTTensorFieldNetworkV2}
-The \texttt{GTTensorFieldNetworkV2} model is the most developed TFN variant.
+The \texttt{GTTensorFieldNetworkV2} (``GT'' for Gelfand--Tsetlin, referring to the generalized basis used for $n\ge 4$) model is the most developed TFN variant.
 It generalizes the base TFN to arbitrary ambient dimension $n$ and adds several practical improvements:
 \begin{itemize}
     \item sparse k-nearest-neighbor neighborhoods instead of dense all-pairs interactions;
@@ -388,7 +387,7 @@ MultiInputModel & 489k & 5 & 8 \\
 
 \section{Experimental Setup} \label{sec:experiments}
 
-The experiments are organized around three complementary settings: synthetic point-cloud tasks, UCR time-series benchmarks recast as point-cloud problems, and notebook-driven exploratory analyses.
+The experiments are organized around two complementary settings: synthetic point-cloud tasks and UCR time-series benchmarks recast as point-cloud problems.
 The common objective is to compare geometric inductive biases under clean and perturbed inputs.
 
 \subsection{Evaluation Protocol}
@@ -425,20 +424,85 @@ This suite provides widely varying sample sizes (as few as 15 training samples f
 Each dataset is evaluated at training fractions of $10\%, 20\%, 30\%, 50\%, 70\%$ and $100\%$, over four random trials.
 An XGBoost classifier is trained on each model's learned descriptors.
 All runs use fixed random seeds, making every number exactly reproducible.
+DTW k-NN uses dynamic time warping with $k=1$ (1-NN) and the sakoe-chiba band constraint; Euclidean k-NN uses the same $k=1$ setting with raw time-series values.
 
 \section{Results} \label{sec:results}
 
 \subsection{Main UCR Classification Results}
 
 We present results under two evaluation protocols.
-The \emph{best-configuration protocol} (Tables~\ref{tab:ucr_main} and~\ref{tab:ucr_full}) reports the best accuracy achieved across all training fractions (10--100\%), trials, and multi-scale configurations---an inflated upper bound that measures what each model can achieve with favorable hyperparameters.
-The \emph{fixed-configuration protocol} (Table~\ref{tab:ucr_honest}) reports mean accuracy at 100\% training fraction with XGBoost, averaged over 4 trials---the more reliable estimate of model quality.
-Because the enhanced runs are fully seeded (including XGBoost), every number in the table is exactly reproducible.
+The \emph{fixed-configuration protocol} (Table~\ref{tab:ucr_honest}) reports mean accuracy at 100\% training fraction with XGBoost, averaged over 4 trials---the primary, more reliable estimate of model quality.
+The \emph{best-configuration protocol} (Tables~\ref{tab:ucr_main} and~\ref{tab:ucr_full}) reports the best accuracy achieved across all training fractions (10--100\%), trials, and multi-scale configurations (separate model runs at different k-NN neighborhood sizes; the best neighborhood size is selected per dataset)---an inflated upper bound that measures what each model can achieve with favorable hyperparameters.
+Because the enhanced runs are fully seeded (including XGBoost), every number in both tables is exactly reproducible.
 
 \looseness=-1
 \begin{table}[ht]
 \centering
-\caption{UCR classification accuracy (\%): best accuracy on the 10-dataset benchmark at 100\% training fraction, selecting the best configuration per model. Mean $\pm$ std is across the 10 datasets. Classical baselines in Table~\ref{tab:ucr_baselines}.}
+\caption{Mean accuracy (\%) at 100\% training fraction, XGBoost classifier, averaged over 4 trials (mean $\pm$ std across 21 datasets). This is the primary evaluation protocol.}
+\label{tab:ucr_honest}
+\small
+\begin{tabular}{lc}
+\toprule
+Model & Mean $\pm$ Std (21 ds) \\
+\midrule
+\textbf{PersNet} & \textbf{73.4 $\pm$ 11.5} \\
+\textbf{DMR} & \textbf{73.1 $\pm$ 14.0} \\
+HybridGTTFN$^{\ddagger}$ & 70.7 $\pm$ 14.4 \\
+OnEquivariantTFN & 70.3 $\pm$ 14.7 \\
+TensorFieldNetwork & 69.2 $\pm$ 13.8 \\
+AttentionTFN & 68.1 $\pm$ 14.8 \\
+CrossAttn$^{\ddagger}$ & 66.3 $\pm$ 12.7 \\
+GTTFNv2$^{\ddagger}$ & 66.0 $\pm$ 15.3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Under the fixed-configuration protocol, the two simplest models---PersNet (73.4\%) and DMR (73.1\%)---lead all TFN variants.
+The best-configured HybridGTTFN drops to 70.7\%, below both PersNet and DMR.
+No pairwise comparison between any two models achieves significance after Bonferroni correction (Section~\ref{sec:significance}).
+This is the paper's central negative result: under honest evaluation, the equivariant TFN family does not outperform simple baselines on UCR data.
+DTW k-NN (73.6\%, computed with $k\!=\!1$ and sakoe-chiba band constraint) matches PersNet exactly, confirming that at small sample sizes the benchmark is dominated by training set size rather than model architecture.
+
+\paragraph{Comparison with published baselines.}
+Table~\ref{tab:sota} compares the models in this study against published results on the same 21 datasets.
+Under the fixed-configuration protocol, no model in this study exceeds DTW: the best fixed-config result is PersNet at 73.4\%, statistically indistinguishable from DTW's 73.6\%.
+MiniRocket (88.9\%) and ResNet (87.3\%) achieve substantially higher accuracy, but these are time-series-specific architectures that exploit the sequential structure of the data---a structural advantage unavailable to rotation-equivariant point-cloud models.
+The gap between the TFN family and these methods reflects an inductive bias mismatch: TFNs are designed for rotation-equivariant classification of unordered point clouds, not for exploiting temporal autocorrelation.
+
+\begin{table}[ht]
+\centering
+\caption{Comparison with published baselines on the 21-dataset UCR benchmark (mean accuracy, \%). MiniRocket and ResNet results are from \cite{minirocket2021,resnet2019}. DTW, Euclidean k-NN, and Gudhi values are from this study ($k\!=\!1$ for both k-NN methods).}
+\label{tab:sota}
+\small
+\begin{tabular}{lc}
+\toprule
+Method & Accuracy \\
+\midrule
+MiniRocket \cite{minirocket2021} & \textbf{88.9} \\
+ResNet \cite{resnet2019} & 87.3 \\
+DTW 1-NN & 73.6 \\
+Euclidean 1-NN & 71.6 \\
+\midrule
+Gudhi persistence images (clean) & 68.0 \\
+Gudhi persistence images (noisy) & 67.1 \\
+\midrule
+PersNet (this study) & 73.4 \\
+DMR (this study) & 73.1 \\
+HybridGTTFN$^{\ddagger}$ (this study) & 70.7 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Statistical significance} \label{sec:significance}.
+Paired $t$-tests at 100\% training fraction (XGBoost, per-dataset means over 4 trials) yield the following: HybridGTTFN vs.\ GTTFNv2 ($p=0.036$), HybridGTTFN vs.\ CrossAttn ($p=0.026$), HybridGTTFN vs.\ DMR ($p=0.577$), HybridGTTFN vs.\ PersNet ($p=0.951$), GTTFNv2 vs.\ DMR ($p=0.243$), PersNet vs.\ DMR ($p=0.596$).
+With 9 models, there are 36 possible pairwise comparisons; a Bonferroni correction requires $p<0.05/36\approx0.0014$ for significance.
+No pairwise comparison meets this threshold.
+None of the reported differences between models are statistically significant after correction, which is consistent with the interpretation that the TFN family's advantage in the ``best accuracy'' tables is driven by configuration sensitivity rather than a fundamental architectural difference.
+
+\looseness=-1
+\begin{table}[ht]
+\centering
+\caption{UCR classification accuracy (\%): best accuracy on the 10-dataset benchmark, selecting the best configuration per model (across all fractions, trials, and multi-scale configs). Mean $\pm$ std is across the 10 datasets. Classical baselines in Table~\ref{tab:sota}.}
 \label{tab:ucr_main}
 \footnotesize
 \begin{tabular}{lcccccccccc|c}
@@ -457,7 +521,7 @@ DMR & 72.0 & \textbf{88.0} & 92.2 & 73.3 & 91.4 & 82.8 & 44.0 & 65.8 & 59.2 & 58
 \bottomrule
 \end{tabular}
 \footnotesize
-$^{\ddagger}$ Improved variants; best across all fractions, trials, and multi-scale configs.
+$^{\ddagger}$ Improved variants; best across all fractions, trials, and multi-scale configs. Values are upper bounds, not expected test performance (see Table~\ref{tab:ucr_honest}).
 \end{table}
 
 \begin{table}[ht]
@@ -485,108 +549,10 @@ MPInp & 69.0 & 55.4 & 77.2 & 80.0 & 89.2 & 74.0 & 71.4 & 59.4 & 49.4 & 69.1 & 50
 Abbreviations: Chl\,=\,ChlorineConcentration, DPx\,=\,DistalPhalanxOutlineCorrect, ECG2/5\,=\,ECG200/5000, GunP\,=\,GunPoint, ItaP\,=\,ItalyPowerDemand, MedI\,=\,MedicalImages, MPAg/MPCx/MPTW\,=\,MiddlePhalanx variants, Phal\,=\,PhalangesOutlinesCorrect, Pla\,=\,Plane, PPAg/PPTW\,=\,ProximalPhalanx variants, So1/So2\,=\,SonyAIBORobotSurface1/2, TwoL\,=\,TwoLeadECG, GPOY\,=\,GunPointOldVersusYoung, PwrC\,=\,PowerCons, DMR\,=\,DistanceMatrixRaggedModel, MPInp\,=\,MultiInputModel.
 \end{table}
 
-\begin{table}[ht]
-\centering
-\caption{Classical baselines on the 21-dataset UCR benchmark (\% accuracy, mean over all datasets).}
-\label{tab:ucr_baselines}
-\small
-\begin{tabular}{lc}
-\toprule
-Method & Accuracy \\
-\midrule
-DTW k-NN & 73.6 \\
-Euclidean k-NN & 71.6 \\
-Gudhi persistence images (clean inputs) & 68.0 \\
-Gudhi persistence images (noisy inputs) & 67.1 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-Among the learned models on the 10-dataset benchmark, \texttt{GTTFNv2} leads at 84.1\%, followed by \texttt{HybridGTTFN} (83.9\%), \texttt{PersNet} (76.8\%), and the base TFN variants (69--70\%).
-On the full 21-dataset benchmark, the ranking shifts: \texttt{HybridGTTFN} leads at 79.2\%, followed by \texttt{GTTFNv2} (78.2\%), \texttt{CrossAttn} (77.6\%), \texttt{MultiInputModel} (71.8\%), and \texttt{PersNet} (71.7\%).
-All three improved TFN variants outperform every non-TFN model on the 21-dataset benchmark.
-
-\begin{figure}[ht]
-\centering
-\includegraphics[width=0.85\textwidth]{images/plots/enhanced_per_model_comparison.png}
-\caption{Per-model accuracy at 100\% training fraction, averaged over available datasets (9--21 depending on the model). Error bars are standard deviation across datasets. PersNet and DMR were evaluated on the initial 10-dataset subset; GTTFNv2, CrossAttn, and HybridGTTFN on the full 21-dataset benchmark.}
-\label{fig:per_model_main}
-\end{figure}
-
-Tables~\ref{tab:ucr_main} and~\ref{tab:ucr_full} report the \emph{best accuracy} achieved by each model across all training fractions (10--100\%), trials (4), and multi-scale configurations.
-This protocol measures the upper bound of what each model can achieve with favorable hyperparameters, but it introduces selection bias: the best configuration for each (model, dataset) pair may differ, and reporting only the best value inflates apparent performance.
-\looseness=-1
-\begin{table}[ht]
-\centering
-\caption{Mean accuracy (\%) at 100\% training fraction, XGBoost classifier, averaged over 4 trials (mean $\pm$ std across 21 datasets). This is the primary evaluation protocol.}
-\label{tab:ucr_honest}
-\small
-\begin{tabular}{lc}
-\toprule
-Model & Mean $\pm$ Std (21 ds) \\
-\midrule
-\textbf{PersNet} & \textbf{73.4 $\pm$ 11.5} \\
-\textbf{DMR} & \textbf{73.1 $\pm$ 14.0} \\
-HybridGTTFN$^{\ddagger}$ & 70.7 $\pm$ 14.4 \\
-OnEquivariantTFN & 70.3 $\pm$ 14.7 \\
-TensorFieldNetwork & 69.2 $\pm$ 13.8 \\
-GTTFNv2$^{\ddagger}$ & 66.0 $\pm$ 15.3 \\
-CrossAttn$^{\ddagger}$ & 66.3 $\pm$ 12.7 \\
-AttentionTFN & 68.1 $\pm$ 14.8 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-Under the fixed-configuration protocol (Table~\ref{tab:ucr_honest}), the two simplest models---PersNet (73.4\%) and DMR (73.1\%)---lead all TFN variants.
-The best-configured HybridGTTFN drops to 70.7\%, below PersNet and DMR, while GTTFNv2 drops from 78.2\% to 66.0\%---a 12.2-point collapse.
-No pairwise comparison between any two models achieves significance after Bonferroni correction (Section~\ref{sec:significance}).
-This is the paper's central negative result: under honest evaluation, the equivariant TFN family does not outperform simple baselines on UCR data.
-
-\paragraph{Comparison with published baselines.}
-Table~\ref{tab:sota} compares the models in this study against published results on the same 21 datasets.
-DTW k-NN (73.6\%) is the appropriate competitive baseline for small-$N$ time-series classification: it is well-known to be difficult to beat on the UCR archive with limited training data, and our best-configured models do exceed it (HybridGTTFN: 79.2\%, GTTFNv2: 78.2\%).
-However, under the fixed-configuration protocol, no model in this study exceeds DTW: the best fixed-config result is PersNet at 73.4\%, statistically indistinguishable from DTW's 73.6\%.
-MiniRocket (88.9\%) and ResNet (87.3\%) achieve substantially higher accuracy, but these are time-series-specific architectures that exploit the sequential structure of the data---a structural advantage unavailable to rotation-equivariant point-cloud models.
-The gap between the TFN family and these methods is not a fair comparison of architectural quality but a reflection of the inductive bias mismatch: TFNs are designed for rotation-equivariant classification of unordered point clouds, not for exploiting temporal autocorrelation.
-
-\begin{table}[ht]
-\centering
-\caption{Comparison with published baselines on the 21-dataset UCR benchmark (mean accuracy, \%). MiniRocket and ResNet results are from \cite{minirocket2021,resnet2019}. DTW and Gudhi values are from this study.}
-\label{tab:sota}
-\small
-\begin{tabular}{lc}
-\toprule
-Method & Accuracy \\
-\midrule
-MiniRocket \cite{minirocket2021} & \textbf{88.9} \\
-ResNet \cite{resnet2019} & 87.3 \\
-DTW k-NN & 73.6 \\
-Euclidean k-NN & 71.6 \\
-\midrule
-HybridGTTFN$^{\ddagger}$ (this study) & 79.2 \\
-GTTFNv2$^{\ddagger}$ (this study) & 78.2 \\
-CrossAttn$^{\ddagger}$ (this study) & 77.6 \\
-\midrule
-Gudhi persistence images (clean) & 68.0 \\
-Gudhi persistence images (noisy) & 67.1 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-Key observations:
-\begin{itemize}
-    \item \texttt{DistanceMatrixRaggedModel} leads on ECG (Table~\ref{tab:family_type}), where clean distance structure dominates.
-    \item PersNet is highly unstable: it either trains to a competitive accuracy or collapses entirely, with no intermediate regime.
-    \item Accuracy improves with training fraction for every model (\cref{fig:model_data_efficiency}), though the gains flatten beyond 50\%.
-    \item Training curves on CBF (\cref{fig:training_curves}) show that GTTFNv2 requires $\sim$25 epochs to reach 80\% accuracy. PersNet and DMR converge fastest (within 10--20 epochs), while HybridGTTFN requires $\sim$40 epochs. AttnTFN reaches 93\% mid-training but becomes unstable, falling back to 80\% by epoch 200.
-    \item Timing benchmarks (\cref{fig:timing} and \cref{fig:accuracy_cost}) confirm the 6--130$\times$ cost gap between TFN and non-equivariant models, with HybridGTTFN being the most expensive at 530\,ms per pass.
-\end{itemize}
-
-\paragraph{Statistical significance} \label{sec:significance}.
-Paired $t$-tests at 100\% training fraction (XGBoost, per-dataset means over 4 trials) yield the following: HybridGTTFN vs.\ GTTFNv2 ($p=0.036$), HybridGTTFN vs.\ CrossAttn ($p=0.026$), HybridGTTFN vs.\ DMR ($p=0.577$), HybridGTTFN vs.\ PersNet ($p=0.951$), GTTFNv2 vs.\ DMR ($p=0.243$), PersNet vs.\ DMR ($p=0.596$).
-With 9 models, there are 36 possible pairwise comparisons; a Bonferroni correction requires $p<0.05/36\approx0.0014$ for significance.
-No pairwise comparison meets this threshold.
-None of the reported differences between models are statistically significant after correction, which is consistent with the interpretation that the TFN family's advantage in the ``best accuracy'' tables is driven by configuration sensitivity rather than a fundamental architectural difference.
+Under the best-configuration protocol, \texttt{HybridGTTFN} leads at 79.2\% on the 21-dataset benchmark, followed by \texttt{GTTFNv2} (78.2\%) and \texttt{CrossAttn} (77.6\%).
+However, these numbers should be interpreted as upper bounds: they select the best configuration per (model, dataset) pair without a held-out validation set, inflating apparent performance.
+The gap between best-config and fixed-config protocols is substantial---HybridGTTFN drops from 79.2\% to 70.7\% (8.5 points), and GTTFNv2 drops from 78.2\% to 66.0\% (12.2 points)---demonstrating that configuration sensitivity, not architectural superiority, is the primary driver of apparent TFN gains.
+Notable per-dataset results include UMD, where CrossAttn reaches 95.1\% under best-config selection (vs.\ 59.0\% for the base TFN), and GunPointOldVersusYoung, where GTTFNv2 achieves 100\%---illustrating the degree of per-dataset configuration sensitivity.
 
 \subsection{Isometry Robustness} \label{sec:isometry}
 
@@ -622,18 +588,20 @@ GTTensorFieldNetworkV2$_\mathrm{GS}$ & 7.7e-2 & 2.3 \\
 Two conclusions follow.
 First, the distance-based models are \emph{exactly} invariant to rigid motions: rotating and translating the cloud leaves the model output unchanged up to floating-point round-off, and the classification accuracy does not degrade.
 Second, the coordinate-based PointNet baseline is measurably affected, drifting by about $10^{-2}$ in PV space and losing 9.3 points of accuracy under rotation.
-This is precisely the gap that the TFN family closes by construction: the equivariance tests of Section~\ref{sec:equiv_verif} show that $n=3$ TFN outputs change by at most ${\sim}10^{-7}$ under arbitrary rotations.
-The \texttt{GTTensorFieldNetworkV2} model shows intermediate robustness: its PV-space drift ($7.7\times10^{-2}$) exceeds the distance-based models but remains below PointNet, and the 2.3-point accuracy drop is modest---consistent with the higher-order geometric features being partially but not fully invariant after the readout stage.
+The \texttt{GTTensorFieldNetworkV2}$_\mathrm{GS}$ (Gaussian-smoothed variant) shows the largest PV-space drift ($7.7\times10^{-2}$, worse than PointNet's $1.0\times10^{-2}$), though its accuracy drop is smaller (2.3pp vs.\ 9.3pp for PointNet).
+Note that this ablation applies SO(2) rotations to 3D point clouds---a regime the SO(3)-equivariant TFN was not designed for (it is equivariant under full 3D rotations, not planar ones), and the Gaussian smoothing in the GS variant may introduce additional sensitivity.
+The equivariance tests of Section~\ref{sec:equiv_verif} confirm that for the intended SO(3) regime, $n=3$ TFN outputs change by at most ${\sim}10^{-7}$ under arbitrary 3D rotations.
 The isometry ablation currently covers only the models whose checkpoints were available for \texttt{CBF}; extending it to the full UCR suite is straightforward with the same script.
 
 \subsection{Point Density Ablation} \label{sec:density}
 
 We evaluate test-time robustness to point cloud subsampling on \texttt{CBF}.
-For each trained model, we randomly keep $y\%$ of points in each test sample ($y \in \{10, 20, 30, 50, 70, 100\}$) and evaluate classification accuracy.
+For each trained model, we randomly keep $y\%$ of points in each test sample ($y \in \{10, 30, 50, 70, 100\}$) and evaluate classification accuracy.
 This tests how well each model handles incomplete geometric information at test time.
+All results are single-trial ($n\!=\!1$) on 15 training samples, so variance is high; these numbers are indicative rather than statistically robust.
 \begin{table}[ht]
 \centering
-\caption{Point density ablation on \texttt{CBF}: test accuracy as a function of the fraction of kept points. Note: some model names differ from the main benchmark (see Table~\ref{tab:isometry}).}
+\caption{Point density ablation on \texttt{CBF} (single trial): test accuracy as a function of the fraction of kept points. Note: some model names differ from the main benchmark (see Table~\ref{tab:isometry}).}
 \label{tab:density}
 \small
 \begin{tabular}{lccccc}
@@ -651,7 +619,7 @@ ScalarInputMLP & 0.382 & 0.414 & 0.480 & 0.468 & 0.534 \\
 
 The distance-based ScalarDistanceDeepSet and MultiInputModel are the most robust to subsampling, retaining most of their full-density accuracy even at 10\% of the points.
 The coordinate-based PointNetTutorial degrades more steadily as points are removed.
-The non-monotonic behaviour of DistanceMatrixRaggedModel (including a sharp drop at 50\%) reflects the high variance of single-trial ablations on a small training set ($n_\mathrm{train}=15$).
+The non-monotonic behaviour of DistanceMatrixRaggedModel (including a sharp drop at 50\%) reflects the high variance of single-trial ablations on a small training set ($n_\mathrm{train}=15$); this result should not be interpreted as a systematic trend.
 
 \subsection{Shape Ablation on Synthetic Geometries} \label{sec:shape_ablation}
 
@@ -660,7 +628,7 @@ Each flag is tested for 20 epochs over two random seeds.
 
 \begin{table}[ht]
 \centering
-\caption{GTTensorFieldNetworkV2 flag-variant ablation on synthetic circles. \textbf{Clean acc}: accuracy on uncorrupted test set. \textbf{Noisy acc}: accuracy on corrupted test set. Chance level is 33.3\% (3 classes). 2-trial mean; std $<0.01$ throughout.}
+\caption{GTTensorFieldNetworkV2 flag-variant ablation on synthetic circles. Columns show test accuracy on clean and corrupted test sets for each synthetic task. Chance level is 33.3\% (3 classes). 2-trial mean; std $<0.01$ throughout.}
 \label{tab:shape_ablation}
 \small
 \begin{tabular}{lcccc}
@@ -701,14 +669,6 @@ Flags targeting the readout (dtm-readout, pool-max, consistency-lam1.0) actively
 When the model is trained directly on the corrupted distribution, most variants reach $\geq$0.999 on both clean and noisy test sets, confirming that the failure is a distribution-shift problem rather than a fundamental capacity limitation.
 These results are limited to a single synthetic dataset with 2-trial averages; the conclusions should be verified on the full UCR suite with more trials before generalizing.
 
-\subsection{HybridGTTFN: Multi-Branch Fusion} \label{sec:hybrid_gttfn}
-
-The \texttt{HybridGTTFN} architecture is described in Section~\ref{sec:models}; here we report its empirical performance.
-This design targets datasets where scalar distances (\texttt{ItalyPowerDemand}, \texttt{CBF}) or raw coordinates carry the primary discriminative signal.
-The PointNet branch addresses datasets like ECG200 where coordinate structure dominates, and the distance-matrix branch covers cases where pairwise distances are more informative than the sparsified k-NN graph used by the TFN backbone.
-Local validation yields 80.0\% on CBF and 81.0\% on ECG200 (XGBoost), competitive with the best single-family models.
-On the full 21-dataset benchmark, HybridGTTFN achieves 79.2\%, the highest accuracy among all models, with strong performance on CBF (92.0\%), ItalyPowerDemand (92.4\%), and ECG5000 (92.6\%).
-
 \subsection{Architecture Family Comparison} \label{sec:family}
 
 We aggregate results across all experiments to compare the three model families.
@@ -716,12 +676,12 @@ The TFN family includes TensorFieldNetwork, OnEquivariantTFN, AttentionTFN, Stoc
 PointNet includes PersNet, MultiInputModel, and PointNetTutorial.
 DMR is DistanceMatrixRaggedModel.
 
-Taking the best non-degenerate model in each family on every dataset, the oracle average accuracy on the 21-dataset benchmark is 83.2\% for the TFN family, 75.3\% for PointNet, and 71.4\% for DMR.
-DMR wins on 2 of 21 datasets, PointNet on 2, and TFN on 17, with no ties.
-Table~\ref{tab:family_type} breaks down the best-per-family accuracy by dataset type.
+A direct per-model comparison under the honest protocol (Table~\ref{tab:ucr_honest}) shows that the TFN family's best representative (HybridGTTFN, 70.7\%) is below both PersNet (73.4\%) and DMR (73.1\%).
+The best-config protocol (Table~\ref{tab:ucr_full}) inflates the TFN family's appearance because it contains more models (7) and thus more opportunities to find a lucky configuration per dataset.
+Table~\ref{tab:family_type} breaks down the per-model best accuracy by dataset type, computed by selecting the single best-performing model across all families on each task and then averaging by category.
 \begin{table}[ht]
 \centering
-\caption{Best-per-family accuracy (\%) averaged by dataset type across the 21-dataset benchmark (oracle: best model in each family per task). ECG\,=\,\{ECG200, ECG5000\}; Image\,=\,\{MedicalImages, MiddlePhalanx variants, Plane, Phalanges, ProximalPhalanx\}; Motion\,=\,\{GunPoint, ItalyPowerDemand, TwoLeadECG, GunPointOldVersusYoung, UMD\}; Sensor\,=\,\{Sony1, Sony2, PowerCons\}; Simulated\,=\,\{CBF, Chlorine, DistalPhalanx\}.}
+\caption{Best-per-model accuracy (\%) averaged by dataset type: the single highest-scoring model across all families is selected per task, then averaged by category. ECG\,=\,\{ECG200, ECG5000\}; Image\,=\,\{MedicalImages, MiddlePhalanx variants, Plane, Phalanges, ProximalPhalanx\}; Motion\,=\,\{GunPoint, ItalyPowerDemand, TwoLeadECG, GunPointOldVersusYoung, UMD\}; Sensor\,=\,\{Sony1, Sony2, PowerCons\}; Simulated\,=\,\{CBF, Chlorine, DistalPhalanx\}.}
 \label{tab:family_type}
 \small
 \begin{tabular}{lccccc}
@@ -735,10 +695,10 @@ DMR & \textbf{90.1} & 68.1 & 74.6 & 64.2 & 69.8 \\
 \end{tabular}
 \end{table}
 
-DMR leads on ECG (90.1\% vs.\ 88.3\%), where pairwise distance structure dominates, but TFN leads on all other categories.
-The largest TFN advantage appears on Sensor (+21.6pp over DMR) and Motion (+19.8pp) datasets.
+DMR leads on ECG (90.1\% vs.\ 88.3\%), where pairwise distance structure dominates, but the best single model on each task comes from the TFN family on all other categories under best-config selection.
+The largest advantage appears on Sensor (+21.6pp over DMR) and Motion (+19.8pp) datasets.
 On Image, the families are more closely matched (68--77\%).
-The improved variants demonstrate that targeted architectural improvements---multi-branch fusion, covariance features, and bottleneck widening---can substantially narrow the gap between equivariant and non-equivariant models on their weaker categories.
+These per-task bests are selected from best-config results and reflect configuration sensitivity; under the honest protocol, no family consistently dominates.
 
 \subsection{Equivariance Verification} \label{sec:equiv_verif}
 
@@ -766,6 +726,8 @@ GTTensorFieldNetworkV2 (3 layers) & 4 & 5.7e-4 \\
 For the $SO(3)$ models the equivariance error is ${\sim}10^{-7}$, at floating-point precision: the outputs are invariant to arbitrary rotations to the precision of the computation.
 The larger error for $n=4$ ($5.7\times10^{-4}$) comes from the higher sensitivity of the Gelfand--Tsetlin basis and quadrature-based couplings, but it remains nearly one order of magnitude below the tolerance.
 Reflection invariance is verified exactly ($0.0$ difference) for the O($n$)-variant \texttt{OnEquivariantTensorFieldNetwork}; the SO($n$) models are, as expected, not reflection-invariant.
+The base TFN variants that share the same core tensor-product layer inherit the same equivariance guarantee by construction.
+StochasticTensorFieldNetwork (stochastic depth applied to the same TFN layers) and HybridGTTFN (TFN branch using the same equivariant layers) were not independently verified, but their equivariant components use the same verified code path.
 These checks are reproducible from the module self-tests (\texttt{python gt\_tfn\_layer.py} and the model registry).
 
 \subsection{Limitations} \label{sec:limitations}
@@ -827,7 +789,7 @@ The honest comparison (Table~\ref{tab:ucr_honest}) and the failure of significan
 
 Third, rotation equivariance is a valuable inductive bias for problems where the input geometry genuinely varies under rotation, but it is not universally beneficial.
 On the UCR datasets, where the time-delay embedding produces pre-aligned point clouds whose class structure is not primarily rotation-dependent, the equivariant TFN models do not outperform simpler baselines.
-The isometry experiments (Section~\ref{sec:equiv_verif}) confirm that the TFN family achieves exact rotation invariance, but this property has limited value when the task does not require it.
+The equivariance verification (Section~\ref{sec:equiv_verif}) confirms that the TFN family achieves exact rotation invariance, but this property has limited value when the task does not require it.
 
 \section{Future Work}
 
@@ -888,6 +850,15 @@ On the full 21-dataset benchmark, GTTensorFieldNetworkV2 improves from 68.3\% to
 
 This appendix collects plots from the enhanced UCR benchmark results (\texttt{expes/plot\_enhanced.py}).
 All accuracies are trial means at 100\% training fraction unless stated otherwise.
+
+\subsection{Per-Model Accuracy Comparison}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{images/plots/enhanced_per_model_comparison.png}
+\caption{Per-model accuracy at 100\% training fraction, averaged over available datasets (9--21 depending on the model). Error bars are standard deviation across datasets.}
+\label{fig:per_model_main}
+\end{figure}
 
 \subsection{Data Efficiency}
 
